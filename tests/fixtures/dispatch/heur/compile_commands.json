@@ -1,0 +1,1 @@
+[{"directory": ".", "file": "heur.cpp", "command": "c++ -std=c++23 -c heur.cpp -o heur.o"}]

@@ -1,0 +1,12 @@
+{
+ "schema": 1,
+ "baseline_sha256": "0c75a985b1f0ac5c2170a37e7ad6de6902dbadd28b23afa03ca1d54f77023d43",
+ "corpus": {
+  "groundtruth_sha256": "29f27d5d8423b8ad87834ca182fef0f2c9ec2b8bef4abe056a77117a8de9ad2e",
+  "compile_commands_sha256": "b6eef81ce26b109cf7b628ae5612c83708befa23dda185c2b4c1b13476235c6a",
+  "pch_sha256": "97f88cdba8e8280a29ec0b3f90d814295584632950bbab1b96b9675183313872"
+ },
+ "engine": {
+  "gold_engine_version": "15.1.0.0"
+ }
+}

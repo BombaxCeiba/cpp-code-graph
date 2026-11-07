@@ -1,0 +1,12 @@
+[
+  {
+    "directory": ".",
+    "file": "src/counter.cpp",
+    "command": "c++ -std=c++23 -I . -I X:/ccg-fake/toolchain/include/c++/v1 -I X:/ccg-fake/toolchain/include -c src/counter.cpp -o counter.o"
+  },
+  {
+    "directory": ".",
+    "file": "src/main.cpp",
+    "command": "c++ -std=c++23 -I . -I X:/ccg-fake/toolchain/include/c++/v1 -I X:/ccg-fake/toolchain/include -c src/main.cpp -o main.o"
+  }
+]

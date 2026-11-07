@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{18888888-8888-8888-8888-888888888888}</ProjectGuid>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <VCProjectVersion>18.0</VCProjectVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v145</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel><LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalOptions>/Fo$(MSBuildProjectDirectory)\hardobj\ %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link><SubSystem>Console</SubSystem><OutputFile>$(MSBuildProjectDirectory)\hard.exe</OutputFile></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="adv.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="adv.cpp.dummy">
+      <Message>leaky step</Message>
+      <Command>cmd /c echo leak &gt; "$(MSBuildProjectDirectory)\leak\leaked.txt"</Command>
+      <Outputs>$(MSBuildProjectDirectory)\leak\leaked.txt</Outputs>
+    </CustomBuild>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

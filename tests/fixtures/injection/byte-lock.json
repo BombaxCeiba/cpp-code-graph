@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "summary": "Byte-lock expectations for the PreToolUse Grep injection. Each entry pins the exact additionalContext bytes the real hook processor must render for one query. The corpus sources live at the path below; the reference database is rebuilt from them at test time (never committed), so the locked bytes carry relative paths only. Regenerate with CCG_BYTELOCK_REGEN=1 (see the README beside this file) after any intentional renderer change.",
+  "corpus": "tests/fixtures/injection/corpus",
+  "entries": [
+    {
+      "id": "unique-qualified",
+      "pattern": "Alpha::lookup",
+      "expect": "[ccg] Alpha::lookup(int) — function of Alpha\n[ccg] def: alpha/lookup.cpp:6:5\n[ccg] same-name(1): Beta::lookup @beta/lookup.cpp:6 — hits at those coords belong to other symbols, not this one\n[ccg] callers(top3): main (main.cpp:6, x2)\n[ccg] dispatch: none (direct calls only)"
+    },
+    {
+      "id": "same-name-list",
+      "mode": "list",
+      "pattern": "lookup",
+      "expect": "[ccg] \"lookup\" matches 2 same-name symbols (no dominant one) — candidates by references:\n[ccg] - Alpha::lookup — function, 2 refs @alpha/lookup.cpp:6\n[ccg] - Beta::lookup — function, 0 refs @beta/lookup.cpp:6\n[ccg] re-grep with a qualified name (e.g. Alpha::lookup) or a path filter to pin one symbol\n[ccg] full same-name list in one shot: ccg query lookup"
+    },
+    {
+      "id": "path-narrowed",
+      "pattern": "lookup",
+      "path": "beta",
+      "expect": "[ccg] Beta::lookup(int) — function of Beta\n[ccg] def: beta/lookup.cpp:6:5\n[ccg] same-name(1): Alpha::lookup @alpha/lookup.cpp:6 — hits at those coords belong to other symbols, not this one\n[ccg] callers(top3): 0 edges in call graph for this exact symbol; answer with no callers for it. Grep call-shape rows like x->lookup(...) or y.lookup(...) invoke the 1 other same-name symbols' impls (see same-name line), not this one\n[ccg] dispatch: none (direct calls only)"
+    }
+  ]
+}

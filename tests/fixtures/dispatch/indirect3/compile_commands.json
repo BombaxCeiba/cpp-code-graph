@@ -1,0 +1,3 @@
+[
+  {"directory": ".", "file": "main.cpp", "command": "c++ -std=c++23 -I ../indirect3-tmpl -c main.cpp -o main.o"}
+]

@@ -1,0 +1,12 @@
+[
+  {
+    "directory": ".",
+    "file": "lib.cpp",
+    "command": "c++ -std=c++23 -I . -I X:/ccg-fake/toolchain/include/c++/v1 -I X:/ccg-fake/toolchain/include -c lib.cpp -o lib.cpp.o"
+  },
+  {
+    "directory": ".",
+    "file": "main.cpp",
+    "command": "c++ -std=c++23 -I . -I X:/ccg-fake/toolchain/include/c++/v1 -I X:/ccg-fake/toolchain/include -c main.cpp -o main.cpp.o"
+  }
+]

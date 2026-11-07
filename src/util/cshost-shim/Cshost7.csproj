@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- C# 对象宿主垫片的 7 线程序集（CoreCLR 进程内宿主备选路线）。
+       与 51 线共享 CshostTable.cs 与 SelectStringCore.cs；语言版本钉
+       C# 5 保证两份程序集同源零分叉。仅承载 SelectStringCore——
+       MsbuildEval 只进 51 线（VS 自带 Microsoft.Build.dll 是 net472
+       程序集，CoreCLR 装不下 .NET Framework 家族），故本工程不引用
+       MsbuildEval.cs。产物被构建系统整读成字节数组嵌进 ccg 可执行
+       文件，本工程不产出运行包。 -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>5</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>ccg-cshost7</AssemblyName>
+    <RootNamespace>CcgCsHost7</RootNamespace>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <SatelliteResourceLanguages>en-US</SatelliteResourceLanguages>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Cshost7Entry.cs" />
+    <Compile Include="CshostTable.cs" />
+    <Compile Include="SelectStringCore.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- SMA 编译引用（运行期由 CCG_PSHOME 的 AssemblyResolve 从 pwsh
+         目录加载，此处只为 Language 命名空间的类型解析）。HintPath 由
+         构建脚本以 CCG_SMA_HINT 属性注入（MSI pwsh 目录或 NuGet
+         microsoft.powershell.sdk 的 ref 程序集）。 -->
+    <Reference Include="System.Management.Automation">
+      <HintPath>$(CCG_SMA_HINT)</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,5 @@
+[
+{"directory": ".", "file": "alpha/lookup.cpp", "command": "c++ -std=c++23 -I . -c alpha/lookup.cpp -o alpha/lookup.o"},
+{"directory": ".", "file": "beta/lookup.cpp", "command": "c++ -std=c++23 -I . -c beta/lookup.cpp -o beta/lookup.o"},
+{"directory": ".", "file": "main.cpp", "command": "c++ -std=c++23 -I . -c main.cpp -o main.o"}
+]

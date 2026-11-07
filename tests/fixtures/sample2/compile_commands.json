@@ -1,0 +1,32 @@
+[
+  {
+    "directory": ".",
+    "file": "infra/logger.cpp",
+    "command": "c++ -std=c++23 -I . -I X:/ccg-fake/toolchain/include/c++/v1 -I X:/ccg-fake/toolchain/include -c infra/logger.cpp -o logger.o"
+  },
+  {
+    "directory": ".",
+    "file": "market/order.cpp",
+    "command": "c++ -std=c++23 -I . -I X:/ccg-fake/toolchain/include/c++/v1 -I X:/ccg-fake/toolchain/include -c market/order.cpp -o order.o"
+  },
+  {
+    "directory": ".",
+    "file": "market/book.cpp",
+    "command": "c++ -std=c++23 -I . -I X:/ccg-fake/toolchain/include/c++/v1 -I X:/ccg-fake/toolchain/include -c market/book.cpp -o book.o"
+  },
+  {
+    "directory": ".",
+    "file": "strategy/momentum.cpp",
+    "command": "c++ -std=c++23 -I . -I X:/ccg-fake/toolchain/include/c++/v1 -I X:/ccg-fake/toolchain/include -c strategy/momentum.cpp -o momentum.o"
+  },
+  {
+    "directory": ".",
+    "file": "sim/engine.cpp",
+    "command": "c++ -std=c++23 -I . -I X:/ccg-fake/toolchain/include/c++/v1 -I X:/ccg-fake/toolchain/include -c sim/engine.cpp -o engine.o"
+  },
+  {
+    "directory": ".",
+    "file": "main.cpp",
+    "command": "c++ -std=c++23 -I . -I X:/ccg-fake/toolchain/include/c++/v1 -I X:/ccg-fake/toolchain/include -c main.cpp -o main.o"
+  }
+]

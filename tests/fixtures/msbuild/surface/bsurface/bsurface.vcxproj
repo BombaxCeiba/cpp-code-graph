@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{F6666666-6666-6666-6666-666666666666}</ProjectGuid>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <VCProjectVersion>18.0</VCProjectVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v145</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="$(VCTargetsPath)\BuildCustomizations\MASM.props" />
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel><LanguageStandard>stdcpp17</LanguageStandard>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <AdditionalIncludeDirectories>$(IntDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link><SubSystem>Console</SubSystem><GenerateDebugInformation>true</GenerateDebugInformation></Link>
+    <Midl><HeaderFileName>obj.h</HeaderFileName><OutputDirectory>$(IntDir)</OutputDirectory></Midl>
+    <ResourceCompile><PreprocessorDefinitions>_UNICODE;UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile>
+    <PostBuildEvent><Command>echo recon-post-build > "$(TargetDir)post.txt"</Command></PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="pch.cpp"><PrecompiledHeader>Create</PrecompiledHeader></ClCompile>
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="gen.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="gen.tpl">
+      <FileType>Document</FileType>
+      <Message>recon: generating gen.cpp from gen.tpl</Message>
+      <Command>cmd /c copy /Y "%(RootDir)%(Directory)gen.tpl" "%(RootDir)%(Directory)gen.cpp"</Command>
+      <Outputs>%(RootDir)%(Directory)gen.cpp</Outputs>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <MASM Include="mul.asm" />
+    <Midl Include="obj.idl" />
+    <ResourceCompile Include="bsurface.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\libsub\libsub.vcxproj">
+      <Project>{E5555555-5555-5555-5555-555555555555}</Project>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\BuildCustomizations\MASM.targets" />
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

@@ -1,0 +1,4 @@
+[
+  {"directory": ".", "file": "a.cpp", "command": "c++ -std=c++23 -I . -c a.cpp -o a.o"},
+  {"directory": ".", "file": "b.cpp", "command": "c++ -std=c++23 -I . -c b.cpp -o b.o"}
+]

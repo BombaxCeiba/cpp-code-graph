@@ -1,0 +1,209 @@
+# Release pipeline: build (MSVC 14.51 on the pinned VS2026 image), test,
+# package the Inno Setup installer via CPack plus a portable zip.
+#
+# Tiering (per the release pipeline design):
+#   - push (any branch) / workflow_dispatch: smoke tests (4 tests)
+#   - tag v*: full test suite + draft GitHub release with artifacts
+#
+# Versioning is purely tag-driven: GITHUB_REF_NAME (v1.2.3) is stripped of
+# the leading "v" and injected as CCG_RELEASE_VERSION (consumed by
+# cmake/CPackSetup.cmake); untagged builds default to 0.0.0-dev.
+# No signing step: the repository ships unsigned installers by decision.
+
+name: release
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-package:
+    runs-on: windows-2025-vs2026
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assert toolchain (cl 19.51, libclang.dll)
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
+          call "%VSROOT%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          cl 2>&1 | findstr /C:"19.51" >nul
+          if errorlevel 1 (
+            echo toolchain assertion failed: cl is not 19.51 1>&2
+            exit /b 1
+          )
+          if not exist "C:\Program Files\LLVM\bin\libclang.dll" (
+            echo libclang.dll not found under C:\Program Files\LLVM 1>&2
+            exit /b 1
+          )
+          echo toolchain assertions passed
+
+      - name: Cache CPM sources
+        uses: actions/cache@v4
+        with:
+          path: .cpm-cache
+          key: cpm-${{ runner.os }}-${{ hashFiles('3rdParty/CMakeLists.txt') }}
+          restore-keys: cpm-${{ runner.os }}-
+
+      - name: Resolve release version
+        shell: pwsh
+        run: |
+          $v = '0.0.0-dev'
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $v = $env:GITHUB_REF_NAME.Substring(1)
+          }
+          "CCG_RELEASE_VERSION=$v" >> $env:GITHUB_ENV
+          "release version: $v"
+
+      - name: Configure (msvc-dev preset)
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
+          call "%VSROOT%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          cmake --preset msvc-dev -D "CCG_LLVM_ROOT=C:/Program Files/LLVM"
+
+      - name: Build (Release)
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
+          call "%VSROOT%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          cmake --build --preset msvc-dev --config Release
+
+      - name: Test (smoke on push, full suite on tag)
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
+          call "%VSROOT%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if "%GITHUB_REF:~0,10%"=="refs/tags/" (
+            ctest --test-dir build/msvc-dev -C Release --output-on-failure
+          ) else (
+            ctest --test-dir build/msvc-dev -C Release --output-on-failure -R "^ccg_smoke_version$|^ccg_portability_scan$|^ccg_sqlite_smoke$|^ccg_msbuild_gt$"
+          )
+
+      # Inno Setup 7 is required for the Simplified Chinese official
+      # language pack (7.0.2+) and is NOT available via chocolatey (the
+      # community `innosetup` package tops out at 6.7.1), so install the
+      # official 7.1.1 release directly from GitHub.
+      - name: Install Inno Setup 7.1.1
+        shell: pwsh
+        run: |
+          $iscc = 'C:\Program Files\Inno Setup 7\ISCC.exe'
+          if (Test-Path $iscc) { 'Inno Setup 7 already present'; exit 0 }
+          curl.exe -L -f -o "$env:RUNNER_TEMP\innosetup.exe" `
+            https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe
+          $p = Start-Process -PassThru -Wait -FilePath "$env:RUNNER_TEMP\innosetup.exe" `
+            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/ALLUSERS'
+          if ($p.ExitCode -ne 0) { throw "Inno Setup installer exited with $($p.ExitCode)" }
+          if (-not (Test-Path $iscc)) { throw 'ISCC.exe not found after installation' }
+          'C:\Program Files\Inno Setup 7' >> $env:GITHUB_PATH
+
+      - name: Package installer (CPack INNOSETUP)
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
+          call "%VSROOT%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          cpack --config build/msvc-dev/CPackConfig.cmake -C Release -G INNOSETUP -B dist
+
+      # Dual-path silent smoke test of the installer itself. Local runs
+      # never execute this stage: installing on the developer machine is
+      # out of scope, this lives in CI only.
+      - name: Installer smoke test (both task paths)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = (Get-ChildItem 'dist/ccg-setup-*.exe' | Select-Object -First 1).FullName
+          if (-not $setup) { throw 'installer exe not found under dist/' }
+          "installer under test: $setup"
+          $shimBin = Join-Path $env:LOCALAPPDATA 'ccg\bin'
+          $appDir  = Join-Path $env:LOCALAPPDATA 'Programs\ccg'
+          $unins   = Join-Path $appDir 'unins000.exe'
+
+          function Invoke-Setup([string[]]$Extra) {
+            $p = Start-Process -PassThru -Wait -FilePath $setup -ArgumentList (@('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CURRENTUSER') + $Extra)
+            if ($p.ExitCode -ne 0) { throw "setup exited with $($p.ExitCode) (args: $($Extra -join ' '))" }
+          }
+          function Invoke-Uninstall {
+            $p = Start-Process -PassThru -Wait -FilePath $unins -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
+            if ($p.ExitCode -ne 0) { throw "uninstaller exited with $($p.ExitCode)" }
+          }
+          function Test-UserPathHasShim {
+            @([Environment]::GetEnvironmentVariable('Path','User') -split ';') -contains $shimBin
+          }
+
+          # Path A: install WITH the addtopath task, assert shims + Path entry.
+          Invoke-Setup @('/TASKS=addtopath')
+          if (-not (Test-Path (Join-Path $shimBin 'ccg.cmd'))) { throw 'path A: ccg.cmd shim missing' }
+          if (-not (Test-Path (Join-Path $shimBin 'ccg')))     { throw 'path A: bash shim missing' }
+          if (-not (Test-UserPathHasShim))                     { throw 'path A: user Path entry missing' }
+          if (-not (Test-Path (Join-Path $appDir 'ccg.exe')))  { throw 'path A: installed ccg.exe missing' }
+          & (Join-Path $appDir 'ccg.exe') --version | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw 'path A: ccg --version failed' }
+
+          # Path A teardown: silent uninstall, assert everything is gone.
+          Invoke-Uninstall
+          if (Test-Path $shimBin)        { throw 'path A: shim directory survived uninstall' }
+          if (Test-UserPathHasShim)      { throw 'path A: user Path entry survived uninstall' }
+          if (Test-Path (Join-Path $appDir 'ccg.exe')) { throw 'path A: ccg.exe survived uninstall' }
+
+          # Path B: install with the task DEselected, assert no PATH side effects.
+          Invoke-Setup @('/MERGETASKS="!addtopath"')
+          if (-not (Test-Path (Join-Path $appDir 'ccg.exe'))) { throw 'path B: installed ccg.exe missing' }
+          if (Test-Path $shimBin)   { throw 'path B: shims written although the task was deselected' }
+          if (Test-UserPathHasShim) { throw 'path B: Path entry written although the task was deselected' }
+
+          # Path B teardown.
+          Invoke-Uninstall
+          if (Test-Path $appDir) { throw 'path B: app directory survived uninstall' }
+          'installer smoke test passed: both task paths, clean uninstalls'
+
+      - name: Portable zip (flat staging layout)
+        shell: pwsh
+        run: |
+          cmake --install build/msvc-dev --config Release --prefix dist/portable
+          # Size band guard against a Debug build sneaking into the
+          # payload: Release /MT measures ~7.3 MiB (7,660,032 bytes at
+          # the time of writing), Debug is ~21.9 MiB. Band: 7 +/- 1 MiB.
+          $exeLen = (Get-Item 'dist/portable/ccg.exe').Length
+          if ($exeLen -lt 6291456 -or $exeLen -gt 8388608) {
+            throw "ccg.exe is $exeLen bytes, outside the 7 +/-1 MiB Release band (Debug mix-in guard)"
+          }
+          "ccg.exe size check passed: $exeLen bytes"
+          $zip = "dist/ccg-portable-$env:CCG_RELEASE_VERSION.zip"
+          Compress-Archive -Path dist/portable/* -DestinationPath $zip
+          $count = (Get-ChildItem dist/portable -Recurse -File).Count
+          "portable staging: $count files -> $zip"
+
+      - name: SHA256SUMS
+        shell: pwsh
+        run: |
+          $lines = Get-ChildItem dist -File |
+            Where-Object { $_.Extension -in '.exe','.zip' } |
+            ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash, $_.Name }
+          $lines | Out-File dist/SHA256SUMS.txt -Encoding ascii
+          $lines | Out-Host
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccg-release
+          path: |
+            dist/ccg-setup-*.exe
+            dist/ccg-portable-*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Draft GitHub release (tag only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            dist/ccg-setup-*.exe
+            dist/ccg-portable-*.zip
+            dist/SHA256SUMS.txt

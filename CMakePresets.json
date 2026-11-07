@@ -1,0 +1,112 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 4, "minor": 4, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja Multi-Config",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "clang-dev",
+      "displayName": "cpp-code-graph 开发构建（clang、Ninja Multi-Config）",
+      "description": "C++23 具名模块；编译器按名字经 PATH 解析（机器本地的绝对路径钉进用户自建的 CMakeUserPresets.json——那是 CMake 官方的机器本地覆盖层，不入库）。Ninja Multi-Config：在构建/测试时再挑配置（cmake --build --preset clang-dev、ctest --preset clang-dev -C Release）；单配置 Ninja 兜底仍受支持（cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Debug）。无消毒剂构建树：此处把 CCG_USE_ASAN 钉为 OFF，让 Debug 配置保持快；传 -DCCG_USE_ASAN=ON 即可插桩。",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/clang-dev",
+      "cacheVariables": {
+        "CCG_USE_ASAN": "OFF"
+      }
+    },
+    {
+      "name": "clang-dev-asan",
+      "displayName": "cpp-code-graph ASAN 构建（clang、Ninja Multi-Config）",
+      "description": "多配置构建树，保持 CCG_USE_ASAN 的 AUTO 默认不动，因此 AddressSanitizer 只对 Debug 配置自动打开（按配置的生成器表达式）。任何 preset 都不烤死消毒剂旗标——旗标只来自 CCG_USE_ASAN 选项逻辑。",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/clang-dev-asan"
+    },
+    {
+      "name": "msvc-base",
+      "hidden": true,
+      "generator": "Ninja Multi-Config",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "msvc-dev",
+      "displayName": "cpp-code-graph 开发构建（MSVC、Ninja Multi-Config）",
+      "description": "'clang-dev' preset 的 MSVC 工具链兄弟。请在 'x64 Native Tools Command Prompt'（或跑过 vcvars64 之后）里 configure，使 cl.exe 在 PATH 上；TMP/TEMP 要放在有空间的盘上（否则 cl 报 D8050）。clang-c 头与运行期 libclang.dll 来自经 CCG_LLVM_ROOT 选定的 LLVM 安装——绝不是烤死的默认（机器本地的值放进 CMakeUserPresets.json）。无消毒剂构建树；'import std' 由工具集自带的 std.ixx 供给（cmake/CcgUtils.cmake）。",
+      "inherits": "msvc-base",
+      "binaryDir": "${sourceDir}/build/msvc-dev",
+      "cacheVariables": {
+        "CCG_USE_ASAN": "OFF"
+      }
+    },
+    {
+      "name": "msvc-dev-asan",
+      "displayName": "cpp-code-graph ASAN 构建（MSVC、Ninja Multi-Config）",
+      "description": "MSVC 多配置构建树，CCG_USE_ASAN 为 AUTO，因此 /fsanitize=address 只对 Debug 配置打开（探针实证；运行库自动解析——cmake/CcgAsan.cmake）。vcvars/CCG_LLVM_ROOT 要求与 'msvc-dev' preset 相同。",
+      "inherits": "msvc-base",
+      "binaryDir": "${sourceDir}/build/msvc-dev-asan"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "clang-dev",
+      "configurePreset": "clang-dev",
+      "configuration": "Debug"
+    },
+    {
+      "name": "clang-dev-asan",
+      "configurePreset": "clang-dev-asan",
+      "configuration": "Debug"
+    },
+    {
+      "name": "msvc-dev",
+      "configurePreset": "msvc-dev",
+      "configuration": "Debug"
+    },
+    {
+      "name": "msvc-dev-asan",
+      "configurePreset": "msvc-dev-asan",
+      "configuration": "Debug"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "clang-dev",
+      "configurePreset": "clang-dev",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "clang-dev-asan",
+      "configurePreset": "clang-dev-asan",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "msvc-dev",
+      "configurePreset": "msvc-dev",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "msvc-dev-asan",
+      "configurePreset": "msvc-dev-asan",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    }
+  ]
+}

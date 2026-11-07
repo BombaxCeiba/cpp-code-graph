@@ -1,0 +1,54 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|Update",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ccg hook posttooluse",
+            "timeout": 10,
+            "statusMessage": "ccg: 正在刷新代码图..."
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ccg hook sessionstart",
+            "timeout": 15,
+            "statusMessage": "ccg: 正在读取代码数据库状态..."
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ccg hook userpromptsubmit",
+            "timeout": 8,
+            "statusMessage": "ccg: 正在汇总索引结论..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Grep|Bash|PowerShell|Search|Read|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ccg hook pretooluse",
+            "timeout": 10,
+            "statusMessage": "ccg: 正在查代码图..."
+          }
+        ]
+      }
+    ]
+  }
+}

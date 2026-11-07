@@ -1,0 +1,5 @@
+import "unknwn.idl";
+[object, uuid(5E1C2B3A-7788-4AA0-9B11-000000000001)]
+interface IMath : IUnknown {
+    HRESULT Add([in] long a, [in] long b, [out] long* sum);
+};

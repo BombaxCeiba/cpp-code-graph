@@ -1,0 +1,9 @@
+{
+  "name": "ccg",
+  "description": "ccg C++ 代码图集成：自然语言驱动理解代码、影响分析、调试溯源与索引管理。含 PostToolUse/SessionStart/UserPromptSubmit hooks（需 ccg 在 PATH 上，或设 CCG_BIN），每次编辑后自动刷新代码图并注入影响面摘要。",
+  "version": "0.1.0",
+  "author": {
+    "name": "ccg"
+  },
+  "keywords": ["code-graph", "c++", "static-analysis", "impact-analysis", "indexing"]
+}

@@ -1,0 +1,66 @@
+{
+  "revision": 0,
+  "rules": [
+    {
+      "primary-output": "",
+      "provides": [
+        {
+          "is-interface": true,
+          "logical-name": "demo",
+          "source-path": "X:/ccg-fake/corpus/tree/demo.ixx"
+        }
+      ],
+      "requires": [
+        {
+          "logical-name": "demo:core",
+          "source-path": "X:/ccg-fake/corpus/tree/core.ixx"
+        },
+        {
+          "logical-name": "demo:math",
+          "source-path": "X:/ccg-fake/corpus/tree/math.ixx"
+        },
+        {
+          "logical-name": "std"
+        }
+      ]
+    },
+    {
+      "primary-output": "",
+      "provides": [
+        {
+          "is-interface": true,
+          "logical-name": "demo:math",
+          "source-path": "X:/ccg-fake/corpus/tree/math.ixx"
+        }
+      ],
+      "requires": [
+        {
+          "logical-name": "std"
+        }
+      ]
+    },
+    {
+      "primary-output": "",
+      "requires": [
+        {
+          "logical-name": "demo",
+          "source-path": "X:/ccg-fake/corpus/tree/demo.ixx"
+        },
+        {
+          "logical-name": "std"
+        }
+      ]
+    },
+    {
+      "primary-output": "",
+      "provides": [
+        {
+          "is-interface": true,
+          "logical-name": "demo:core",
+          "source-path": "X:/ccg-fake/corpus/tree/core.ixx"
+        }
+      ]
+    }
+  ],
+  "version": 1
+}

@@ -1,0 +1,17 @@
+[
+  {
+    "directory": ".",
+    "file": "circle.cpp",
+    "command": "c++ -std=c++23 -I X:/ccg-fake/toolchain/include/c++/v1 -I X:/ccg-fake/toolchain/include -c circle.cpp -o circle.o"
+  },
+  {
+    "directory": ".",
+    "file": "canvas.cpp",
+    "command": "c++ -std=c++23 -I X:/ccg-fake/toolchain/include/c++/v1 -I X:/ccg-fake/toolchain/include -c canvas.cpp -o canvas.o"
+  },
+  {
+    "directory": ".",
+    "file": "main.cpp",
+    "command": "c++ -std=c++23 -I X:/ccg-fake/toolchain/include/c++/v1 -I X:/ccg-fake/toolchain/include -c main.cpp -o main.o"
+  }
+]

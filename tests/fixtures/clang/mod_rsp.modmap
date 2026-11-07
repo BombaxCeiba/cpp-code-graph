@@ -1,0 +1,4 @@
+-x c++-module
+-fmodule-output="build/mod_out.pcm"
+-fmodule-file="std=build/std.pcm"
+-fmodule-file="cg.util=build/cg.util.pcm"

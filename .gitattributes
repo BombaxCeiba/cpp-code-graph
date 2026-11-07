@@ -1,0 +1,15 @@
+# 文本统一 LF：仓库现状主流形态（实测 109 个 LF-only 对 2 个 CRLF-only，
+# C++ 源码、脚本、文档皆 LF）。text=auto 先探测二进制，文本按 eol=lf 归
+# 一化存储并在检出时保持 LF。
+* text=auto eol=lf
+
+# 批处理按 Windows 习惯检出 CRLF（cmd.exe 的标签跳转在 LF-only 批处理
+# 上有历史坑）；提交侧仍归一化为 LF 存储
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制保护：绝不归一化（历史上曾入库二进制夹具，现政策夹具只收文本，规则防复发保留）
+*.png binary
+*.7z binary
+*.db binary
+*.exe binary

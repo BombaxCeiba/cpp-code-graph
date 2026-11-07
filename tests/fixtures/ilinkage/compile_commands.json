@@ -1,0 +1,12 @@
+[
+  {
+    "directory": ".",
+    "file": "a.cpp",
+    "command": "c++ -std=c++23 -I . -I X:/ccg-fake/toolchain/include/c++/v1 -I X:/ccg-fake/toolchain/include -c a.cpp -o a.cpp.o"
+  },
+  {
+    "directory": ".",
+    "file": "b.cpp",
+    "command": "c++ -std=c++23 -I . -I X:/ccg-fake/toolchain/include/c++/v1 -I X:/ccg-fake/toolchain/include -c b.cpp -o b.cpp.o"
+  }
+]

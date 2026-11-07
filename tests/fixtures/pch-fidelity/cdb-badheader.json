@@ -1,0 +1,56 @@
+[
+  {
+    "directory": ".",
+    "arguments": [
+      "clang-cl",
+      "/nologo",
+      "/c",
+      "stdafx.cpp",
+      "/Ycstdafx.h",
+      "/Fppch/stdafx.pch",
+      "/std:c++20",
+      "/I."
+    ],
+    "file": "stdafx.cpp"
+  },
+  {
+    "directory": ".",
+    "arguments": [
+      "clang-cl",
+      "/nologo",
+      "/c",
+      "m.ixx",
+      "/Yunope_such_header.h",
+      "/Fppch/nope_such.pch",
+      "/std:c++20",
+      "/I."
+    ],
+    "file": "m.ixx"
+  },
+  {
+    "directory": ".",
+    "arguments": [
+      "clang-cl",
+      "/nologo",
+      "/c",
+      "user.cpp",
+      "/Yunope_such_header.h",
+      "/Fppch/nope_such.pch",
+      "/std:c++20",
+      "/I."
+    ],
+    "file": "user.cpp"
+  },
+  {
+    "directory": ".",
+    "arguments": [
+      "clang-cl",
+      "/nologo",
+      "/c",
+      "m2.ixx",
+      "/std:c++20",
+      "/I."
+    ],
+    "file": "m2.ixx"
+  }
+]

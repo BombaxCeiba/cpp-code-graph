@@ -1,0 +1,12 @@
+[
+  {
+    "directory": ".",
+    "file": "baseline_main.cpp",
+    "command": "c++ -std=c++23 -I \"../fixtures/clang/inc with space\" -c baseline_main.cpp -o baseline_main.o"
+  },
+  {
+    "directory": ".",
+    "file": "broken.cpp",
+    "command": "c++ -std=c++23 -DCCG_FIXTURE=1 -c broken.cpp"
+  }
+]

@@ -1,0 +1,4 @@
+[
+  {"directory": ".", "file": "main.cpp", "command": "c++ -std=c++23 -c main.cpp -o main.o"},
+  {"directory": ".", "file": "extra.cpp", "command": "c++ -std=c++23 -c extra.cpp -o extra.o"}
+]

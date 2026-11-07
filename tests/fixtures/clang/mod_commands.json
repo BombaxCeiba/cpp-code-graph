@@ -1,0 +1,10 @@
+[
+  {
+    "command": "clang++.exe -g -std=c++23 @mod_rsp.modmap -o build/mod_unit.obj -c mod_unit.ixx",
+    "file": "mod_unit.ixx"
+  },
+  {
+    "command": "clang++.exe -std=c++23 -fmodule-file=std=build/std.pcm -c plain_unit.cpp",
+    "file": "plain_unit.cpp"
+  }
+]

@@ -1,0 +1,22 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 18
+VisualStudioVersion = 18.10.12224.181
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "libsub", "libsub\libsub.vcxproj", "{E5555555-5555-5555-5555-555555555555}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "bsurface", "bsurface\bsurface.vcxproj", "{F6666666-6666-6666-6666-666666666666}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{E5555555-5555-5555-5555-555555555555}.Debug|x64.ActiveCfg = Debug|x64
+		{E5555555-5555-5555-5555-555555555555}.Debug|x64.Build.0 = Debug|x64
+		{F6666666-6666-6666-6666-666666666666}.Debug|x64.ActiveCfg = Debug|x64
+		{F6666666-6666-6666-6666-666666666666}.Debug|x64.Build.0 = Debug|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

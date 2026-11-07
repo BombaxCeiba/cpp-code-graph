@@ -1,0 +1,40 @@
+# 构建产物与本机目录（体积巨大——任何部分提交都让首提交即不可用）
+build/
+.vs/
+.cpm-cache/
+Testing/
+dist/
+.wf/
+
+# ccg 索引数据库家目录（.ccg/<配置>/ccg.db，运行时状态），
+# 仓库任意层级均不入库
+.ccg/
+/.claude/
+
+# Python 字节码缓存（scripts/ 下解释器自产）
+__pycache__/
+
+# 编译残留与工具产物
+*.obj
+*.pdb
+*.db
+*.log
+*.7z
+*.zip
+
+# 测试夹具（源码/compile_commands/金标 JSON）从上面的通配里救回入库；
+# 但夹具只收文本——二进制库与 .ccg 运行残骸不入库，索引库由测试现场重建
+!tests/fixtures/**
+tests/fixtures/**/*.db
+tests/fixtures/**/*.snap
+tests/fixtures/**/.ccg/
+
+# 本机钉子：CMakeUserPresets.json 自述仅本机生效（内含本机 LLVM 绝对
+# 路径），按其自述不入库；CMakePresets.json（共享预设）正常入库
+CMakeUserPresets.json
+
+# NuGet/MSBuild 构建中间目录（垫片等 dotnet 工程的 obj/bin）
+obj/
+bin/
+
+tests/portability_scan.local.cmake

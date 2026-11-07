@@ -1,0 +1,93 @@
+{
+ "schema": 1,
+ "note": "MSBuild 金标六维基线（仓内中性夹具语料锚定数字：DemoSln〔mathlib+msbdemo〕/ mixed〔projA+projB 混合工具集〕/ pchp〔PCH 生产消费〕/ modmsb〔模块接口〕四个解决方案的合并求值金标与记录通道产物对账）。任何一维漂移即门禁失败——数字变好也红，须人工重审本文件后与 fingerprints.json 同批重锁（改本文件而不重锁指纹会被内容指纹当场抓获）。module_switches 为修复后锁定形态（六项带值开关成对保留），详见该节。",
+ "gold_census": {
+  "projects": 6,
+  "tu_instances": 11,
+  "tu_built": 11,
+  "tu_not_built": 0,
+  "degraded_projects": 0,
+  "not_built_projects": 0,
+  "ext_census": {"cpp": 10, "ixx": 1},
+  "platform_toolset_census": {"v143": 1, "v145": 5},
+  "vctools_census": {"14.44.35207": 1, "14.51.36231": 5},
+  "pch_itemdef_census": {"NotUsing": 5, "Use": 1},
+  "tu_pch_use_overrides": 1,
+  "tu_defines_overrides": 0,
+  "tu_include_overrides": 0,
+  "self_check_checks": 407,
+  "self_check_mismatches": 0
+ },
+ "tu_coverage": {
+  "gold_tu_instances": 11,
+  "matched_instances": 11,
+  "missing_in_ccg": 0,
+  "ccg_entries": 12,
+  "ccg_distinct_files": 11,
+  "extra_files_in_ccg": 0,
+  "ixx_entries": 2,
+  "ixx_double_pass_files": 1,
+  "entries_minus_matched": 1,
+  "ide_only_instances": 0,
+  "ide_only_in_ccg_via_others": 0
+ },
+ "defines": {
+  "seq_equal": 11,
+  "set_equal_only": 0,
+  "checked": 11
+ },
+ "include": {
+  "best_match_seq_equal": 11,
+  "best_match_set_equal_only": 0,
+  "checked": 11,
+  "exists_exact_some": 11,
+  "exists_none_match": 0
+ },
+ "pch": {
+  "gold_create_instances": 1,
+  "gold_create_unique_files": 1,
+  "gold_use_tus": 1,
+  "gold_not_using_tus": 9,
+  "ccg_producers": 1,
+  "ccg_producer_unique_files": 1,
+  "producer_overlap_files": 1,
+  "producer_gold_only": 0,
+  "producer_ccg_only": 0,
+  "ccg_consumers": 1,
+  "ccg_not_using": 0,
+  "cdb_sha_cross_match": true
+ },
+ "toolset": {
+  "checked": 6,
+  "agree": 6
+ },
+ "misc_invariants": {
+  "shared_pick_found": false,
+  "unique_pick_found": true,
+  "ixx_pick_found": true,
+  "unique_defines_order_equal": true,
+  "unique_include_order_equal": true,
+  "unique_std_map_ok": true,
+  "unique_wd_set_equal": true,
+  "unique_addopts_all_present": true,
+  "ixx_entry_count": 2,
+  "ixx_scan_pass_present": true,
+  "ixx_compile_pass_present": true,
+  "ixx_interface_present": true,
+  "ixx_defines_order_equal": true
+ },
+ "shared_files": {
+  "cdb_multi_entry_files": 1,
+  "cdb_multi_entry_max": 2,
+  "gold_multi_project_files": 0,
+  "gold_multi_project_max": 0
+ },
+ "module_switches": {
+  "xfail": false,
+  "note": "带值开关成对保留修复已落地并按重录语料锁定：ifcOutput/scanDependencies/sourceDependencies/ifcSearchDir/reference/exportHeader 六项带值开关在翻译层归入 sep_value_kept 成对保留（名单单点见 cg.util.msvcswitch），cdb 中开关名与值 token 成对在场；消费端喂引擎前由剥离层成对剥除，引擎 argv 逐字节不变（守卫单测钉死）。语料内 .ixx 条目两条（模块接口的扫描趟+编译趟）均为两段式带值——扫描趟 /scanDependencies 带目录值、编译趟 /sourceDependencies 带依赖直出 json 值、两条 /ifcOutput 均带 .ifc 产物值，裸拼写计数全零；若裸拼写回潮即回归。",
+  "ixx_entries": 2,
+  "bare_ifc_output": 0,
+  "bare_scan_dependencies": 0,
+  "bare_source_dependencies": 0
+ }
+}

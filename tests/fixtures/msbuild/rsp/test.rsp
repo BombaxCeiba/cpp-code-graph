@@ -1,0 +1,6 @@
+﻿/c
+/I../expected
+/D "SPACE DEF=2"
+/Fo"build\x.obj"
+src\main.cpp
+@nested.rsp
