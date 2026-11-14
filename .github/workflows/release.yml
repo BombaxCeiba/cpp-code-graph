@@ -28,6 +28,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Inno Setup 7 is required for the Simplified Chinese official
+      # language pack (7.0.2+) and is NOT available via chocolatey (the
+      # community `innosetup` package tops out at 6.7.1), so install the
+      # official 7.1.1 release directly from GitHub. Installed BEFORE
+      # configure so that cmake/CPackSetup.cmake can locate ISCC during
+      # the configure step (the cached find_program result would
+      # otherwise be empty on a cold runner).
+      - name: Install Inno Setup 7.1.1
+        shell: pwsh
+        run: |
+          $iscc = 'C:\Program Files\Inno Setup 7\ISCC.exe'
+          if (Test-Path $iscc) { 'Inno Setup 7 already present'; exit 0 }
+          curl.exe -L -f -o "$env:RUNNER_TEMP\innosetup.exe" `
+            https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe
+          $p = Start-Process -PassThru -Wait -FilePath "$env:RUNNER_TEMP\innosetup.exe" `
+            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/ALLUSERS'
+          if ($p.ExitCode -ne 0) { throw "Inno Setup installer exited with $($p.ExitCode)" }
+          if (-not (Test-Path $iscc)) { throw 'ISCC.exe not found after installation' }
+          'C:\Program Files\Inno Setup 7' >> $env:GITHUB_PATH
+
       - name: Assert toolchain (cl 19.51, libclang.dll)
         shell: cmd
         run: |
@@ -109,6 +129,15 @@ jobs:
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
           call "%VSROOT%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
           cpack --config build/msvc-dev/CPackConfig.cmake -C Release -G INNOSETUP -B dist
+
+      # On packaging failure the ISCC compiler log is the only place with
+      # the real error; surface it in the workflow log for diagnosis.
+      - name: Dump ISCC log (on packaging failure)
+        if: failure()
+        shell: pwsh
+        run: |
+          $log = 'dist/_CPack_Packages/win64/INNOSETUP/ISCCOutput.log'
+          if (Test-Path $log) { Get-Content $log } else { "no ISCCOutput.log at $log" }
 
       # Dual-path silent smoke test of the installer itself. Local runs
       # never execute this stage: installing on the developer machine is
