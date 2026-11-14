@@ -1,5 +1,7 @@
 module;
-// 环境变量写原语（_putenv_s 非标准 C，import std 不保证再导出）。
+// 环境变量写原语（_putenv_s 非标准 C，import std 不保证再导出）；
+// 读侧不在此列——一律经由 cg.util.cstd::get_env（微软侧 _dupenv_s
+// 安全变体），本单元不再直接触碰 std::getenv。
 // filesystem/fstream/system_error 一律经 import std 取用：此处绝不
 // 直接 include <filesystem>——项目的 C2801 垫片头会把经典定义与
 // std 模块的定义混进同一单元（_Path_iterator 私有成员冲突实测）。
@@ -18,6 +20,7 @@ export module cg.test.harness;
 // 信息等价，且模块纯净。
 
 import std;
+import cg.util.cstd;
 
 export namespace cg::test
 {
@@ -87,10 +90,9 @@ export namespace cg::test
 
         explicit EnvScope(const char* var_name) : name(var_name)
         {
-            if (const char* raw = std::getenv(var_name); raw != nullptr)
-            {
-                saved = std::string{raw};
-            }
+            // 读侧走仓内统一封装（微软侧 _dupenv_s 安全变体）；未设置
+            // 与空串的区分正好落在 optional 形态上。
+            saved = cg::util::cstd::get_env(var_name);
         }
         EnvScope(const EnvScope&) = delete;
         auto operator=(const EnvScope&) -> EnvScope& = delete;

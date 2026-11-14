@@ -3240,6 +3240,77 @@ namespace
 
     // 进程内直连：查询/影响面/changes 的直连等价在 :memory: 迷你库上
     // 演练——字段形状、唯一解析与歧义文案、uid 校验、文件级回退。
+    // indexedAt 新鲜度解析：合法时间戳出小时数；MSVC 的
+    // from_stream 会把 2 月 30 日这类日历上不存在的日子静默
+    // 规范化成下月日期而不是置失败，靠 format 往返比对拦下，
+    // 缺字段与尾随字符也一并拒绝。
+    void hook_iso8601_age(R& r)
+    {
+        namespace hk = cg::cli::detail;
+        const auto reject = [&](std::string_view s)
+        { return !hk::iso8601_age_hours(s).has_value(); };
+
+        // 合法：纪元零点距今必然远超 40 万小时。
+        const auto zero = hk::iso8601_age_hours("1970-01-01T00:00:00Z");
+        cg::test::check(
+            r,
+            zero.has_value() && *zero > 400'000,
+            "epoch zero parses with a huge age");
+        // 合法：写入口径自产时间戳，解析到的年龄应当为 0。
+        const auto now_age = hk::iso8601_age_hours(
+            cg::util::cstd::iso8601_utc_timestamp());
+        cg::test::check(
+            r,
+            now_age.has_value() && *now_age == 0,
+            "a just-minted stamp is 0 hours old");
+        // 合法闰日。
+        cg::test::check(
+            r,
+            hk::iso8601_age_hours("2024-02-29T00:00:00Z").has_value(),
+            "leap day is a real date");
+        // 日历上不存在的日子（from_stream 规范化后必然对不上原串）。
+        cg::test::check(
+            r, reject("2026-02-30T10:30:00Z"), "Feb 30 is rejected");
+        cg::test::check(
+            r,
+            reject("2026-02-29T10:30:00Z"),
+            "Feb 29 of a non-leap year is rejected");
+        cg::test::check(
+            r,
+            reject("2100-02-29T00:00:00Z"),
+            "Feb 29 of a century non-leap year is rejected");
+        cg::test::check(
+            r, reject("2026-04-31T00:00:00Z"), "Apr 31 is rejected");
+        cg::test::check(
+            r, reject("2026-11-31T00:00:00Z"), "Nov 31 is rejected");
+        // 字段值域与缺字段。
+        cg::test::check(
+            r, reject("2026-13-01T00:00:00Z"), "month 13 is rejected");
+        cg::test::check(
+            r, reject("2026-11-14T24:00:00Z"), "hour 24 is rejected");
+        cg::test::check(
+            r, reject("2026-11-14T10:60:00Z"), "minute 60 is rejected");
+        cg::test::check(
+            r,
+            reject("2026-11-14T10:30Z"),
+            "a stamp missing seconds is rejected");
+        cg::test::check(
+            r,
+            reject("2026-11-14T10:30:00"),
+            "a stamp missing the Z suffix is rejected");
+        // 尾随字符、纪元前与垃圾输入。
+        cg::test::check(
+            r,
+            reject("2026-11-14T10:30:00Zx"),
+            "trailing bytes after Z are rejected");
+        cg::test::check(
+            r,
+            reject("1969-12-31T23:59:59Z"),
+            "pre-1970 stamps are rejected");
+        cg::test::check(
+            r, reject("not a timestamp"), "garbage is rejected");
+    }
+
     void hook_inprocess_queries(R& r)
     {
         using cg::cli::detail::hook_changes;
@@ -3508,6 +3579,9 @@ namespace
     const cg::test::Registrar reg_hook_start{
         "cli.hook.start_failure",
         &hook_start_failure_handler};
+    const cg::test::Registrar reg_hook_iso_age{
+        "cli.hook.iso8601_age",
+        &hook_iso8601_age};
     const cg::test::Registrar reg_hook_inproc{
         "cli.hook.inprocess_queries",
         &hook_inprocess_queries};

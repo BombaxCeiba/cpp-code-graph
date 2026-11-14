@@ -7989,36 +7989,42 @@ export namespace cg::cli
         auto iso8601_age_hours(std::string_view iso)
             -> std::optional<std::int64_t>
         {
-            int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0;
-            if (std::sscanf(
-                    std::string{iso}.c_str(),
-                    "%d-%d-%dT%d:%d:%d",
-                    &y,
-                    &mo,
-                    &d,
-                    &h,
-                    &mi,
-                    &s)
-                    < 5
-                || y < 1970 || mo < 1 || mo > 12 || d < 1 || d > 31)
+            // from_stream 一把解析六字段并逐字核对分隔符，ispanstream
+            // 直接吃 string_view（不再经 std::string 中转拷贝）。MSVC
+            // 实测（14.51）会把 2 月 30 日这类日历上不存在的日子静默
+            // 规范化成下月日期而不是置失败，所以解析成功后再用 format
+            // 还原比对：规范化必然对不上原串，往返一致顶替 ymd.ok()
+            // 的日历合法性检查。
+            std::chrono::sys_seconds indexed{};
+            std::ispanstream         in{
+                std::span<const char>{iso.data(), iso.size()}};
+            if (!std::chrono::from_stream(
+                    in,
+                    "%Y-%m-%dT%H:%M:%SZ",
+                    indexed))
             {
                 return std::nullopt;
             }
-            const std::chrono::year_month_day ymd{
-                std::chrono::year{y},
-                std::chrono::month{static_cast<unsigned>(mo)},
-                std::chrono::day{static_cast<unsigned>(d)}};
-            if (!ymd.ok())
+            char trailing = '\0';
+            if (in.get(trailing))
             {
-                // 2 月 30 日等不存在的日历日：按解析失败处理，不产出假
+                // "Z" 之后还有字符：不是该口径的时间戳。
+                return std::nullopt;
+            }
+            if (std::format("{:%Y-%m-%dT%H:%M:%SZ}", indexed) != iso)
+            {
+                // 静默规范化留下的痕迹：按解析失败处理，不产出假
                 // 新鲜度（陈旧警示宁可缺省不可误报）。
                 return std::nullopt;
             }
-            const long long epoch =
-                static_cast<long long>(
-                    std::chrono::sys_days{ymd}.time_since_epoch().count())
-                    * 86400LL
-                + h * 3600LL + mi * 60LL + s;
+            const auto epoch =
+                static_cast<long long>(indexed.time_since_epoch().count());
+            if (epoch < 0)
+            {
+                // 1970 前的时间戳不参与新鲜度判定（与旧实现的
+                // y < 1970 同判失败）。
+                return std::nullopt;
+            }
             const auto now = static_cast<long long>(std::time(nullptr));
             const auto diff_s = now - epoch;
             return diff_s / 3600
