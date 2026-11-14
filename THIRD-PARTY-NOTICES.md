@@ -6,10 +6,10 @@ upstream repositories.
 
 | Component | Pinned revision | License | Copyright |
 |---|---|---|---|
-| yyjson | `1f934d2` | MIT | Copyright (c) 2020 YaoYuan `<ibireme@gmail.com>` |
+| yyjson | `0.13.0` | MIT | Copyright (c) 2020 YaoYuan `<ibireme@gmail.com>` |
 | yyjson-cpp (cpp_yyjson) | `2ed9d20` | MIT | Copyright (c) 2023 Yoshiki Matsuda, (c) 2026 Dusk |
 | Boost.PFR | `boost-1.92.0` | Boost Software License 1.0 | see the BSL-1.0 text |
-| sqlpp23 | `7e8c9a7` | BSD-2-Clause | Copyright (c) 2013-2016 Roland Bock |
+| sqlpp23 | `0.70` | BSD-2-Clause | Copyright (c) 2013-2016 Roland Bock |
 | tree-sitter | `v0.27.1` | MIT | Copyright (c) 2018 Max Brunsfeld |
 | tree-sitter-bash | `v0.25.1` | MIT | Copyright (c) 2017 Max Brunsfeld |
 | SQLite amalgamation | `3.54.0` | Public Domain | — |

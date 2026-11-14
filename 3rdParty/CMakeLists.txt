@@ -61,7 +61,7 @@ function(_cpm_add_yyjson)
     # 静态 C 库，无需随包发 DLL。
     CPMAddPackage(NAME yyjson
         GIT_REPOSITORY "${GITHUB_MIRROR_URL}/ibireme/yyjson.git"
-        GIT_TAG 1f934d2aaee3e2d016fc1f271b6a01388581dcbf
+        GIT_TAG 0.13.0
         GIT_SHALLOW TRUE
         SYSTEM YES
         EXCLUDE_FROM_ALL YES
@@ -78,7 +78,7 @@ function(_cpm_add_yyjson_cpp)
     CPMAddPackage(NAME cpp_yyjson
         GIT_REPOSITORY "${GITHUB_MIRROR_URL}/BombaxCeiba/yyjson-cpp.git"
         GIT_TAG 2ed9d20e485a5040e64165b8990ed0682dce458c
-        GIT_SHALLOW TRUE
+        GIT_SHALLOW FALSE
         GIT_SUBMODULES ""              # 跳过 benchmark 第三方子模块
         SYSTEM YES
         EXCLUDE_FROM_ALL YES
@@ -95,7 +95,7 @@ function(_cpm_add_sqlpp23)
     # 或被 CCG_SQLITE3_ROOT 覆盖时的系统安装——绝不是烤死的路径）。
     CPMAddPackage(NAME sqlpp23
         GIT_REPOSITORY "${GITHUB_MIRROR_URL}/rbock/sqlpp23.git"
-        GIT_TAG 7e8c9a7fde5a7bcc6a1cf694c29a4e9a886ffeb6
+        GIT_TAG 0.70
         GIT_SHALLOW TRUE
         SYSTEM YES
         EXCLUDE_FROM_ALL YES
