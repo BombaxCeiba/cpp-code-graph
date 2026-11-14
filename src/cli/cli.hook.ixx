@@ -7989,32 +7989,41 @@ export namespace cg::cli
         auto iso8601_age_hours(std::string_view iso)
             -> std::optional<std::int64_t>
         {
-            // from_stream 一把解析六字段并逐字核对分隔符，ispanstream
-            // 直接吃 string_view（不再经 std::string 中转拷贝）。MSVC
-            // 实测（14.51）会把 2 月 30 日这类日历上不存在的日子静默
-            // 规范化成下月日期而不是置失败，所以解析成功后再用 format
-            // 还原比对：规范化必然对不上原串，往返一致顶替 ymd.ok()
-            // 的日历合法性检查。
-            std::chrono::sys_seconds indexed{};
-            std::ispanstream         in{
-                std::span<const char>{iso.data(), iso.size()}};
-            if (!std::chrono::from_stream(
-                    in,
-                    "%Y-%m-%dT%H:%M:%SZ",
-                    indexed))
-            {
-                return std::nullopt;
-            }
+            // std::get_time 标准时间解析（C++11 设施，MSVC STL 与
+            // libc++ 双工具链齐备——libc++ 尚未实现更新的 chrono
+            // from_stream，故用本设施）一把解析六字段进 tm；数字
+            // 越界由流的数值解析置失败位（无 sscanf 的溢出未定义
+            // 行为）。日历合法性（2 月 30 日等不存在的日子）由
+            // year_month_day.ok() 后验拒绝；尾随垃圾由流尾读拒绝；
+            // 非零填充等非规范形态由还原比对拒绝。
+            std::tm parts{};
+            std::istringstream in{std::string{iso}};
+            in >> std::get_time(&parts, "%Y-%m-%dT%H:%M:%SZ");
             char trailing = '\0';
-            if (in.get(trailing))
+            if (!in || in.get(trailing))
             {
-                // "Z" 之后还有字符：不是该口径的时间戳。
                 return std::nullopt;
             }
+            const std::chrono::year_month_day ymd{
+                std::chrono::year{parts.tm_year + 1900},
+                std::chrono::month{
+                    static_cast<unsigned>(parts.tm_mon + 1)},
+                std::chrono::day{
+                    static_cast<unsigned>(parts.tm_mday)}};
+            if (!ymd.ok() || parts.tm_hour > 23 || parts.tm_min > 59
+                || parts.tm_sec > 59)
+            {
+                return std::nullopt;
+            }
+            const std::chrono::sys_seconds indexed{
+                std::chrono::sys_days{ymd}
+                + std::chrono::seconds{
+                      parts.tm_hour * 3600 + parts.tm_min * 60
+                      + parts.tm_sec}};
             if (std::format("{:%Y-%m-%dT%H:%M:%SZ}", indexed) != iso)
             {
-                // 静默规范化留下的痕迹：按解析失败处理，不产出假
-                // 新鲜度（陈旧警示宁可缺省不可误报）。
+                // 非零填充等非规范形态经还原比对拒绝：写入口径为
+                // 零填充全格式，对不上即非本口径时间戳。
                 return std::nullopt;
             }
             const auto epoch =
