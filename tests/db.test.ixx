@@ -119,9 +119,9 @@ namespace
             "meta readable after bootstrap");
     }
 
-    // 实时协调语义（排队租约 + 事务内心跳 + 偷取仲裁）的单元级验证：FILE 数据库上用两个
-    // 连接分别扮演两个 `ccg update` 进程：claim 独占、enqueue 去重 +
-    // 跨连接可见、take 时的 lease 续租、持有者范围的 release、lease
+    // 实时协调语义（排队租约 + 事务内心跳 + 偷取仲裁）的单元级验证：FILE
+    // 数据库上用两个 连接分别扮演两个 `ccg update` 进程：claim 独占、enqueue
+    // 去重 + 跨连接可见、take 时的 lease 续租、持有者范围的 release、lease
     // 过期抢走（崩溃自愈），以及 claim 被抢后再 take 触发 claim_lost。
     //
     void realtime_coordination(R& r)
@@ -1508,24 +1508,54 @@ namespace
             cg::db::symbol_count(m.store) == 5
                 && cg::db::edge_count(m.store) == 2,
             "seeded purge fixture");
+        // 贡献票 seed：文件 a 的条目给本批发射的三个符号各投一票。
+        {
+            const auto seeded_votes = std::array{m.caller, draw, gone};
+            m.store.contribute_symbols(m.fa, "digest-a", seeded_votes);
+            cg::test::check(
+                r,
+                m.store.contributions_of_entry(m.fa, "digest-a").size() == 3,
+                "seeded votes registered");
+        }
 
-        // 重抽取文件 a：caller 和 draw 幸存（id 不变），过时行消失。
+        // 重抽取文件 a：站点属主边/包含随 purge 清理；符号行的生死自
+        // schema v18 起由贡献票数仲裁——键失配（obsolete）不再被 purge
+        // 直接删除，撤票+归零（与图构建器同一记账流程）才删行。
         const auto keep = std::array{
             m.store.find_str("function||caller|e:/src/a.cpp").value(),
             m.store.find_str("method|render|draw|e:/src/a.cpp|p1").value()};
         {
             auto tx = m.store.begin_tx();
             m.store.purge_file(m.fa, keep);
+            // 记账流程的 store 原语直接演练：该文件条目重解析后的新票
+            // 集不含 obsolete——差集撤票，归零仲裁判死，删行。
+            const auto old_votes =
+                m.store.contributions_of_entry(m.fa, "digest-a");
+            std::vector<cg::db::SymId> retracted;
+            for (const cg::db::SymId sid : old_votes)
+            {
+                m.store.retract_contribution(sid, m.fa, "digest-a");
+                retracted.push_back(sid);
+            }
+            const auto fresh = std::array{m.caller, draw};
+            m.store.contribute_symbols(m.fa, "digest-a", fresh);
+            const auto zeroed = m.store.zero_contribution_symbols(retracted);
+            cg::test::check(
+                r,
+                zeroed.size() == 1 && zeroed.front() == gone,
+                "zero-vote arbitration picks exactly the retracted "
+                "symbol that lost all votes");
+            m.store.erase_symbols(zeroed);
             tx.commit();
         }
         cg::test::check(
             r,
             cg::db::symbol_count(m.store) == 4,
-            "purge removes only disappeared symbols");
+            "purge plus zero-vote erase removes only disappeared symbols");
         cg::test::check(
             r,
             !cg::db::get_symbol(m.store, gone).has_value(),
-            "obsolete symbol gone");
+            "obsolete symbol gone after its votes hit zero");
         cg::test::check(
             r,
             cg::db::get_symbol(m.store, m.caller).has_value(),
@@ -1925,6 +1955,142 @@ namespace
             "a 50-row batch commits atomically");
     }
 
+    void type_hint_source_projection(R& r)
+    {
+        Mini m;
+        // 命中面：四个 (owner,file,line,col) 组合的 #external 行，type_set/
+        // confidence/fallback 等载荷各不相同（行内容全字段参与等价比对）。
+        const auto hit = [&](int              line,
+                             int              col,
+                             std::string_view type_set,
+                             int              confidence,
+                             std::string_view fallback)
+        {
+            m.store.upsert_type_hint(
+                {.owner_id = m.caller,
+                 .var_name = "#external",
+                 .file_id = m.fa,
+                 .line = line,
+                 .col = col,
+                 .type_set = type_set,
+                 .source = 12,
+                 .confidence = confidence,
+                 .fallback_reason = fallback,
+                 .param_index = -1});
+        };
+        hit(10, 1, R"(["record|Device"])", 3, "");
+        hit(11, 2, R"(["record|Screen"])", 2, "single-candidate");
+        m.store.upsert_type_hint(
+            {.owner_id = m.callee,
+             .var_name = "#external",
+             .file_id = m.fb,
+             .line = 20,
+             .col = 3,
+             .type_set = R"(["record|Speaker"])",
+             .source = 12});
+        m.store.upsert_type_hint(
+            {.owner_id = m.callee,
+             .var_name = "#external",
+             .file_id = m.fb,
+             .line = 21,
+             .col = 4,
+             .type_set = R"(["record|Box"])",
+             .source = 12,
+             .confidence = 1,
+             .fallback_reason = "wide-shape"});
+
+        // 干扰面：槽名/来源的邻值边界行。C++ 写路径 source 一律按
+        // int64 绑定，INTEGER 亲和列的 TEXT 数值形态不可达（仅 raw SQL
+        // 才能注入，另行由 SQL 层比对覆盖），这里覆盖字符串侧的全部
+        // 分叉形态：大小写、首/尾空格、嵌入 NUL、前后缀邻居、来源
+        // 邻值 11/13、以及另一个真实槽名。
+        const std::string embedded_nul =
+            std::string{"#external"} + '\0' + std::string{"extra"};
+        const auto near = [&](std::string_view var, int source, int line)
+        {
+            m.store.upsert_type_hint(
+                {.owner_id = m.caller,
+                 .var_name = var,
+                 .file_id = m.fa,
+                 .line = line,
+                 .col = 5,
+                 .type_set = R"(["record|Near"])",
+                 .source = source});
+        };
+        near("#External", 12, 30);  // 大小写
+        near(" #external", 12, 31); // 前导空格
+        near("#external ", 12, 32); // 尾随空格
+        near(embedded_nul, 12, 33); // 嵌入 NUL（sqlite 按字节长度存取）
+        near("#externa", 12, 34);   // 前缀截断邻居
+        near("#externall", 12, 35); // 后缀扩展邻居
+        near("#external", 11, 36);  // 来源下邻值
+        near("#external", 13, 37);  // 来源上邻值
+        near("#ret", 12, 38);       // 另一个真实槽名
+
+        const auto projected = m.store.type_hints_of_source(12, "#external");
+        cg::test::check(
+            r,
+            projected.size() == 4,
+            std::format(
+                "projection returns exactly the four #external rows (got {})",
+                projected.size()));
+
+        // 全读过滤参照臂：all_type_hints 后按同谓词内存过滤（旧行集形）。
+        std::vector<cg::db::TypeHintRow> filtered;
+        for (const cg::db::TypeHintRow& row : m.store.all_type_hints())
+        {
+            if (row.source == 12 && row.var_name == "#external")
+            {
+                filtered.push_back(row);
+            }
+        }
+
+        const auto spell = [](const cg::db::TypeHintRow& row)
+        {
+            return std::format(
+                "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                row.id,
+                row.owner_id,
+                row.var_name,
+                row.file_id,
+                row.line,
+                row.col,
+                row.type_set,
+                row.source,
+                row.confidence,
+                row.fallback_reason,
+                row.param_index,
+                row.related_var,
+                row.related_key);
+        };
+        const auto same =
+            std::ranges::equal(projected, filtered, {}, spell, spell);
+        std::string first_diff;
+        if (!same)
+        {
+            for (std::size_t i = 0;
+                 i < std::max(projected.size(), filtered.size());
+                 ++i)
+            {
+                const std::string a =
+                    i < projected.size() ? spell(projected[i]) : "<none>";
+                const std::string b =
+                    i < filtered.size() ? spell(filtered[i]) : "<none>";
+                if (a != b)
+                {
+                    first_diff = std::format("row {}: [{}] vs [{}]", i, a, b);
+                    break;
+                }
+            }
+        }
+        cg::test::check(
+            r,
+            same,
+            std::format(
+                "WHERE projection rows == full-read filtered rows ({})",
+                first_diff));
+    }
+
     const cg::test::Registrar reg_schema{
         "db.schema_bootstrap",
         &schema_bootstrap};
@@ -1981,6 +2147,9 @@ namespace
     const cg::test::Registrar reg_tx{
         "db.transactions_commit_and_rollback",
         &transactions_commit_and_rollback};
+    const cg::test::Registrar reg_hint_projection{
+        "db.type_hint_source_projection",
+        &type_hint_source_projection};
 
     void meta_erase_roundtrip(cg::test::Result& r)
     {
@@ -2256,6 +2425,158 @@ namespace
     const cg::test::Registrar reg_file_path_cache{
         "db.file_path_cache_invalidation",
         &file_path_cache};
+
+    // erase_symbols 的外键级联钉子：一个被删符号牵动的全部引用形态
+    // ——edges（src/dst CASCADE）、type_hints（owner CASCADE）、
+    // 子成员（parent_id CASCADE，跨文件也删）、call_sites 的
+    // caller CASCADE 与 callee/method/static_type SET NULL——逐表断言。
+    // 该删除面是层级正交化批的行清除半边（模板死实例行显式删除），
+    // 此前仅经 incr.equiv 间接覆盖，此处补 store 层直接单测。
+    void erase_symbols_cascade_forms(R& r)
+    {
+        GraphStore           store{":memory:"};
+        const cg::db::FileId fmain = store.upsert_file("e:/src/main.cpp");
+        const cg::db::FileId fhdr = store.upsert_file("e:/src/logic.hpp");
+
+        const cg::db::SymId victim = store.upsert_symbol(
+            {.unique_key = "function||victim|e:/src/main.cpp",
+             .kind = SymbolKind::Function,
+             .name = "victim",
+             .ns = "",
+             .sig_hash = std::nullopt,
+             .file_id = fmain,
+             .line = 1,
+             .col = 5});
+        const cg::db::SymId bystander = store.upsert_symbol(
+            {.unique_key = "function||bystander|e:/src/main.cpp",
+             .kind = SymbolKind::Function,
+             .name = "bystander",
+             .ns = "",
+             .sig_hash = std::nullopt,
+             .file_id = fmain,
+             .line = 9,
+             .col = 5});
+        // 子成员挂在另一文件：parent_id 级联跨文件生效（与拥有文件无关）。
+        const cg::db::SymId child = store.upsert_symbol(
+            {.unique_key = "method|victim|emit|e:/src/logic.hpp",
+             .kind = SymbolKind::Method,
+             .name = "emit",
+             .ns = "",
+             .sig_hash = std::nullopt,
+             .file_id = fhdr,
+             .line = 3,
+             .col = 9,
+             .parent_id = victim});
+
+        store.upsert_edge(edge(bystander, victim, fmain, 10));
+        store.upsert_type_hint(
+            {.owner_id = victim,
+             .var_name = "slot",
+             .file_id = fmain,
+             .line = 11,
+             .col = 13,
+             .type_set = "[\"victim*\"]",
+             .source = 0});
+        // 站点 A：callee/method/static_type 三列全指 victim（SET NULL 面）。
+        store.upsert_call_site(
+            {.caller_id = bystander,
+             .callee_id = victim,
+             .callee_key = "function||victim",
+             .callee_name = "victim",
+             .method_id = victim,
+             .method_key = "method|victim|emit",
+             .static_type_id = victim,
+             .file_id = fmain,
+             .line = 20,
+             .col = 9});
+        // 站点 B：caller 是 victim（caller CASCADE 面）。
+        store.upsert_call_site(
+            {.caller_id = victim,
+             .callee_id = bystander,
+             .callee_key = "function||bystander",
+             .callee_name = "bystander",
+             .file_id = fmain,
+             .line = 30,
+             .col = 9});
+
+        const auto pre = cg::db::stats(store);
+        cg::test::check(
+            r,
+            pre.symbols == 3 && pre.edges == 1 && pre.type_hints == 1
+                && pre.call_sites == 2,
+            std::format(
+                "seed counts before erase (symbols {}, edges {}, hints {}, "
+                "sites {})",
+                pre.symbols,
+                pre.edges,
+                pre.type_hints,
+                pre.call_sites));
+        if (pre.symbols != 3 || pre.edges != 1 || pre.type_hints != 1
+            || pre.call_sites != 2)
+        {
+            return; // 播种失败时后续断言只会级联误报
+        }
+
+        const std::vector<cg::db::SymId> victims{victim};
+        store.erase_symbols(victims);
+
+        const std::vector<cg::db::FullSymbolRow> syms =
+            cg::db::all_symbol_rows(store);
+        bool victim_gone = true;
+        bool child_gone = true;
+        bool byst_alive = false;
+        for (const cg::db::FullSymbolRow& s : syms)
+        {
+            victim_gone = victim_gone && s.id != victim;
+            child_gone = child_gone && s.id != child;
+            byst_alive = byst_alive || s.id == bystander;
+        }
+        cg::test::check(
+            r,
+            victim_gone && child_gone && byst_alive,
+            std::format(
+                "the erased row and its child die, the bystander survives "
+                "({} rows left)",
+                syms.size()));
+        cg::test::check(
+            r,
+            cg::db::all_edges(store).empty(),
+            "edges referencing the erased symbol cascade away");
+        cg::test::check(
+            r,
+            cg::db::all_type_hints(store).empty(),
+            "type hints owned by the erased symbol cascade away");
+        const std::vector<cg::db::CallSiteRow> sites =
+            cg::db::all_call_sites(store);
+        cg::test::check(
+            r,
+            sites.size() == 1,
+            std::format(
+                "only the SET-NULL site survives the caller-cascade site "
+                "({} sites left)",
+                sites.size()));
+        if (sites.size() == 1)
+        {
+            cg::test::check(
+                r,
+                sites[0].caller_id == bystander
+                    && !sites[0].callee_id.has_value()
+                    && !sites[0].method_id.has_value()
+                    && !sites[0].static_type_id.has_value(),
+                "callee/method/static_type flip to NULL, caller untouched");
+        }
+
+        // 行不存在时幂等空操作（重复删除不炸不误删）。
+        store.erase_symbols(victims);
+        cg::test::check(
+            r,
+            cg::db::all_symbol_rows(store).size() == 1,
+            "re-erasing a missing row is a no-op");
+    }
+
+    const cg::test::Registrar reg_erase_symbols_cascade{
+        "db.erase_symbols_cascade_forms",
+        &erase_symbols_cascade_forms};
 
 } // namespace
 

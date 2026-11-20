@@ -36,7 +36,7 @@ export namespace cg::db
      * 当前值不符的已存库在打开时直接拒绝，由 `ccg index --force` 重建
      * 文件；全新库由 ddl_statements 一步建成当前版本形态。
      */
-    inline constexpr int schema_version = 16;
+    inline constexpr int schema_version = 18;
 
     /** @brief 每次打开数据库时执行的 PRAGMA 清单。 */
     inline constexpr std::string_view open_pragmas[] = {
@@ -205,7 +205,8 @@ export namespace cg::db
     arg_vars        TEXT    NOT NULL DEFAULT '[]', -- 与 arg_types 对齐的同函数变量名
     arg_call_keys   TEXT    NOT NULL DEFAULT '[]', -- 与 arg_types 对齐的延迟返回槽描述符
     arg_targets     TEXT    NOT NULL DEFAULT '[]', -- 与 arg_types 对齐的函数目标 key（取址/裸名实参）
-    receiver_types  TEXT    NOT NULL DEFAULT '[]',
+    receiver_types  TEXT    NOT NULL DEFAULT '[]',  -- 静态∪动态排序并集（dispatch 写回的披露面）
+    receiver_static TEXT    NOT NULL DEFAULT '[]',  -- parse 专写：接收者声明静态类型（装载判证面）
     callee_resolved INTEGER NOT NULL DEFAULT 0,   -- 被调用者解析（与 dispatch 无关）
     resolved        INTEGER NOT NULL DEFAULT 0,   -- dispatch 解析出候选
     confidence      INTEGER NOT NULL DEFAULT 3,
@@ -326,6 +327,15 @@ export namespace cg::db
     holder      TEXT NOT NULL,
     lease_until INTEGER NOT NULL
 ))",
+
+        R"(CREATE TABLE symbol_contributions (
+    sym_id     INTEGER NOT NULL REFERENCES symbols(sym_id) ON DELETE CASCADE,
+    file_id    INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
+    cmd_digest TEXT    NOT NULL,
+    PRIMARY KEY (sym_id, file_id, cmd_digest)
+) WITHOUT ROWID)",
+        "CREATE INDEX symbol_contributions_entry ON symbol_contributions("
+        "file_id, cmd_digest)",
     };
 
     /**
@@ -1006,10 +1016,12 @@ export namespace cg::db
         std::string                 arg_vars;  // JSON 数组（与 arg_types 对齐）
         std::string arg_call_keys;             // JSON 数组（与 arg_types 对齐）
         std::string arg_targets;               // JSON 数组（与 arg_types 对齐）
-        std::string receiver_types;            // JSON 数组
-        bool        callee_resolved = false;
-        bool        resolved = false;
-        int         confidence = 3;
+        std::string receiver_types; // JSON 数组（静态∪动态并集，披露面）
+        std::string
+             receiver_static; // JSON 数组（parse 首写的纯声明静态，判证面）
+        bool callee_resolved = false;
+        bool resolved = false;
+        int  confidence = 3;
         std::string candidates; // JSON: [{target,confidence,reason}]
         std::string fallback_reason;
         std::string callee_usr;        // 界外模板实例 callee USR（实例桥）
@@ -1067,6 +1079,7 @@ export namespace cg::db
         r.arg_vars = std::string{row.argVars};
         r.arg_call_keys = std::string{row.argCallKeys};
         r.receiver_types = std::string{row.receiverTypes};
+        r.receiver_static = std::string{row.receiverStatic};
         r.callee_resolved = static_cast<std::int64_t>(row.calleeResolved) != 0;
         r.resolved = static_cast<std::int64_t>(row.resolved) != 0;
         r.confidence = static_cast<int>(row.confidence);
@@ -1273,6 +1286,7 @@ export namespace cg::db
         std::string_view            arg_call_keys;
         std::string_view            arg_targets;
         std::string_view            receiver_types;
+        std::string_view            receiver_static;
         bool                        callee_resolved = false;
         bool                        resolved = false;
         int                         confidence = 3;

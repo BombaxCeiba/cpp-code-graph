@@ -901,7 +901,9 @@ export namespace cg::analysis
         std::optional<std::int64_t> method_id;
         std::string                 method_key;
         std::optional<std::int64_t> static_type_id;
-        std::vector<std::string>    receiver_types; // 静态 + 动态（排序）
+        std::vector<std::string>
+            receiver_types; // 静态（receiver_static
+                            // 列）∪动态的排序并集（落库披露列）
         /** @brief 被调用者本身是否解析到符号（与 dispatch 是否解析无关）。 */
         bool callee_resolved = false;
         /** @brief dispatch 是否解析出至少一个候选（非虚/间接调用恒为 false）。

@@ -42,7 +42,7 @@
     {
       "name": "msvc-dev",
       "displayName": "cpp-code-graph 开发构建（MSVC、Ninja Multi-Config）",
-      "description": "'clang-dev' preset 的 MSVC 工具链兄弟。请在 'x64 Native Tools Command Prompt'（或跑过 vcvars64 之后）里 configure，使 cl.exe 在 PATH 上；TMP/TEMP 要放在有空间的盘上（否则 cl 报 D8050）。clang-c 头与运行期 libclang.dll 来自经 CCG_LLVM_ROOT 选定的 LLVM 安装——绝不是烤死的默认（机器本地的值放进 CMakeUserPresets.json）。无消毒剂构建树；'import std' 由工具集自带的 std.ixx 供给（cmake/CcgUtils.cmake）。",
+      "description": "'clang-dev' preset 的 MSVC 工具链兄弟。请在 'x64 Native Tools Command Prompt'（或跑过 vcvars64 之后）里 configure，使 cl.exe 在 PATH 上；TMP/TEMP 要放在有空间的盘上（否则 cl 报 D8050）。clang-c 头与运行期 libclang.dll 来自经 CCG_LLVM_ROOT 选定的 LLVM 安装——绝不是烤死的默认（机器本地的值放进 CMakeUserPresets.json）。无消毒剂构建树；'import std' 的供给按 CMake 版本分支（CMake >= 4.5 由 CMake 的合成 std 目标供给、C2801 影子补丁经影子 modules.json 注入；更老版本由工具集自带的 std.ixx OBJECT 库供给——见 cmake/CcgUtils.cmake）。",
       "inherits": "msvc-base",
       "binaryDir": "${sourceDir}/build/msvc-dev",
       "cacheVariables": {

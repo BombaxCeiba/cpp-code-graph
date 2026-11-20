@@ -1653,57 +1653,6 @@ namespace cg::db
     }
 
     /**
-     * @brief src 或 dst 在 `ids` 之中的边的不同属主文件：引用了被清除符号
-     *        的站点，因此需要的重抽取与全量重建会做的重解析完全一致。
-     */
-    export auto edge_site_files_touching(
-        GraphStore&            store,
-        std::span<const SymId> ids) -> std::vector<FileId>
-    {
-        if (ids.empty())
-        {
-            return {};
-        }
-        const std::vector<std::int64_t> id_list{ids.begin(), ids.end()};
-        const tab::Edges                e{};
-        std::vector<FileId>             out;
-        auto                            rows = store.conn()(
-            sqlpp::select(e.siteFileId)
-                .from(e)
-                .group_by(e.siteFileId)
-                .where(e.srcId.in(id_list) or e.dstId.in(id_list)));
-        for (const auto& row : rows)
-        {
-            out.push_back(static_cast<FileId>(row.siteFileId));
-        }
-        return out;
-    }
-
-    /**
-     * @brief 给定符号的定义文件（级联注定被删的成员必须重抽取其文件，
-     *        以恢复新的父连接）。
-     */
-    export auto defining_files(GraphStore& store, std::span<const SymId> ids)
-        -> std::vector<FileId>
-    {
-        if (ids.empty())
-        {
-            return {};
-        }
-        const std::vector<std::int64_t> id_list{ids.begin(), ids.end()};
-        const tab::Symbols              s{};
-        std::vector<FileId>             out;
-        auto                            rows = store.conn()(
-            sqlpp::select(s.fileId).from(s).group_by(s.fileId).where(
-                s.symId.in(id_list)));
-        for (const auto& row : rows)
-        {
-            out.push_back(static_cast<FileId>(row.fileId));
-        }
-        return out;
-    }
-
-    /**
      * @brief 整表文本投影组（等价性门禁）：symbols/edges/includes 每行的
      *        规范文本，按主键排序（includes：按内容排序，该表无暴露 id）。
      *

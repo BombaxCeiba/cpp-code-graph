@@ -620,7 +620,9 @@ export namespace cg::cli
          * 模块需要 >=c++20，故无任何 /std:（或低于 c++20）的库以 c++20 垫底。
          * 同一文件的多条库条目（两个目标建同一单元）：首条记录命令为权威
          * （与 db 路线同裁决——重复重放会把同一文件解析两遍）。无可路由单元
-         * 时恢复被移出的经典条目。
+         * 时恢复被移出的经典条目；此时若 cl 条目源文本携带头单元 import，
+         * 本路线不支持该形态（自建链里的头单元降级通道整个未进场），先于
+         * 索引以 warning 披露场景、后果与涉及的 TU（见下方检测块）。
          */
         inline void route_cl_module_tus(
             const Invocation&                       inv,
@@ -680,6 +682,69 @@ export namespace cg::cli
             }
             if (module_files.empty())
             {
+                // 纯头单元语料的可观测性披露：整库零命名模块时自建链不
+                // 进场地，cl 条目文本书写的 `import "x.hpp";` 消费者对逐
+                // 字重放的裸 argv 解析必败（引擎以原始报错拒绝未知头单
+                // 元），而用户拿到报错无从联想是本路线暂不支持该形态。
+                // 不修复、只告知：warning 一次讲清场景（MSVC 风格命令行
+                // 语料含头单元 import）、后果（这些 TU 将解析失败）与两
+                // 方言分叉（编译数据库路线已支持同形态——头单元 import
+                // 被改写为文本 #include 后可解析）。检测复用既有判据、
+                // 不新造词法：text_has_import 做行级预过滤（零 import 行
+                // 的语料零词法扫描），命中者经头单元降级半边同源的词法
+                // 扫描器确认头单元拼写。warning 只加可观测性，绝不改路
+                // 由行为。
+                std::vector<std::string> header_unit_consumers;
+                std::string              first_header_unit_spelling;
+                for (const cg::clang::CompileCommand& c : classic)
+                {
+                    if (std::ranges::find(c.argv, "--driver-mode=cl")
+                            == c.argv.end()
+                        || !cg::clang::text_has_import(c.file))
+                    {
+                        continue;
+                    }
+                    const std::string norm = cg::util::norm_path(c.file);
+                    const std::vector<std::string> imports =
+                        cg::clang::detail::text_header_unit_imports(c.file);
+                    if (!imports.empty()
+                        && std::ranges::find(header_unit_consumers, norm)
+                               == header_unit_consumers.end())
+                    {
+                        header_unit_consumers.push_back(norm);
+                        if (first_header_unit_spelling.empty()
+                            && !imports.front().empty())
+                        {
+                            first_header_unit_spelling = imports.front();
+                        }
+                    }
+                }
+                if (!header_unit_consumers.empty())
+                {
+                    std::string listed;
+                    for (const std::string& f : header_unit_consumers)
+                    {
+                        listed += listed.empty() ? f : ", " + f;
+                    }
+                    // 示例拼写取首个实际检测到的头名（非固定示意），
+                    // 后果措辞如实覆盖 `#if 0` 编译剔除形态——词法判据
+                    // 看不见条件编译，被剔除的 import 不会真的失败。
+                    std::println(
+                        std::cerr,
+                        "ccg: warning: this MSVC-style command-line corpus "
+                        "contains header-unit imports (import \"{}\";) "
+                        "in {} file{}: {} - the MSVC command-line route "
+                        "cannot index header-unit imports yet, so these "
+                        "translation units will fail to parse (unless the "
+                        "import is compiled out); the "
+                        "compile-database route (clang/gcc command lines) "
+                        "already supports this shape by rewriting "
+                        "header-unit imports into plain #include lines",
+                        first_header_unit_spelling,
+                        header_unit_consumers.size(),
+                        header_unit_consumers.size() == 1 ? "" : "s",
+                        listed);
+                }
                 commands = std::move(classic);
                 return;
             }

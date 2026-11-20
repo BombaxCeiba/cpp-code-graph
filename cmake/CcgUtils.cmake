@@ -39,20 +39,26 @@ if(WIN32 AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
 endif()
 
 # ---------------------------------------------------------------------------
-# MSVC 的 `import std` 供给（探针实测）：
-# CMake 实验性的合成 @cmake_cxx_std 静态库能链接但
-# 丢掉 STL charconv 的内联静态量（每个 std::format 消费者上
-# std::_General_precision_tables 报 LNK2001/LNK2019——库符号
-# 索引从未登记过它们）。可行的配方是把
+# MSVC 的 `import std` 供给，按 CMake 版本分两条路径：
+#   CMake >= 4.5（import std 非实验化）：std 模块由 CMake 给每个
+# 有模块扫描源的目标无条件挂接的 @cmake_cxx_std 合成目标供给
+# （ApplyCXXStdTarget 不再读 CXX_MODULE_STD，项目侧无开关可拒
+# 绝；自建 std 供给与之并存即双供应 Disagreement 硬错误）。合成
+# 目标按 CXXInterfaceObjects 把 std.ixx/std.compat.ixx 的对象直
+# 接送上消费者的链接行——静态库惰性提取丢 charconv 内联静态量
+# 的旧形态在 4.5 已不存在。C2801 影子补丁经影子 conforming
+# modules.json 的 local-arguments.include-directories 注入合成目
+# 标的编译命令（cmake/CcgC2801Workaround.cmake 的
+# ccg_c2801_wire_synth_std）。
+#   CMake < 4.5（实验性 opt-in，合成库实测丢 STL charconv 内联
+# 静态量——std::format 消费者上 _General_precision_tables 报
+# LNK2001/LNK2019，库符号索引从未登记过它们）：可行的配方是把
 # 工具集自带的 modules/std.ixx 构建成带 PUBLIC CXX_MODULES
 # 文件集的 OBJECT 库：目标文件直接上链接行，没有库，没有缺口。
-# 探针钉死的要求：文件集必须 PUBLIC（PRIVATE 使
-# 消费者拿不到模块），BASE_DIRS 必须覆盖工具集
-# 路径（默认基目录拒绝源码树外的文件），必须有一个
-# 普通锚点 TU，STL 模块本身要 /utf-8，且 MSVC 路径上任何地方都不得出现
-# CXX_MODULE_STD / CMAKE_EXPERIMENTAL_CXX_IMPORT_STD
-# （cl 下没有任何东西设置 CXX_MODULE_STD，因此根
-# CMakeLists 的 UUID 闸在这里保持惰性；clang64 路径保持不变）。
+# 探针钉死的要求：文件集必须 PUBLIC（PRIVATE 使消费者拿不到
+# 模块），BASE_DIRS 必须覆盖工具集路径（默认基目录拒绝源码树外
+# 的文件），必须有一个普通锚点 TU，STL 模块本身要 /utf-8，且
+# 不 opt-in 合成目标（CXX_MODULE_STD 保持 OFF）。
 if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     get_filename_component(_cl_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
     get_filename_component(CCG_MSVC_TOOLSET_ROOT "${_cl_dir}/../../.." ABSOLUTE)
@@ -63,22 +69,27 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
             "Install the MSVC 'C++ core features' (module) component or "
             "point the build at a complete toolset.")
     endif()
-    add_library(cg_std_modules OBJECT
-        "${CMAKE_CURRENT_LIST_DIR}/std_modules_anchor.cpp")
-    target_sources(cg_std_modules PUBLIC FILE_SET CXX_MODULES
-        BASE_DIRS "${CCG_MSVC_TOOLSET_ROOT}/modules"
-        FILES "${CCG_MSVC_TOOLSET_ROOT}/modules/std.ixx")
-    target_compile_options(cg_std_modules PRIVATE /utf-8)
-    message(STATUS "ccg toolchain: MSVC std module "
-                   "${CCG_MSVC_TOOLSET_ROOT}/modules/std.ixx")
 
-    # C2801 规避（机制与验证见
-    # cmake/C2801ApplyPatch.cmake 的头注释）：对工具集 <filesystem> 做配置期影子补丁，
-    # 只施加到本目标——它是 std BMI 的唯一生产者、
-    # 该缺陷的决定性宿主。补丁无法匹配并验证时
-    # 一律回落到未打补丁的头文件。
     include("${CMAKE_CURRENT_LIST_DIR}/CcgC2801Workaround.cmake")
-    ccg_c2801_wire_std_module_shadow(cg_std_modules)
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 4.5)
+        ccg_c2801_wire_synth_std()
+    else()
+        add_library(cg_std_modules OBJECT
+            "${CMAKE_CURRENT_LIST_DIR}/std_modules_anchor.cpp")
+        target_sources(cg_std_modules PUBLIC FILE_SET CXX_MODULES
+            BASE_DIRS "${CCG_MSVC_TOOLSET_ROOT}/modules"
+            FILES "${CCG_MSVC_TOOLSET_ROOT}/modules/std.ixx")
+        target_compile_options(cg_std_modules PRIVATE /utf-8)
+        message(STATUS "ccg toolchain: MSVC std module "
+                       "${CCG_MSVC_TOOLSET_ROOT}/modules/std.ixx")
+
+        # C2801 规避（机制与验证见
+        # cmake/C2801ApplyPatch.cmake 的头注释）：对工具集 <filesystem> 做配置期影子补丁，
+        # 只施加到本目标——它是 std BMI 的唯一生产者、
+        # 该缺陷的决定性宿主。补丁无法匹配并验证时
+        # 一律回落到未打补丁的头文件。
+        ccg_c2801_wire_std_module_shadow(cg_std_modules)
+    endif()
 endif()
 
 # 每个调用 ccg 的测试都前插进 PATH 的目录：解析出的
@@ -161,13 +172,20 @@ function(ccg_module_target target)
     # 持有模块的目标：clang-tidy 读取这些目标构建出的 BMI。
     set_property(GLOBAL APPEND PROPERTY CCG_MODULE_TARGETS ${target})
     if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-        # MSVC：`import std` 来自上方搭好的工具集 std.ixx OBJECT 库，
-        # 不来自 CMake 的合成目标（探针结论；
-        # 库形态会丢 charconv 内联静态量）。
-        set_target_properties(${target} PROPERTIES CXX_MODULE_STD OFF)
+        if(CMAKE_VERSION VERSION_GREATER_EQUAL 4.5)
+            # std 模块来自 CMake 无条件挂接的 @cmake_cxx_std 合成目标
+            #（见本文件顶部版本分支说明）；显式 ON 是意图陈述
+            #（4.5 的挂接不读该属性，写出来避免读者误判供给来源）。
+            set_target_properties(${target} PROPERTIES CXX_MODULE_STD ON)
+        else()
+            # `import std` 来自上方搭好的工具集 std.ixx OBJECT 库，
+            # 不来自 CMake 的合成目标（探针结论；
+            # 库形态会丢 charconv 内联静态量）。
+            set_target_properties(${target} PROPERTIES CXX_MODULE_STD OFF)
+            target_link_libraries(${target} PRIVATE cg_std_modules)
+        endif()
         target_compile_features(${target} PUBLIC cxx_std_23)
         target_compile_options(${target} PRIVATE /W4 /utf-8)
-        target_link_libraries(${target} PRIVATE cg_std_modules)
     else()
         set_target_properties(${target} PROPERTIES CXX_MODULE_STD ON)
         target_compile_features(${target} PUBLIC cxx_std_23)

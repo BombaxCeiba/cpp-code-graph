@@ -22,6 +22,7 @@ namespace
 
     constexpr std::string_view fixture_dir = CCG_SAMPLE1_DIR;
     constexpr std::string_view uses_fixture_dir = CCG_USES_DIR;
+    constexpr std::string_view constexpr_spec_dir = CCG_CONSTEXPR_SPEC_DIR;
 
     [[nodiscard]]
     auto fixture(std::string_view name) -> std::string
@@ -787,6 +788,115 @@ namespace
     const cg::test::Registrar reg_cxflags{
         "extract.constexpr_flags",
         &constexpr_flags};
+
+    // 夹具 constexpr-spec：constexpr 检测判据（AST 重打印文本的声明头，
+    // 先剥字符串字面量、跳过说明符之前的花括号组、再截到函数体起点）在
+    // 宏形态谱与说明符前花括号谱上的行为锚点。方向性锚点：说明符由宏
+    // 生成时源前缀只见宏别名（旧判据漏报 0），重打印文本已展开为说明符
+    // 本词（判 1）；名字由宏生成且函数体内带 constexpr 局部量时，旧回退
+    // 把整声明 extent 词法化吃进体内局部（误报 1），重打印截到函数体起
+    // 点即拒绝（判 0）；说明符之前的花括号组（requires 复合要求的体、
+    // 类类型 NTTP 花括号默认值）曾触发截断使说明符不可达（漏报 0），
+    // 语境感知配对跳过后可达（判 1）；defaulted 补面前缀里的属性实参字
+    // 符串恰含说明符本词（曾误报 1），补面剥字符串后拒绝（判 0）。
+    void constexpr_pretty_printed_head(R& r)
+    {
+        const Merged m = merged_extraction(constexpr_spec_dir);
+        const auto   find = [&](std::string_view name,
+                                std::string_view parent) -> const ex::SymbolRec*
+        {
+            for (const ex::SymbolRec& s : m.symbols)
+            {
+                if (s.name == name && s.parent == parent)
+                {
+                    return &s;
+                }
+            }
+            return nullptr;
+        };
+        struct Want
+        {
+            std::string_view name;
+            std::string_view parent;
+            bool             is_constexpr;
+        };
+        const Want wants[] = {
+            // 宏形态（判据替换的两个行为翻转点）。
+            {"macro_specifier_fn", "", true},
+            {"macro_named_fn", "", true},
+            {"body_leak_fn", "", false},
+            // 基础说明符谱。
+            {"constexpr_free_fn", "", true},
+            {"consteval_free_fn", "", true},
+            {"plain_free_fn", "", false},
+            {"comment_split_fn", "", true},
+            {"attr_then_constexpr_fn", "", true},
+            {"tmpl_constexpr_fn", "", true},
+            {"hash_attr_constexpr_fn", "", true},
+            // 变量谱：字符串字面量内容不是说明符。
+            {"constexpr_var", "", true},
+            {"plain_var", "", false},
+            {"string_content_var", "", false},
+            // 类内谱：无说明符构造的体内局部量不外溢；方法命中。
+            {"CtorBodyProbe", "CtorBodyProbe", false},
+            {"const_method", "CtorBodyProbe", true},
+            // defaulted 谱：打印器对 "= default" 丢说明符，defaulted 形态
+            // 回源前缀直读（带说明符命中、不带拒绝）；"= delete" 的打印
+            // 保留说明符（主路径命中）。
+            {"DefaultedProbe", "DefaultedProbe", true},
+            {"DefaultedPlainCopy", "DefaultedPlainCopy", false},
+            // 说明符之前的花括号谱（语境感知配对跳过）：requires 复合要
+            // 求的体与类类型 NTTP 花括号默认值不是函数体；requires 体之
+            // 后的函数体必须仍然截断（体内局部量不得外溢）。
+            {"requires_compound_brace_fn", "", true},
+            {"requires_paren_fn", "", true},
+            {"requires_nested_brace_fn", "", true},
+            {"requires_body_local_fn", "", false},
+            {"nttp_brace_default_fn", "", true},
+            {"nttp_plain_default_fn", "", true},
+            // defaulted 补面剥字符串：属性实参里的说明符本词不是说明符。
+            {"AttrDefaulted", "AttrDefaulted", false},
+            {"AttrStrEvalDefaulted", "AttrStrEvalDefaulted", false},
+            {"AttrStrRealCx", "AttrStrRealCx", true},
+            // 函数体超语句级跨度：判定只看声明头。
+            {"huge_body_fn", "", true},
+        };
+        for (const Want& w : wants)
+        {
+            const ex::SymbolRec* s = find(w.name, w.parent);
+            cg::test::check(
+                r,
+                s != nullptr,
+                std::string{w.name} + " extracted");
+            if (s)
+            {
+                cg::test::check(
+                    r,
+                    ((s->flags & ex::sym_flags::is_constexpr) != 0)
+                        == w.is_constexpr,
+                    std::string{w.name} + " is_constexpr expected "
+                        + (w.is_constexpr ? "1" : "0"));
+            }
+        }
+        // 面外对照：函数体内局部量不作为符号保留，纯声明与 = delete
+        // 函数不是定义——都不进符号表，判据无从误标。
+        cg::test::check(
+            r,
+            find("local_in_fn", "") == nullptr,
+            "function-body local is not a symbol");
+        cg::test::check(
+            r,
+            find("declared_only_fn", "") == nullptr,
+            "non-definition declaration is not a symbol");
+        cg::test::check(
+            r,
+            find("deleted_free_fn", "") == nullptr,
+            "deleted function is not a symbol");
+    }
+
+    const cg::test::Registrar reg_cxhead{
+        "extract.constexpr_pretty_printed_head",
+        &constexpr_pretty_printed_head};
 
     // ---------------------------------------------------------------------------
     // USES 提取矩阵（field/param/return/local 交叉 class/template/std）

@@ -1929,7 +1929,7 @@ namespace
             tail_replaced.size() == 2 && tail_replaced[0] == "follower_cfg.h"
                 && tail_replaced[1] == "follower_cfg.h",
             "both header sites still collect their import names");
-        const std::string        umb_src = read_fixture("follower_umbrella.cpp");
+        const std::string umb_src = read_fixture("follower_umbrella.cpp");
         std::vector<std::string> umb_replaced;
         const std::string        umb_out = cc::import_rewrite_overlay(
             umb_src,
@@ -2271,11 +2271,8 @@ namespace
         // 同名前缀不误伤（消费端剥离的直接单测）：/ifcOutputX、/interface2
         // 这类恰以清单拼写为前缀的旗标不是模块开关——开关与后随 token 都
         // 逐字保留，绝不剥一半留一半、也绝不误吞。
-        const std::vector<std::string> near_miss = {
-            "/ifcOutputX",
-            "E:/not/a/value.ifc",
-            "/interface2",
-            "/std:c++20"};
+        const std::vector<std::string> near_miss =
+            {"/ifcOutputX", "E:/not/a/value.ifc", "/interface2", "/std:c++20"};
         const MsvcModuleStrip g4 =
             cc::detail::strip_msvc_module_switches(near_miss);
         cg::test::check(
@@ -3221,6 +3218,125 @@ namespace
             "libclang version string available");
     }
 
+    /**
+     * @brief 宏错位 extent 的 token 卫生闸与二元运算 opcode 门面。
+     *
+     * @internal SWIG PYTHON 后端把桥接 API 生成 #define，宏调用表达式的
+     * extent 两端 spelling 各钉在不同宏定义处：clang_tokenize 按两端
+     * spelling 偏移词法化，会扫过两个定义点之间的全部源码（真库单翻译
+     * 单元曾把 330 秒烧在这上面）。夹具把 CONV 与 FLAG_KEEP 两个宏定义
+     * 隔开约 5KB 复现错位形态：宏调用表达式的 begin 落在 CONV 定义处、
+     * end 落在 FLAG_KEEP 定义处，正序但相距 5.4KB（真 TU 慢样本的同款
+     * 坐标形态）。断言闸拒绝这次 tokenize、对正常语句（含 900 字节的
+     * 长初始化列表）不误伤、赋值判定经 opcode（Sema 建树的权威判定，
+     * 不经源码词法化）与 token 判定在健康形态下互证。另设一条约 5KB
+     * 的合法巨型初始化表：span 闸对它按设计静默归空（token 级子判定
+     * 宁漏勿误），断言钉住该边界行为——token 为空且解析产物面不崩。
+     */
+    void tokenize_macro_extent_gate(R& r)
+    {
+        // 夹具 tok_gate_macros.cpp：两个宏定义间垫 130 个填充函数（约
+        // 5.4KB）；尾部先是一个 450 元素的扁平初始化表（约 900 字节的
+        // 单语句，验证长语句不被闸误伤），再是一条 3000 槽、约 5KB 的
+        // 合法巨型初始化表（验证合法超长单语句被 span 闸静默归空）。
+        const cc::Index    index;
+        const cc::ParsedTu parsed = cc::parse(
+            index,
+            fixture("tok_gate_macros.cpp"),
+            cc::fallback_argv());
+        cg::test::check(
+            r,
+            parsed.tu.valid() && parsed.errors.empty(),
+            "macro-mismatch gate fixture parses clean");
+        if (!parsed.tu.valid())
+        {
+            return;
+        }
+
+        const auto all =
+            collect(parsed.tu, [](const CXCursor&) { return true; }, false);
+
+        std::size_t assign_live = 0;         // 赋值 opcode 且拿到真 token
+        bool        assign_token_eq = false; // 赋值的真 token 里有 '='
+        bool        add_assign = false;      // '+=' 有独立 opcode
+        bool        compare = false;         // '==' 有独立 opcode
+        std::size_t calls = 0;
+        std::size_t calls_gated = 0; // 宏调用表达式拿空 token
+        std::size_t max_tokens = 0;  // 单游标 token 数的峰值
+        for (const CXCursor& c : all)
+        {
+            const std::vector<std::string> toks = cc::token_spellings(c);
+            if (toks.size() > max_tokens)
+            {
+                max_tokens = toks.size();
+            }
+            const CX_BinaryOperatorKind op = cc::binary_opcode(c);
+            if (op == CX_BO_Assign)
+            {
+                if (!toks.empty())
+                {
+                    ++assign_live;
+                }
+                assign_token_eq = assign_token_eq
+                                  || std::ranges::find(toks, "=") != toks.end();
+            }
+            else if (op == CX_BO_AddAssign)
+            {
+                add_assign = true;
+            }
+            else if (op == CX_BO_EQ)
+            {
+                compare = true;
+            }
+            if (cc::kind(c) == CXCursor_CallExpr)
+            {
+                ++calls;
+                if (toks.empty())
+                {
+                    ++calls_gated;
+                }
+            }
+        }
+        cg::test::check(
+            r,
+            calls == 1 && calls_gated == 1,
+            "macro-mismatch call expression yields no tokens (span gate)");
+        cg::test::check(
+            r,
+            assign_live >= 1,
+            "plain assignments keep their tokens");
+        cg::test::check(
+            r,
+            assign_token_eq,
+            "healthy assignments still show '=' to the token scan");
+        cg::test::check(
+            r,
+            max_tokens >= 800,
+            "the 900-byte plain initializer still tokenizes in full");
+        const CXCursor* huge =
+            by_kind_spelling(CXCursor_VarDecl, "huge_table", all);
+        cg::test::check(
+            r,
+            huge != nullptr,
+            "the oversized legal initializer table is present in the fixture");
+        if (huge != nullptr)
+        {
+            cg::test::check(
+                r,
+                cc::token_spellings(*huge).empty(),
+                "a legal >4KB single statement is span-gated: its tokens"
+                " come back empty without breaking the parse");
+        }
+        cg::test::check(
+            r,
+            max_tokens <= 1024,
+            "no cursor tokenizes beyond statement scale");
+        cg::test::check(
+            r,
+            add_assign && compare,
+            "opcode distinguishes += and == from =");
+    }
+
     // --------------------------------------------------- export
     // 覆盖层 ------
 
@@ -3343,9 +3459,8 @@ namespace
         // 命名空间包装之外）。行号按锚串从夹具文本动态
         // 定位（锚串前的换行数加一），夹具头部注释增删
         // 不再牵动断言常量。
-        const std::string  mini_src = read_fixture("mini.ixx");
-        const std::size_t  anchor =
-            mini_src.find("int visible_function()");
+        const std::string mini_src = read_fixture("mini.ixx");
+        const std::size_t anchor = mini_src.find("int visible_function()");
         const std::size_t authored_line =
             anchor == std::string::npos
                 ? 0
@@ -3842,11 +3957,12 @@ namespace
         // 险丝（目录空壳/删除挂起的容忍语义见块外注释）。
         fs::path temp_base;
         {
-            TempProj          proj{"ccg-rekey-"};
-            std::error_code   ec;
+            TempProj        proj{"ccg-rekey-"};
+            std::error_code ec;
             temp_base = proj.base;
-            const std::string driver_name{cc::engine::discovery_driver_names[0]};
-            const fs::path    lib_copy =
+            const std::string driver_name{
+                cc::engine::discovery_driver_names[0]};
+            const fs::path lib_copy =
                 proj.base / std::string{cc::engine::library_file_name};
             fs::copy_file(
                 fs::path{original},
@@ -3903,7 +4019,7 @@ namespace
                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                         fs::path{lib_copy.generic_string()}.wstring().c_str(),
                         &copy_module)
-                        != 0
+                            != 0
                         && copy_module != nullptr,
                     "the copy engine module stays mapped before unload");
                 if (copy_module != nullptr)
@@ -6812,6 +6928,9 @@ namespace
         "clang.driver_cache_rekey",
         &driver_cache_rekeys_on_engine_switch};
     const cg::test::Registrar reg_db{"clang.compile_db", &compile_db_load};
+    const cg::test::Registrar reg_tok_gate{
+        "clang.tokenize_gate",
+        &tokenize_macro_extent_gate};
     const cg::test::Registrar reg_db_pch{
         "clang.compile_db_pch",
         &compile_db_pch_load};
@@ -7773,6 +7892,120 @@ namespace
             "dependency order");
     }
 
+    // 实例化跳过开关（CCG_SKIP_INSTANTIATIONS，TU_Prefix 形态）的纯
+    // 判定门：默认关、精确值 "1" 开、cl 方言、显式延迟模板解析语料与
+    // *-windows-msvc 三元组条目永久禁用（延迟语料下 TU_Prefix 不
+    // parse 模板 pattern 体）。
+    void instantiation_skip_gate(R& r)
+    {
+        using Opt = std::optional<std::string>;
+        const std::vector<std::string> gnu_argv{
+            "-x",
+            "c++",
+            "-std=c++20",
+            "-DFOO=1"};
+
+        cg::test::check(
+            r,
+            !cc::detail::instantiation_skip_allowed(std::nullopt, gnu_argv),
+            "an unset CCG_SKIP_INSTANTIATIONS keeps the complete form");
+        cg::test::check(
+            r,
+            !cc::detail::instantiation_skip_allowed(Opt{"0"}, gnu_argv),
+            "CCG_SKIP_INSTANTIATIONS=0 keeps the complete form");
+        cg::test::check(
+            r,
+            !cc::detail::instantiation_skip_allowed(Opt{"true"}, gnu_argv),
+            "only the exact value 1 enables the skip form");
+        cg::test::check(
+            r,
+            cc::detail::instantiation_skip_allowed(Opt{"1"}, gnu_argv),
+            "CCG_SKIP_INSTANTIATIONS=1 on a GNU-dialect argv enables the "
+            "skip form");
+
+        std::vector<std::string> cl_argv = gnu_argv;
+        cl_argv.emplace_back("--driver-mode=cl");
+        cg::test::check(
+            r,
+            !cc::detail::instantiation_skip_allowed(Opt{"1"}, cl_argv),
+            "the cl dialect is permanently excluded even with the switch "
+            "on (late-parsed template bodies would never parse)");
+
+        std::vector<std::string> delayed_on_argv = gnu_argv;
+        delayed_on_argv.emplace_back("-fdelayed-template-parsing");
+        cg::test::check(
+            r,
+            !cc::detail::instantiation_skip_allowed(Opt{"1"}, delayed_on_argv),
+            "an explicit -fdelayed-template-parsing argv is excluded");
+
+        std::vector<std::string> delayed_off_argv = gnu_argv;
+        delayed_off_argv.emplace_back("-fno-delayed-template-parsing");
+        cg::test::check(
+            r,
+            cc::detail::instantiation_skip_allowed(Opt{"1"}, delayed_off_argv),
+            "an explicit -fno-delayed-template-parsing argv stays "
+            "eligible (eager parsing is the safe direction)");
+
+        // GNU 拼写 + *-windows-msvc 三元组：驱动器在低于 C++20 时自动
+        // 注入 -fdelayed-template-parsing（cc1 装配期，argv 层不可见），
+        // 门必须按三元组放行前拦下（保守判据：与标准版本无关）。
+        std::vector<std::string> msvc_joined_argv{
+            "-x",
+            "c++",
+            "-std=c++17",
+            "--target=x86_64-pc-windows-msvc"};
+        cg::test::check(
+            r,
+            !cc::detail::instantiation_skip_allowed(Opt{"1"}, msvc_joined_argv),
+            "a joined --target=*-windows-msvc argv is excluded (the "
+            "driver injects delayed parsing invisible at the argv layer)");
+
+        std::vector<std::string> msvc_split_argv{
+            "-x",
+            "c++",
+            "-std=c++17",
+            "-target",
+            "x86_64-pc-windows-msvc"};
+        cg::test::check(
+            r,
+            !cc::detail::instantiation_skip_allowed(Opt{"1"}, msvc_split_argv),
+            "a split -target <msvc-triple> argv is excluded like the "
+            "joined spelling");
+
+        std::vector<std::string> msvc_modern_argv{
+            "-x",
+            "c++",
+            "-std=c++23",
+            "--target=aarch64-pc-windows-msvc"};
+        cg::test::check(
+            r,
+            !cc::detail::instantiation_skip_allowed(Opt{"1"}, msvc_modern_argv),
+            "an msvc-target argv is excluded regardless of the standard "
+            "version (conservative criterion, no -std parsing)");
+
+        std::vector<std::string> mingw_argv{
+            "-x",
+            "c++",
+            "-std=c++17",
+            "--target=x86_64-w64-windows-gnu"};
+        cg::test::check(
+            r,
+            cc::detail::instantiation_skip_allowed(Opt{"1"}, mingw_argv),
+            "a mingw *-windows-gnu target triple has no driver-injected "
+            "delayed parsing and stays eligible");
+
+        std::vector<std::string> lookalike_argv{
+            "-x",
+            "c++",
+            "-std=c++20",
+            "-target-cpu=x86-64"};
+        cg::test::check(
+            r,
+            cc::detail::instantiation_skip_allowed(Opt{"1"}, lookalike_argv),
+            "lookalike flags such as -target-cpu do not satisfy the "
+            "exact -target token match");
+    }
+
     const cg::test::Registrar reg_topo{
         "clang.bmi_topo_layers",
         &bmi_topo_layers};
@@ -7784,6 +8017,10 @@ namespace
     const cg::test::Registrar reg_header{
         "clang.header_fallback",
         &header_only_fallback_parse};
+
+    const cg::test::Registrar reg_skip_gate{
+        "clang.instantiation_skip_gate",
+        &instantiation_skip_gate};
 
 } // namespace
 

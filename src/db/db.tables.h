@@ -678,8 +678,9 @@ namespace cg::db
         using Failures = ::sqlpp::table_t<Failures_>;
 
         /**
-         * @brief 实时变更队列（schema v6，多进程实时协调协议）：每条规范化路径一行；
-         *        TEXT 主键对并发的重复入队去重。
+         * @brief 实时变更队列（schema
+         * v6，多进程实时协调协议）：每条规范化路径一行； TEXT
+         * 主键对并发的重复入队去重。
          */
         struct PendingUpdates_
         {
@@ -1021,6 +1022,14 @@ namespace cg::db
                 using data_type = ::sqlpp::text;
                 using has_default = std::true_type;
             };
+            struct ReceiverStatic
+            {
+                SQLPP_CREATE_NAME_TAG_FOR_SQL_AND_CPP(
+                    receiver_static,
+                    receiverStatic);
+                using data_type = ::sqlpp::text;
+                using has_default = std::true_type;
+            };
             struct CalleeResolved
             {
                 SQLPP_CREATE_NAME_TAG_FOR_SQL_AND_CPP(
@@ -1111,6 +1120,7 @@ namespace cg::db
                 ArgCallKeys,
                 ArgTargets,
                 ReceiverTypes,
+                ReceiverStatic,
                 CalleeResolved,
                 Resolved,
                 Confidence,
@@ -1419,6 +1429,54 @@ namespace cg::db
                 ::sqlpp::column_t<::sqlpp::table_t<ExternalInvokes_>, Col>>;
         };
         using ExternalInvokes = ::sqlpp::table_t<ExternalInvokes_>;
+
+        /**
+         * @brief 贡献登记表（schema v18，行生老病死记账制）：符号行 ×
+         *        编译条目的一票一行。
+         *
+         * @internal 条目身份与 fingerprints/failures 同款 (file_id,
+         *           cmd_digest) 对——双编译条目天然两票（同文件两条目各
+         *           一票），条目重解析后按差集撤票/续票，票数归零的符号行
+         *           在 dispatch 装载前删除（FK 级联清边/线索/站点）。PK 以
+         *           sym_id 开头服务归零仲裁的 EXISTS 探测；entry 辅助索引
+         *           服务逐条目的旧票读取（差集撤票的输入）。
+         */
+        struct SymbolContributions_
+        {
+            struct SymId
+            {
+                SQLPP_CREATE_NAME_TAG_FOR_SQL_AND_CPP(sym_id, symId);
+                using data_type = ::sqlpp::integral;
+                using has_default = std::false_type;
+            };
+            struct FileId
+            {
+                SQLPP_CREATE_NAME_TAG_FOR_SQL_AND_CPP(file_id, fileId);
+                using data_type = ::sqlpp::integral;
+                using has_default = std::false_type;
+            };
+            struct CmdDigest
+            {
+                SQLPP_CREATE_NAME_TAG_FOR_SQL_AND_CPP(cmd_digest, cmdDigest);
+                using data_type = ::sqlpp::text;
+                using has_default = std::false_type;
+            };
+            SQLPP_CREATE_NAME_TAG_FOR_SQL_AND_CPP(
+                symbol_contributions,
+                symbolContributions);
+            template <typename T>
+            using _table_columns =
+                ::sqlpp::table_columns<T, SymId, FileId, CmdDigest>;
+            using _required_insert_columns = ::sqlpp::detail::type_set<
+                ::sqlpp::
+                    column_t<::sqlpp::table_t<SymbolContributions_>, SymId>,
+                ::sqlpp::
+                    column_t<::sqlpp::table_t<SymbolContributions_>, FileId>,
+                ::sqlpp::column_t<
+                    ::sqlpp::table_t<SymbolContributions_>,
+                    CmdDigest>>;
+        };
+        using SymbolContributions = ::sqlpp::table_t<SymbolContributions_>;
 
         /** @brief 聚合结果列的别名标签组（SELECT expr AS `<tag>`）。 */
         SQLPP_CREATE_NAME_TAG(cnt);

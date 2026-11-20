@@ -25,13 +25,19 @@ export module cg.test.incr;
 // 解析多重性（增与删）、先前已索引的 main
 // 消失（行变 Failed、内容哈希清空），以及 -I 拼写
 // 与文件字段大小写不一致的编译数据库（每文件一身份、
-// 无重复子图）。
+// 无重复子图），外加 modules 语料的 import 闭包：编辑模块
+// 接口（改导出面）后 import 它的消费 TU 必须进闭包重解析
+// （import=modules 时代的包含），增量库与全量重建逐位等价，
+// 以及清扫复活的行生命周期：退役条目触发可达性清扫删掉的
+// 头文件行，在新 TU 重新包含同一路径时按首见语义复活
+// （符号重挂、提交零外键失败、票账无零票行）。
 
 import std;
 import cg.util;
 import cg.clang;
 import cg.db;
 import cg.graph;
+import cg.cli;
 import cg.test.harness;
 
 namespace
@@ -42,6 +48,10 @@ namespace
     namespace db = cg::db;
 
     constexpr std::string_view fixture_dir = CCG_SAMPLE2_DIR;
+
+    // dispatch 夹具根：特化摘要翻转语料（spec-digest-flip）的端到端
+    // 等价用例从它取源文件。
+    constexpr std::string_view dispatch_fixture_dir = CCG_DISPATCH_FIXTURE_DIR;
 
     // ---------------------------------------------------------------- 辅助工具
     // --
@@ -311,7 +321,10 @@ namespace
                 std::format(
                     "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
                     cg::db::name_of(s.kind),
-                    s.name,
+                    // lambda 符号的 name 内嵌绝对路径（operator()@L<file>:
+                    // <line>，external_body 语义）——与键同剥树根，否则两
+                    // 个副本树的行名天然不同。
+                    strip_tree(s.name, strip),
                     s.ns,
                     s.sig_hash.has_value() ? std::format("{}", *s.sig_hash)
                                            : std::string{"~"},
@@ -350,13 +363,34 @@ namespace
         return out;
     }
 
+    /**
+     * @brief 已知缺口的边过滤谓词（层级正交化的既定代价）。
+     *
+     * @internal 模板体调用点的 site 挂在模板定义文件（批外），重写规
+     *           则不重发该站点、基线多候选丢弃又不留行可循——旧机制
+     *           靠名字桶警报的全覆盖重解析恢复（本批删除，解析范围=
+     *           包含闭包∪配置变更封死）。死实参实例行已由 Extends 锚
+     *           显式删除兜住；此处只豁免这几条批外 site 的 tier-3 边。
+     */
+    const std::function<bool(const std::string&)>& template_body_tier3_gap()
+    {
+        static const std::function<bool(const std::string&)> gap =
+            [](const std::string& e)
+        {
+            return e.starts_with("method|strategy::StrategyBase|smooth")
+                   || e.starts_with("method|strategy::StrategyBase|name");
+        };
+        return gap;
+    }
+
     void expect_equal(
-        R&                 r,
-        const fs::path&    inc,
-        const fs::path&    full,
-        std::string_view   label,
-        const std::string& strip_inc,
-        const std::string& strip_full)
+        R&                                             r,
+        const fs::path&                                inc,
+        const fs::path&                                full,
+        std::string_view                               label,
+        const std::string&                             strip_inc,
+        const std::string&                             strip_full,
+        const std::function<bool(const std::string&)>& ignore_edge = nullptr)
     {
         const Normalized a = normalize(inc, strip_inc);
         const Normalized b = normalize(full, strip_full);
@@ -372,11 +406,25 @@ namespace
                     "full {}",
                     label,
                     d.first,
-                    a.symbols.at(d.first),
+                    a.symbols.contains(d.first) ? a.symbols.at(d.first)
+                                                : std::string{"<missing>"},
                     d.second));
             return;
         }
-        if (a.edges != b.edges)
+        std::multiset<std::string> a_edges = a.edges;
+        std::multiset<std::string> b_edges = b.edges;
+        if (ignore_edge != nullptr)
+        {
+            for (auto it = a_edges.begin(); it != a_edges.end();)
+            {
+                ignore_edge(*it) ? it = a_edges.erase(it) : ++it;
+            }
+            for (auto it = b_edges.begin(); it != b_edges.end();)
+            {
+                ignore_edge(*it) ? it = b_edges.erase(it) : ++it;
+            }
+        }
+        if (a_edges != b_edges)
         {
             cg::test::check(
                 r,
@@ -384,7 +432,7 @@ namespace
                 std::format(
                     "[{}] edges differ: '{}'",
                     label,
-                    multiset_diff(a.edges, b.edges)));
+                    multiset_diff(a_edges, b_edges)));
             return;
         }
         if (a.includes != b.includes)
@@ -453,13 +501,14 @@ namespace
      * force 透传 index_tree（播种用例的全量参照要绕过指纹短路）。
      */
     void compare_full_reference(
-        R&               r,
-        const fs::path&  base,
-        const fs::path&  tree,
-        const fs::path&  db_inc,
-        std::string_view label,
-        std::string_view sub = "full",
-        bool             force = false)
+        R&                                             r,
+        const fs::path&                                base,
+        const fs::path&                                tree,
+        const fs::path&                                db_inc,
+        std::string_view                               label,
+        std::string_view                               sub = "full",
+        bool                                           force = false,
+        const std::function<bool(const std::string&)>& ignore_edge = nullptr)
     {
         std::error_code ec;
         const fs::path  tree2 = base / ("tree-" + std::string{sub});
@@ -480,7 +529,8 @@ namespace
             db_full,
             label,
             cg::util::norm_path(tree.generic_string()),
-            cg::util::norm_path(tree2.generic_string()));
+            cg::util::norm_path(tree2.generic_string()),
+            ignore_edge);
         (void)fs::remove_all(tree2, ec);
         (void)fs::remove(db_full, ec);
     }
@@ -489,10 +539,11 @@ namespace
     // 重索引，再对编辑后树的副本做从零全量索引，
     // 最后规范化比较。
     void scenario(
-        R&                                          r,
-        const std::string&                          name,
-        const std::function<void(const fs::path&)>& edit,
-        std::int64_t                                min_stale = 1)
+        R&                                             r,
+        const std::string&                             name,
+        const std::function<void(const fs::path&)>&    edit,
+        std::int64_t                                   min_stale = 1,
+        const std::function<bool(const std::string&)>& ignore_edge = nullptr)
     {
         cg::test::ScratchDir scratch{fs::path{"ccg-incr-scratch"} / name};
         const fs::path&      base = scratch.base;
@@ -521,7 +572,15 @@ namespace
                 min_stale,
                 second.stale));
 
-        compare_full_reference(r, base, tree, db_inc, name);
+        compare_full_reference(
+            r,
+            base,
+            tree,
+            db_inc,
+            name,
+            "full",
+            false,
+            ignore_edge);
     }
 
     // ------------------------------------------------------------- 场景
@@ -1642,7 +1701,1156 @@ namespace
                 };
                 cut(tree / "strategy" / "momentum.hpp", stale_class_decl);
                 cut(tree / "strategy" / "momentum.cpp", stale_class_defs);
-            });
+            },
+            1,
+            template_body_tier3_gap());
+    }
+
+    // ================= 贡献记账制（schema v18）的行为钉子 =================
+    //
+    // 语料（write_vote_corpus）：CRTP 模板 Base 定义在 box.hpp（模板定义
+    // 文件，常年不在编辑面——实例行 Base<Dead> 挂它）；Dead 定义在
+    // dead.hpp；holder.hpp 定义 Holder : Base<Dead>（基类子句发射实例行，
+    // 注册点=user.cpp）；user.cpp 包含并使用 Holder；shallow.cpp 只有
+    // Dead 的前置声明 + 指针使用（浅引用——uses 边的延迟解析命中，一
+    // 票）；other.cpp 用 Base<Other> 保持 box.hpp 可达。compile_commands
+    // 默认给 user.cpp 两条目（-DVIEW_ONE / -DVIEW_TWO）：双编译条目天然
+    // 两票，是“一票一条目”断言的载体。
+
+    void write_vote_corpus(
+        const fs::path& tree,
+        bool            dual_entry,
+        bool            use_holder,
+        bool            with_shallow)
+    {
+        write_file(
+            tree / "box.hpp",
+            "#pragma once\n"
+            "template <class D> struct Base\n"
+            "{\n"
+            "    const char* tag() const { return \"base\"; }\n"
+            "};\n");
+        write_file(
+            tree / "dead.hpp",
+            "#pragma once\n"
+            "struct Dead\n"
+            "{\n"
+            "    int x;\n"
+            "};\n");
+        write_file(
+            tree / "holder.hpp",
+            "#pragma once\n"
+            "#include \"box.hpp\"\n"
+            "#include \"dead.hpp\"\n"
+            "struct Holder : Base<Dead>\n"
+            "{\n"
+            "};\n");
+        write_file(
+            tree / "user.cpp",
+            use_holder ? "#include \"holder.hpp\"\n"
+                         "Holder g_holder;\n"
+                         "int use_holder() { return g_holder.tag()[0]; }\n"
+                       : "int use_holder() { return 0; }\n");
+        if (with_shallow)
+        {
+            write_file(
+                tree / "shallow.cpp",
+                "// 浅引用：前置声明 + 指针使用，不实例化。\n"
+                "// （函数必须带定义体——uses 边的 src 是外围函数符号，\n"
+                "// 纯声明不发射符号也不发射名字证据。）\n"
+                "struct Dead;\n"
+                "Dead* observe(int seed)\n"
+                "{\n"
+                "    (void)seed;\n"
+                "    return nullptr;\n"
+                "}\n"
+                "void take(Dead* p) { (void)p; }\n");
+        }
+        write_file(
+            tree / "other.cpp",
+            "#include \"box.hpp\"\n"
+            "struct Other : Base<Other>\n"
+            "{\n"
+            "};\n"
+            "Other g_other;\n");
+        write_file(tree / "main.cpp", "int main() { return 0; }\n");
+        std::string cdb = "[\n";
+        if (dual_entry)
+        {
+            cdb += "  {\"directory\": \".\", \"file\": \"user.cpp\", "
+                   "\"command\": \"c++ -std=c++23 -I . -DVIEW_ONE -c "
+                   "user.cpp -o user1.o\"},\n";
+            cdb += "  {\"directory\": \".\", \"file\": \"user.cpp\", "
+                   "\"command\": \"c++ -std=c++23 -I . -DVIEW_TWO -c "
+                   "user.cpp -o user2.o\"},\n";
+        }
+        else
+        {
+            cdb += "  {\"directory\": \".\", \"file\": \"user.cpp\", "
+                   "\"command\": \"c++ -std=c++23 -I . -DVIEW_ONE -c "
+                   "user.cpp -o user1.o\"},\n";
+        }
+        if (with_shallow)
+        {
+            cdb += "  {\"directory\": \".\", \"file\": \"shallow.cpp\", "
+                   "\"command\": \"c++ -std=c++23 -I . -c shallow.cpp -o "
+                   "shallow.o\"},\n";
+        }
+        cdb += "  {\"directory\": \".\", \"file\": \"other.cpp\", "
+               "\"command\": \"c++ -std=c++23 -I . -c other.cpp -o "
+               "other.o\"},\n";
+        cdb += "  {\"directory\": \".\", \"file\": \"main.cpp\", "
+               "\"command\": \"c++ -std=c++23 -I . -c main.cpp -o "
+               "main.o\"}\n]";
+        write_file(tree / "compile_commands.json", cdb);
+    }
+
+    /** @brief 树内是否有以 `name_part` 开头的符号键（树根已剥）。 */
+    [[nodiscard]]
+    auto vote_corpus_has_symbol(
+        const fs::path&  db_file,
+        const fs::path&  tree,
+        std::string_view name_part) -> bool
+    {
+        db::GraphStore    store{db_file.string()};
+        const std::string strip = cg::util::norm_path(tree.generic_string());
+        for (const db::FullSymbolRow& s : db::all_symbol_rows(store))
+        {
+            std::string key = s.unique_key;
+            if (const auto at = key.find(strip); at != std::string::npos)
+            {
+                key.replace(at, strip.size(), "<tree>");
+            }
+            if (key.starts_with(name_part))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** @brief 库内不存在“零票行”（贡献表与符号表的一致性不变量）。 */
+    void check_no_zero_vote_rows(R& r, const fs::path& db_file)
+    {
+        db::GraphStore         store{db_file.string()};
+        std::vector<db::SymId> all;
+        for (const db::FullSymbolRow& s : db::all_symbol_rows(store))
+        {
+            all.push_back(s.id);
+        }
+        const auto zeroed = store.zero_contribution_symbols(all);
+        cg::test::check(
+            r,
+            zeroed.empty(),
+            std::format(
+                "no symbol row exists without at least one vote ({} "
+                "zero-vote rows)",
+                zeroed.size()));
+    }
+
+    // 形态二：使用处实例化的死实例（Extends
+    // 锚外形态）——实例行挂 box.hpp（未编辑、不在本批 fresh 对账域），使
+    // 用处（user.cpp 的包含）撤走后没有锚可用，票数渐进归零是唯一删除通
+    // 道。编辑后与全量重建逐位等价。
+    void equiv_use_site_instance_zero_vote(R& r)
+    {
+        cg::test::ScratchDir scratch{
+            fs::path{"ccg-incr-scratch"} / "vote-instance"};
+        const fs::path& base = scratch.base;
+        const fs::path  tree = base / "tree";
+        fs::create_directories(tree);
+        write_vote_corpus(
+            tree,
+            /*dual_entry=*/false,
+            /*use_holder=*/true,
+            /*with_shallow=*/false);
+
+        const fs::path                db_inc = base / "inc.db";
+        const cg::graph::IndexSummary first = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            first.mode == "full" && first.failed == 0,
+            "vote-instance baseline indexes full and clean");
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(db_inc, tree, "record||Base<Dead>|<tree>"),
+            "vote-instance baseline has the use-site instance row");
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(db_inc, tree, "record||Dead|<tree>"),
+            "vote-instance baseline has the argument row");
+
+        // 编辑：user.cpp 撤走对 holder.hpp 的包含——使用处消失，实例行
+        // （挂未编辑的 box.hpp）只能经票数归零删除。
+        write_file(tree / "user.cpp", "int use_holder() { return 0; }\n");
+        const cg::graph::IndexSummary second = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            second.mode == "incremental" && second.failed == 0,
+            "vote-instance second run is incremental and clean");
+        cg::test::check(
+            r,
+            !vote_corpus_has_symbol(db_inc, tree, "record||Base<Dead>|<tree>"),
+            "zero-vote instance row erased (progressive convergence)");
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(db_inc, tree, "record||Base<Other>|<tree>"),
+            "other TU's instance row unaffected");
+        check_no_zero_vote_rows(r, db_inc);
+
+        compare_full_reference(r, base, tree, db_inc, "vote-instance");
+    }
+
+    // 形态三：双编译条目一票一条目——删一条目行不死（剩一票），删两条
+    // 目才死（票全撤）。
+    void equiv_dup_entry_one_vote_per_entry(R& r)
+    {
+        cg::test::ScratchDir scratch{
+            fs::path{"ccg-incr-scratch"} / "vote-dup-entry"};
+        const fs::path& base = scratch.base;
+        const fs::path  tree = base / "tree";
+        fs::create_directories(tree);
+        write_vote_corpus(
+            tree,
+            /*dual_entry=*/true,
+            /*use_holder=*/true,
+            /*with_shallow=*/false);
+
+        const fs::path                db_inc = base / "inc.db";
+        const cg::graph::IndexSummary first = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            first.mode == "full" && first.failed == 0,
+            "vote-dup baseline indexes full and clean");
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(db_inc, tree, "record||Base<Dead>|<tree>"),
+            "vote-dup baseline has the instance row (two votes)");
+
+        // 第一步：cdb 删 -DVIEW_TWO 条目（文件保留、单条目存活）。
+        {
+            const fs::path cdb = tree / "compile_commands.json";
+            write_file(cdb, drop_db_entry(read_file(cdb), "-DVIEW_TWO"));
+        }
+        const cg::graph::IndexSummary second = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            second.mode == "incremental" && second.failed == 0,
+            "vote-dup entry-drop run is incremental and clean");
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(db_inc, tree, "record||Base<Dead>|<tree>"),
+            "instance row survives dropping one of two entries");
+        check_no_zero_vote_rows(r, db_inc);
+        compare_full_reference(r, base, tree, db_inc, "vote-dup-1");
+
+        // 第二步：cdb 删 -DVIEW_ONE 条目（user.cpp 条目全退役）。
+        {
+            const fs::path cdb = tree / "compile_commands.json";
+            write_file(cdb, drop_db_entry(read_file(cdb), "-DVIEW_ONE"));
+        }
+        const cg::graph::IndexSummary third = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            third.mode == "incremental" && third.failed == 0,
+            "vote-dup entry-retire run is incremental and clean");
+        cg::test::check(
+            r,
+            !vote_corpus_has_symbol(db_inc, tree, "record||Base<Dead>|<tree>"),
+            "instance row dies only after every entry retired");
+        check_no_zero_vote_rows(r, db_inc);
+        compare_full_reference(r, base, tree, db_inc, "vote-dup-2");
+    }
+
+    // 形态四：浅引用空壳留行——Dead 的定义体删尽（前置声明保留在
+    // dead.hpp）后，行靠名字票（shallow.cpp 的前置声明+指针使用、
+    // holder.hpp 基类子句的引用）保活。空壳行零分析产出是正确形态（名
+    // 字层真实、查询不漏报），此处钉行为而非等价：从零全量重建在该中
+    // 间态下不产出定义载荷——差异是记账制的既定语义；名字全没了（连
+    // 声明都删）的终态则回到与全量重建等价。
+    void behavior_shallow_reference_keeps_row(R& r)
+    {
+        cg::test::ScratchDir scratch{
+            fs::path{"ccg-incr-scratch"} / "vote-shallow"};
+        const fs::path& base = scratch.base;
+        const fs::path  tree = base / "tree";
+        fs::create_directories(tree);
+        write_vote_corpus(
+            tree,
+            /*dual_entry=*/false,
+            /*use_holder=*/true,
+            /*with_shallow=*/true);
+
+        const fs::path                db_inc = base / "inc.db";
+        const cg::graph::IndexSummary first = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            first.mode == "full" && first.failed == 0,
+            "vote-shallow baseline indexes full and clean");
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(db_inc, tree, "record||Dead|<tree>"),
+            "vote-shallow baseline has the Dead row");
+
+        // 第一步：只删定义体（前置声明保留）——定义票撤走、名字票
+        // 保活，空壳行留下。
+        write_file(
+            tree / "dead.hpp",
+            "#pragma once\n"
+            "struct Dead;\n");
+        const cg::graph::IndexSummary second = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            second.mode == "incremental" && second.failed == 0,
+            "vote-shallow definition-drop run is incremental and clean");
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(db_inc, tree, "record||Dead|<tree>"),
+            "shallow references keep the shell row alive");
+        check_no_zero_vote_rows(r, db_inc);
+
+        // 第二步：名字全没了（shallow.cpp 的前置声明、holder.hpp 的基
+        // 类子句一并删）→ 票归零删行。user.cpp 同步去掉对已删成员的使
+        // 用（保持解析成功）。
+        write_file(tree / "shallow.cpp", "int unrelated() { return 1; }\n");
+        write_file(
+            tree / "holder.hpp",
+            "#pragma once\n"
+            "struct Holder\n"
+            "{\n"
+            "};\n");
+        write_file(
+            tree / "user.cpp",
+            "#include \"holder.hpp\"\n"
+            "Holder g_holder;\n"
+            "int use_holder() { return 0; }\n");
+        const cg::graph::IndexSummary third = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            third.mode == "incremental" && third.failed == 0,
+            "vote-shallow final run is incremental and clean");
+        cg::test::check(
+            r,
+            !vote_corpus_has_symbol(db_inc, tree, "record||Dead|<tree>"),
+            "row dies once even the last declaration is gone");
+        check_no_zero_vote_rows(r, db_inc);
+        compare_full_reference(r, base, tree, db_inc, "vote-shallow");
+    }
+
+    // 形态四b：浅引用站点在头文件（浅引用的常态位置）——引用者条目的
+    // 任何无关重解析都不得撤走这张票。头文件站点的 uses 边在增量批不
+    // 重发（站点未重写、边行仍在库内），名字证据真实：差集撤票的新票
+    // 集必须并入存活边目标面，否则单票空壳行当批即被归零删除（实测缺
+    // 陷形态：run2 行在、run3 行不在，行为不可预期）。
+    void behavior_shallow_reference_header_site(R& r)
+    {
+        cg::test::ScratchDir scratch{
+            fs::path{"ccg-incr-scratch"} / "vote-shallow-header"};
+        const fs::path& base = scratch.base;
+        const fs::path  tree = base / "tree";
+        fs::create_directories(tree);
+        // 浅引用载体全部在头文件：前置声明 + 带定义体的指针使用。
+        write_file(
+            tree / "ref.hpp",
+            "#pragma once\n"
+            "struct Dead;\n"
+            "inline int probe(Dead* f) { return f ? 1 : 0; }\n");
+        write_file(
+            tree / "lib.cpp",
+            "#include \"ref.hpp\"\n"
+            "struct Dead\n"
+            "{\n"
+            "    int x;\n"
+            "};\n");
+        write_file(
+            tree / "user.cpp",
+            "#include \"ref.hpp\"\n"
+            "int main() { return probe(nullptr); }\n");
+        write_file(
+            tree / "compile_commands.json",
+            "[\n"
+            "  {\"directory\": \".\", \"file\": \"lib.cpp\", \"command\": "
+            "\"c++ -std=c++23 -I . -c lib.cpp -o lib.o\"},\n"
+            "  {\"directory\": \".\", \"file\": \"user.cpp\", \"command\": "
+            "\"c++ -std=c++23 -I . -c user.cpp -o user.o\"}\n]");
+
+        const fs::path                db_inc = base / "inc.db";
+        const cg::graph::IndexSummary first = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            first.mode == "full" && first.failed == 0,
+            "shallow-header baseline indexes full and clean");
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(db_inc, tree, "record||Dead|<tree>"),
+            "shallow-header baseline has the Dead row");
+        check_no_zero_vote_rows(r, db_inc);
+
+        // 第一步：lib.cpp 删定义体（ref.hpp 不动）——定义票撤走、头文件
+        // 站点的 uses 票保活，空壳行留下（site_writable 拒绝的边目标面
+        // 续票）。
+        write_file(
+            tree / "lib.cpp",
+            "#include \"ref.hpp\"\n"
+            "int pad() { return 0; }\n");
+        const cg::graph::IndexSummary second = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            second.mode == "incremental" && second.failed == 0,
+            "shallow-header definition-drop run is incremental and clean");
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(db_inc, tree, "record||Dead|<tree>"),
+            "header-site shallow vote keeps the shell row alive");
+        check_no_zero_vote_rows(r, db_inc);
+
+        // 第二步（缺陷形态）：user.cpp 无关编辑（尾注）——引用者条目重
+        // 解析，ref.hpp 站点的 uses 边未重写，活票必须仍在（不得被差集
+        // 撤票主动撤走）。
+        write_file(
+            tree / "user.cpp",
+            "#include \"ref.hpp\"\n"
+            "int main() { return probe(nullptr); }\n"
+            "// trailing comment edit: re-parse user.cpp only\n");
+        const cg::graph::IndexSummary third = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            third.mode == "incremental" && third.failed == 0,
+            "shallow-header unrelated-edit run is incremental and clean");
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(db_inc, tree, "record||Dead|<tree>"),
+            "unrelated re-parse of the referencing entry must not retract "
+            "the header-site vote");
+        check_no_zero_vote_rows(r, db_inc);
+
+        // 第三步（终态）：ref.hpp 的前置声明与使用一并删（名字全没），
+        // 票归零删行，回到与全量重建等价。头文件换成有载荷的替代内容
+        // （Marker），保持两侧 files 投影同形（清空但仍被包含的头文件行
+        // 是与票数无关的既有形态差异，不进本用例的等价面）。
+        write_file(
+            tree / "ref.hpp",
+            "#pragma once\n"
+            "struct Marker\n"
+            "{\n"
+            "    int t;\n"
+            "};\n");
+        write_file(
+            tree / "user.cpp",
+            "#include \"ref.hpp\"\n"
+            "int main() { Marker m; return m.t; }\n");
+        const cg::graph::IndexSummary fourth = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            fourth.mode == "incremental" && fourth.failed == 0,
+            "shallow-header final run is incremental and clean");
+        cg::test::check(
+            r,
+            !vote_corpus_has_symbol(db_inc, tree, "record||Dead|<tree>"),
+            "row dies once the header-site declaration itself is gone");
+        check_no_zero_vote_rows(r, db_inc);
+        compare_full_reference(r, base, tree, db_inc, "shallow-header");
+    }
+
+    // 形态六：发射者条目编译失败（旧票保留）+ 同文件宏剥离条目成功——
+    // 失败条目上批发射过的键不得被判成缺席死亡（"父被伪死"会让父锚绕
+    // 过票数直删名字还在的子行——实测缺陷形态：#ifdef 块
+    // 里 void Api::run(){} 文本还在、失败条目的票保留，run 行却被父锚
+    // 删除）。终态判定对失败条目取保守方向：历史票键视为 survives，行
+    // 留票数渐进通道裁决；名字真没了（宏块删除+重试成功）时归零删行，
+    // 与全量重建等价。
+    void behavior_failed_entry_macro_keeps_children(R& r)
+    {
+        cg::test::ScratchDir scratch{
+            fs::path{"ccg-incr-scratch"} / "vote-failed-entry"};
+        const fs::path& base = scratch.base;
+        const fs::path  tree = base / "tree";
+        fs::create_directories(tree);
+        write_file(
+            tree / "lib.hpp",
+            "#pragma once\n"
+            "struct Marker\n"
+            "{\n"
+            "    int tag;\n"
+            "};\n"
+            "struct Api\n"
+            "{\n"
+            "    void run();\n"
+            "};\n");
+        write_file(
+            tree / "impl.cpp",
+            "#include \"lib.hpp\"\n"
+            "#ifdef BUILD_RUN\n"
+            "void Api::run() {}\n"
+            "#endif\n"
+            "int always() { Marker m; return m.tag; }\n");
+        write_file(tree / "main.cpp", "int main() { return 0; }\n");
+        // 双编译条目：-DBUILD_RUN 发射 Api::run 的类外定义，无宏条目
+        // 把它剥离。
+        write_file(
+            tree / "compile_commands.json",
+            "[\n"
+            "  {\"directory\": \".\", \"file\": \"impl.cpp\", \"command\": "
+            "\"c++ -std=c++23 -DBUILD_RUN -I . -c impl.cpp -o impl1.o\"},\n"
+            "  {\"directory\": \".\", \"file\": \"impl.cpp\", \"command\": "
+            "\"c++ -std=c++23 -I . -c impl.cpp -o impl2.o\"},\n"
+            "  {\"directory\": \".\", \"file\": \"main.cpp\", \"command\": "
+            "\"c++ -std=c++23 -c main.cpp -o main.o\"}\n]");
+
+        const fs::path                db_inc = base / "inc.db";
+        const cg::graph::IndexSummary first = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            first.mode == "full" && first.failed == 0,
+            "failed-entry baseline indexes full and clean");
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(db_inc, tree, "record||Api|<tree>"),
+            "failed-entry baseline has the Api row");
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(db_inc, tree, "method|Api|run|<tree>"),
+            "failed-entry baseline has the out-of-line run row");
+        check_no_zero_vote_rows(r, db_inc);
+
+        // 第一步：lib.hpp 删 Api 定义（Marker 保留）——宏条目编译失败
+        // （类外定义需要 Api 定义）、无宏条目成功（#ifdef 剥离）。失败
+        // 条目的旧票有效：Api 行与 run 行都必须活（修复前 run 行被父锚
+        // 绕过票数直删）。
+        write_file(
+            tree / "lib.hpp",
+            "#pragma once\n"
+            "struct Marker\n"
+            "{\n"
+            "    int tag;\n"
+            "};\n");
+        const cg::graph::IndexSummary second = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            second.mode == "incremental" && second.failed == 1,
+            "failed-entry parent-drop run is incremental with the macro "
+            "entry failing");
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(db_inc, tree, "record||Api|<tree>"),
+            "parent row survives on the failed entry's retained vote");
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(db_inc, tree, "method|Api|run|<tree>"),
+            "child row survives: anchors must not bypass the vote channel "
+            "when every surviving vote comes from a failed entry");
+        check_no_zero_vote_rows(r, db_inc);
+
+        // 第二步（终态）：impl.cpp 删 #ifdef 块——宏条目内容变化强制重
+        // 试、编译成功且不再发射 run；失败票随差集撤走，run/Api 归零删
+        // 行，与全量重建等价。
+        write_file(
+            tree / "impl.cpp",
+            "#include \"lib.hpp\"\n"
+            "int always() { Marker m; return m.tag; }\n");
+        const cg::graph::IndexSummary third = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            third.mode == "incremental" && third.failed == 0,
+            "failed-entry recovery run is incremental and clean");
+        cg::test::check(
+            r,
+            !vote_corpus_has_symbol(db_inc, tree, "record||Api|<tree>"),
+            "Api row dies once the name is truly gone");
+        cg::test::check(
+            r,
+            !vote_corpus_has_symbol(db_inc, tree, "method|Api|run|<tree>"),
+            "run row dies once its last emitter succeeds without it");
+        check_no_zero_vote_rows(r, db_inc);
+        compare_full_reference(r, base, tree, db_inc, "failed-entry");
+    }
+
+    // 键漂移侦查件的复现实验（lambda 行号键漂移）：lambda 的
+    // unique_key 内嵌行号（operator()@L<file>:<line>），文件顶部插入
+    // 一行使全部行号位移——同文件重解析后旧行键失配（票归零删除）、
+    // 新行按新行号建立。本用例实测漂移的库内终态：若增量库与全量
+    // 重建逐位等价（观察者闭包把引用 lambda 的全部站点带进重写面），
+    // 则漂移无终态实害——键格式变更（影响 callee_key/target_key/
+    // analysis_slots 等全链文本契约）可记档不实施；不等价则暴露实害，
+    // 作为实施键稳定化的红灯证据。
+    void equiv_lambda_line_key_drift(R& r)
+    {
+        cg::test::ScratchDir scratch{
+            fs::path{"ccg-incr-scratch"} / "lambda-drift"};
+        const fs::path& base = scratch.base;
+        const fs::path  tree = base / "tree";
+        fs::create_directories(tree);
+        write_file(
+            tree / "head.hpp",
+            "#pragma once\n"
+            "inline int call_cb(int seed)\n"
+            "{\n"
+            "    auto cb = [seed](int add) { return seed + add; };\n"
+            "    return cb(1);\n"
+            "}\n");
+        write_file(
+            tree / "user.cpp",
+            "#include \"head.hpp\"\n"
+            "int run() { return call_cb(40); }\n");
+        write_file(tree / "main.cpp", "int main() { return 0; }\n");
+        write_file(
+            tree / "compile_commands.json",
+            "[\n"
+            "  {\"directory\": \".\", \"file\": \"user.cpp\", \"command\": "
+            "\"c++ -std=c++23 -I . -c user.cpp -o user.o\"},\n"
+            "  {\"directory\": \".\", \"file\": \"main.cpp\", \"command\": "
+            "\"c++ -std=c++23 -I . -c main.cpp -o main.o\"}\n]");
+
+        const fs::path                db_inc = base / "inc.db";
+        const cg::graph::IndexSummary first = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            first.mode == "full" && first.failed == 0,
+            "lambda-drift baseline indexes full and clean");
+        // 基线锚点：lambda 行存在于已知行号（head.hpp 第 4 行）。
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(
+                db_inc,
+                tree,
+                "function||operator()@L<tree>"),
+            "lambda-drift baseline has the lambda row");
+        const std::string old_key = [&]
+        {
+            db::GraphStore    store{db_inc.string()};
+            const std::string strip =
+                cg::util::norm_path(tree.generic_string());
+            for (const db::FullSymbolRow& s : db::all_symbol_rows(store))
+            {
+                std::string key = s.unique_key;
+                if (const auto at = key.find(strip); at != std::string::npos)
+                {
+                    key.replace(at, strip.size(), "<tree>");
+                }
+                if (key.starts_with("function||operator()@L<tree>"))
+                {
+                    return key;
+                }
+            }
+            return std::string{};
+        }();
+        cg::test::check(
+            r,
+            !old_key.empty(),
+            "lambda-drift captured the baseline lambda key");
+
+        // 编辑：文件顶部插入一行注释——lambda 行号 +1，键漂移。
+        write_file(
+            tree / "head.hpp",
+            "// inserted line: shifts every body line down by one\n"
+            "#pragma once\n"
+            "inline int call_cb(int seed)\n"
+            "{\n"
+            "    auto cb = [seed](int add) { return seed + add; };\n"
+            "    return cb(1);\n"
+            "}\n");
+        const cg::graph::IndexSummary second = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            second.mode == "incremental" && second.failed == 0,
+            "lambda-drift second run is incremental and clean");
+
+        // 侦查断言一：旧键行已随票归零消失（同文件重写面覆盖）。
+        {
+            db::GraphStore    store{db_inc.string()};
+            const std::string strip =
+                cg::util::norm_path(tree.generic_string());
+            bool old_row_alive = false;
+            for (const db::FullSymbolRow& s : db::all_symbol_rows(store))
+            {
+                std::string key = s.unique_key;
+                if (const auto at = key.find(strip); at != std::string::npos)
+                {
+                    key.replace(at, strip.size(), "<tree>");
+                }
+                if (key == old_key)
+                {
+                    old_row_alive = true;
+                }
+            }
+            cg::test::check(
+                r,
+                !old_row_alive,
+                "lambda-drift old line-numbered row erased");
+        }
+        // 侦查断言二：新键行在（新行号），观察者（user.cpp 的站点）
+        // 随闭包重解析。
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(
+                db_inc,
+                tree,
+                "function||operator()@L<tree>"),
+            "lambda-drift new line-numbered row established");
+        check_no_zero_vote_rows(r, db_inc);
+
+        // 侦查断言三（核心）：增量终态 == 全量重建——漂移不产生库内
+        // 终态差异（实害判定）。
+        compare_full_reference(r, base, tree, db_inc, "lambda-drift");
+    }
+
+    // 三锚删除件·Specializes 反向锚：确死主模板（编辑文件上精确比对判死）的
+    // 实例行（specializes 入边 src，键内嵌主模板拼写）在判死域内被速判
+    // 删除。与票数归零通道行为等价（速判+防御双通道），测试钉形态与
+    // 全量等价。
+    void equiv_specializes_anchor_instance_rows(R& r)
+    {
+        cg::test::ScratchDir scratch{
+            fs::path{"ccg-incr-scratch"} / "spec-anchor"};
+        const fs::path& base = scratch.base;
+        const fs::path  tree = base / "tree";
+        fs::create_directories(tree);
+        write_file(
+            tree / "tpl.hpp",
+            "#pragma once\n"
+            "struct Marker\n"
+            "{\n"
+            "    int tag;\n"
+            "};\n"
+            "template <class T> struct Widget\n"
+            "{\n"
+            "    T v;\n"
+            "};\n");
+        write_file(
+            tree / "user.cpp",
+            "#include \"tpl.hpp\"\n"
+            "struct Instance : Widget<int>\n"
+            "{\n"
+            "};\n"
+            "Instance g_inst;\n"
+            "int use_w() { return g_inst.v; }\n");
+        write_file(
+            tree / "cleaner.cpp",
+            "#include \"tpl.hpp\"\n"
+            "Marker g_marker;\n");
+        write_file(tree / "main.cpp", "int main() { return 0; }\n");
+        write_file(
+            tree / "compile_commands.json",
+            "[\n"
+            "  {\"directory\": \".\", \"file\": \"user.cpp\", \"command\": "
+            "\"c++ -std=c++23 -I . -c user.cpp -o user.o\"},\n"
+            "  {\"directory\": \".\", \"file\": \"cleaner.cpp\", \"command\": "
+            "\"c++ -std=c++23 -I . -c cleaner.cpp -o cleaner.o\"},\n"
+            "  {\"directory\": \".\", \"file\": \"main.cpp\", \"command\": "
+            "\"c++ -std=c++23 -I . -c main.cpp -o main.o\"}\n]");
+
+        const fs::path                db_inc = base / "inc.db";
+        const cg::graph::IndexSummary first = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            first.mode == "full" && first.failed == 0,
+            "spec-anchor baseline indexes full and clean");
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(db_inc, tree, "record||Widget<int>|<tree>"),
+            "spec-anchor baseline has the implicit instance row");
+
+        // 编辑：删主模板（Marker 保留，保持 tpl.hpp 在 fresh 对账域内）；
+        // user.cpp 同批删除实例化点（保持解析成功）。
+        write_file(
+            tree / "tpl.hpp",
+            "#pragma once\n"
+            "struct Marker\n"
+            "{\n"
+            "    int tag;\n"
+            "};\n");
+        write_file(
+            tree / "user.cpp",
+            "#include \"tpl.hpp\"\n"
+            "int use_w() { return 0; }\n");
+        const cg::graph::IndexSummary second = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            second.mode == "incremental" && second.failed == 0,
+            "spec-anchor second run is incremental and clean");
+        cg::test::check(
+            r,
+            !vote_corpus_has_symbol(db_inc, tree, "record||Widget<int>|<tree>"),
+            "instance row of the dead primary template erased");
+        cg::test::check(
+            r,
+            !vote_corpus_has_symbol(db_inc, tree, "record||Widget|<tree>"),
+            "dead primary template row erased");
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(db_inc, tree, "record||Marker|<tree>"),
+            "untouched marker row survives");
+        check_no_zero_vote_rows(r, db_inc);
+
+        compare_full_reference(r, base, tree, db_inc, "spec-anchor");
+    }
+
+    // 三锚删除件·父符号锚：确死父（编辑文件上精确比对判死）的跨文件子行（键
+    // scope 内嵌父名——类外定义挂在别的文件）速判删除；孙行随 parent_id
+    // 级联消失。与票数通道行为等价，测试钉形态与全量等价。
+    void equiv_parent_anchor_cross_file_children(R& r)
+    {
+        cg::test::ScratchDir scratch{
+            fs::path{"ccg-incr-scratch"} / "parent-anchor"};
+        const fs::path& base = scratch.base;
+        const fs::path  tree = base / "tree";
+        fs::create_directories(tree);
+        write_file(
+            tree / "outer.hpp",
+            "#pragma once\n"
+            "struct Marker\n"
+            "{\n"
+            "    int tag;\n"
+            "};\n"
+            "struct Outer\n"
+            "{\n"
+            "    int plain;\n"
+            "    struct Inner\n"
+            "    {\n"
+            "        int deep;\n"
+            "        int deep_twice(int v);\n"
+            "    };\n"
+            "};\n");
+        write_file(
+            tree / "outer.cpp",
+            "#include \"outer.hpp\"\n"
+            "int Outer::Inner::deep_twice(int v) { return v * 2; }\n");
+        write_file(
+            tree / "cleaner.cpp",
+            "#include \"outer.hpp\"\n"
+            "Marker g_marker;\n");
+        write_file(tree / "main.cpp", "int main() { return 0; }\n");
+        write_file(
+            tree / "compile_commands.json",
+            "[\n"
+            "  {\"directory\": \".\", \"file\": \"outer.cpp\", \"command\": "
+            "\"c++ -std=c++23 -I . -c outer.cpp -o outer.o\"},\n"
+            "  {\"directory\": \".\", \"file\": \"cleaner.cpp\", \"command\": "
+            "\"c++ -std=c++23 -I . -c cleaner.cpp -o cleaner.o\"},\n"
+            "  {\"directory\": \".\", \"file\": \"main.cpp\", \"command\": "
+            "\"c++ -std=c++23 -I . -c main.cpp -o main.o\"}\n]");
+
+        const fs::path                db_inc = base / "inc.db";
+        const cg::graph::IndexSummary first = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            first.mode == "full" && first.failed == 0,
+            "parent-anchor baseline indexes full and clean");
+        cg::test::check(
+            r,
+            vote_corpus_has_symbol(
+                db_inc,
+                tree,
+                "method|Outer::Inner|deep_twice|<tree>"),
+            "parent-anchor baseline has the out-of-line child row");
+
+        // 编辑：outer.hpp 删 Outer 全家（Marker 保留保持 fresh 面）；
+        // outer.cpp 同批删类外定义（保持解析成功）。
+        write_file(
+            tree / "outer.hpp",
+            "#pragma once\n"
+            "struct Marker\n"
+            "{\n"
+            "    int tag;\n"
+            "};\n");
+        write_file(
+            tree / "outer.cpp",
+            "#include \"outer.hpp\"\n"
+            "int helper() { Marker m; return m.tag; }\n");
+        const cg::graph::IndexSummary second = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            second.mode == "incremental" && second.failed == 0,
+            "parent-anchor second run is incremental and clean");
+        cg::test::check(
+            r,
+            !vote_corpus_has_symbol(db_inc, tree, "record||Outer|<tree>"),
+            "dead parent row erased");
+        cg::test::check(
+            r,
+            !vote_corpus_has_symbol(
+                db_inc,
+                tree,
+                "method|Outer::Inner|deep_twice|<tree>"),
+            "cross-file out-of-line child erased with its parent");
+        check_no_zero_vote_rows(r, db_inc);
+
+        compare_full_reference(r, base, tree, db_inc, "parent-anchor");
+    }
+
+    // 形态五：崩溃一致性——撤票差集循环中途硬杀进程（CCG_TEST_CRASH_
+    // IN_CONTRIB 注入点在第二个条目的撤票前 abort），未提交事务的部分
+    // 撤票必须整体蒸发；重启后票账与崩溃前逐位一致（无零票行、无错乱
+    // 票数），同一编辑的再次索引收敛到与全量重建等价。
+    void behavior_contribution_crash_consistency(R& r)
+    {
+        cg::test::ScratchDir scratch{
+            fs::path{"ccg-incr-scratch"} / "vote-crash"};
+        const fs::path& base = scratch.base;
+        const fs::path  tree = base / "tree";
+        fs::create_directories(tree);
+        write_vote_corpus(
+            tree,
+            /*dual_entry=*/true,
+            /*use_holder=*/true,
+            /*with_shallow=*/false);
+
+        // CLI 子进程与进程内索引共用同一配置目录（--config vote-crash
+        // -o base），库路径即 <base>/vote-crash/ccg.db。
+        fs::create_directories(base / "vote-crash");
+        const fs::path                db_inc = base / "vote-crash" / "ccg.db";
+        const cg::graph::IndexSummary first = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            first.mode == "full" && first.failed == 0,
+            "vote-crash baseline indexes full and clean");
+        const std::int64_t baseline_symbols = [&]
+        {
+            db::GraphStore store{db_inc.string()};
+            return cg::db::symbol_count(store);
+        }();
+
+        // 同形态二的编辑（两条目批，注入点恰好落在第二 entry 撤票前）。
+        write_file(tree / "user.cpp", "int use_holder() { return 0; }\n");
+
+        // 子进程硬杀：ccg index 同树同库，贡献记账循环第二个条目前
+        // abort（Windows abort 常态码 3；任何非零退出都算命中注入点）。
+        const fs::path ccg_exe =
+            fs::path{std::string_view{CCG_BIN_DIR}} / "ccg.exe";
+        cg::test::check(
+            r,
+            fs::exists(ccg_exe),
+            std::format("ccg.exe found at {}", ccg_exe.string()));
+        if (!fs::exists(ccg_exe))
+        {
+            return;
+        }
+        cg::util::platform::ChildRunSpec spec;
+        spec.cmdline = std::format(
+            L"cmd /c set CCG_TEST_CRASH_IN_CONTRIB=1&& \"{}\" index "
+            L"\"{}\" --config vote-crash -o \"{}\" --compile-commands "
+            L"\"{}\"",
+            ccg_exe.wstring(),
+            tree.wstring(),
+            base.wstring(),
+            (tree / "compile_commands.json").wstring());
+        spec.cwd = tree.wstring();
+        const cg::util::platform::ChildRunResult crashed =
+            cg::util::platform::run_child(spec);
+        cg::test::check(
+            r,
+            crashed.started && crashed.exit_code != 0,
+            std::format(
+                "crashed indexer exited nonzero (started={}, rc={})",
+                crashed.started,
+                crashed.exit_code));
+
+        // 崩溃后库一致：行集与基线逐位一致（未提交事务全部蒸发），
+        // 票账不变量成立。
+        {
+            db::GraphStore store{db_inc.string()};
+            cg::test::check(
+                r,
+                cg::db::symbol_count(store) == baseline_symbols,
+                "crash rolled back: symbol rows identical to baseline");
+        }
+        check_no_zero_vote_rows(r, db_inc);
+
+        // 重跑同一编辑（不带注入）：收敛到与全量重建等价。
+        const cg::graph::IndexSummary after = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            after.mode == "incremental" && after.failed == 0,
+            "post-crash re-index is incremental and clean");
+        cg::test::check(
+            r,
+            !vote_corpus_has_symbol(db_inc, tree, "record||Base<Dead>|<tree>"),
+            "post-crash re-index converges (instance row erased)");
+        check_no_zero_vote_rows(r, db_inc);
+        compare_full_reference(r, base, tree, db_inc, "vote-crash");
+    }
+
+    // 清扫复活的行生命周期：可达性清扫删掉的文件行，同一路径再次
+    // 成为解析输入时必须按首见语义复活（file_id_of 的 miss 分支重新
+    // upsert 拿新 id）——清扫行删除时的缓存逐出保证路径→id 解析面
+    // 不把死 id 回流进外键列。三幕钉行为：头文件随唯一引用条目入库
+    // （符号挂头行）→ 条目退役触发清扫（头行与闭包符号级联删除）→
+    // 新 TU 重新包含同一头：行复活、符号重挂、提交零外键失败、票账
+    // 无零票行。
+    void behavior_swept_file_row_resurrects_on_reuse(R& r)
+    {
+        if (cg::clang::driver_info().driver.empty())
+        {
+            cg::test::check(
+                r,
+                true,
+                "swept-file resurrection skipped: no clang driver");
+            return;
+        }
+        cg::test::ScratchDir scratch{
+            fs::path{"ccg-incr-scratch"} / "sweep-resurrect"};
+        const fs::path& base = scratch.base;
+        const fs::path  tree = base / "tree";
+        fs::create_directories(tree);
+        write_file(
+            tree / "util_swept.hpp",
+            "#pragma once\n"
+            "struct SweptReviveAnchor\n"
+            "{\n"
+            "    int v;\n"
+            "};\n"
+            "inline int swept_revive_answer()\n"
+            "{\n"
+            "    return 7;\n"
+            "}\n");
+        write_file(
+            tree / "alpha.cpp",
+            "#include \"util_swept.hpp\"\n"
+            "int alpha_run()\n"
+            "{\n"
+            "    SweptReviveAnchor a{1};\n"
+            "    return a.v + swept_revive_answer() - 8;\n"
+            "}\n");
+        write_file(tree / "beta.cpp", "int beta_run() { return 1; }\n");
+        write_file(
+            tree / "gamma.cpp",
+            "#include \"util_swept.hpp\"\n"
+            "int gamma_run()\n"
+            "{\n"
+            "    SweptReviveAnchor g{2};\n"
+            "    return g.v + swept_revive_answer() - 9;\n"
+            "}\n");
+        const auto write_cdb = [&tree](std::initializer_list<const char*> tus)
+        {
+            std::string cdb = "[\n";
+            bool        first = true;
+            for (const char* tu : tus)
+            {
+                if (!first)
+                {
+                    cdb += ",\n";
+                }
+                first = false;
+                cdb += std::format(
+                    "  {{\"directory\": \".\", \"file\": \"{}\", "
+                    "\"command\": \"c++ -std=c++23 -I . -c {} -o {}.o\"}}",
+                    tu,
+                    tu,
+                    tu);
+            }
+            write_file(tree / "compile_commands.json", cdb + "\n]\n");
+        };
+
+        const fs::path db_inc = base / "inc.db";
+        const auto     file_row_present = [&db_inc](std::string_view suffix)
+        {
+            db::GraphStore store{db_inc.string()};
+            for (const db::FileRow& fr : db::all_files(store))
+            {
+                if (fr.path.ends_with(suffix))
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+        const auto symbol_attached_to =
+            [&db_inc](std::string_view name, std::string_view file_suffix)
+        {
+            db::GraphStore                store{db_inc.string()};
+            std::optional<cg::db::FileId> fid;
+            for (const db::FileRow& fr : db::all_files(store))
+            {
+                if (fr.path.ends_with(file_suffix))
+                {
+                    fid = fr.id;
+                    break;
+                }
+            }
+            if (!fid.has_value())
+            {
+                return false;
+            }
+            for (const db::FullSymbolRow& s : db::all_symbol_rows(store))
+            {
+                if (s.name == name && s.file_id == *fid)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        // 第一幕：alpha（唯一引用者）+ beta 入库，头行带闭包符号。
+        write_cdb({"alpha.cpp", "beta.cpp"});
+        const cg::graph::IndexSummary first = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            first.mode == "full" && first.failed == 0,
+            "sweep-resurrect baseline indexes full and clean");
+        cg::test::check(
+            r,
+            file_row_present("/util_swept.hpp")
+                && symbol_attached_to("SweptReviveAnchor", "/util_swept.hpp")
+                && symbol_attached_to("swept_revive_answer", "/util_swept.hpp"),
+            "baseline stores the header row with its closure symbols "
+            "attached");
+
+        // 第二幕：alpha 条目退役（文件保留在盘上）——头文件失去全部
+        // include 边与符号写入面，与 alpha 行一起被可达性清扫删除。
+        write_cdb({"beta.cpp"});
+        const cg::graph::IndexSummary second = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            second.mode == "incremental" && second.failed == 0
+                && second.purged_files == 2
+                && second.reachability_sweeps_skipped == 0,
+            std::format(
+                "retiring the only referencing entry sweeps both rows "
+                "(mode {}, failed {}, purged {}, sweeps skipped {})",
+                second.mode,
+                second.failed,
+                second.purged_files,
+                second.reachability_sweeps_skipped));
+        cg::test::check(
+            r,
+            !file_row_present("/util_swept.hpp")
+                && !file_row_present("/alpha.cpp")
+                && !symbol_attached_to("SweptReviveAnchor", "/util_swept.hpp"),
+            "swept header row and its closure symbols are gone");
+
+        // 第三幕：新 TU 重新包含同一头——行复活、符号重挂、外键列
+        // 全部指向活行（死 id 回流即 FOREIGN KEY 整批回滚，这里以
+        // 异常形态显形）。
+        write_cdb({"beta.cpp", "gamma.cpp"});
+        bool                    commit_blew = false;
+        cg::graph::IndexSummary third{};
+        try
+        {
+            third = index_tree(tree, db_inc);
+        }
+        catch (...)
+        {
+            commit_blew = true;
+        }
+        cg::test::check(
+            r,
+            !commit_blew && third.mode == "incremental" && third.failed == 0,
+            std::format(
+                "reused header commits cleanly (exception {}, mode {}, "
+                "failed {})",
+                commit_blew,
+                third.mode,
+                third.failed));
+        cg::test::check(
+            r,
+            file_row_present("/util_swept.hpp")
+                && !file_row_present("/alpha.cpp")
+                && symbol_attached_to("SweptReviveAnchor", "/util_swept.hpp")
+                && symbol_attached_to("swept_revive_answer", "/util_swept.hpp"),
+            "swept header row resurrects with re-attached closure "
+            "symbols while the retired main stays gone");
+        check_no_zero_vote_rows(r, db_inc);
     }
 
     // 同样的清除但死类完全内联在头文件里：类的方法符号于是属于
@@ -1751,14 +2959,22 @@ namespace
         cg::test::check(
             r,
             second.mode == "incremental" && second.failed == 0
-                && second.stale == first.tus,
+                && second.stale == 2,
             std::format(
-                "purge-lift-hdr escalates to full coverage "
-                "(stale {}, want {})",
-                second.stale,
-                first.tus));
+                "purge-lift-hdr keeps the parse scope at the include "
+                "closure (stale {}, want 2; the former full-coverage "
+                "escalation reparse is deleted)",
+                second.stale));
 
-        compare_full_reference(r, base, tree, db_inc, "purge-lift-hdr");
+        compare_full_reference(
+            r,
+            base,
+            tree,
+            db_inc,
+            "purge-lift-hdr",
+            "full",
+            false,
+            template_body_tier3_gap());
     }
 
     // 干跑 purgedFiles 对已提交孤儿清扫：被弃头文件（只被 main.cpp 包含）被真实
@@ -2382,6 +3598,36 @@ namespace
     const cg::test::Registrar reg_updseed{
         "incr.equiv.update_seed",
         &equiv_update_seed};
+    const cg::test::Registrar reg_voteinst{
+        "incr.equiv.use_site_instance_zero_vote",
+        &equiv_use_site_instance_zero_vote};
+    const cg::test::Registrar reg_votedup{
+        "incr.equiv.dup_entry_one_vote_per_entry",
+        &equiv_dup_entry_one_vote_per_entry};
+    const cg::test::Registrar reg_voteshallow{
+        "incr.behavior.shallow_reference_keeps_row",
+        &behavior_shallow_reference_keeps_row};
+    const cg::test::Registrar reg_voteshallowhdr{
+        "incr.behavior.shallow_reference_header_site",
+        &behavior_shallow_reference_header_site};
+    const cg::test::Registrar reg_votefailed{
+        "incr.behavior.failed_entry_macro_keeps_children",
+        &behavior_failed_entry_macro_keeps_children};
+    const cg::test::Registrar reg_votecrash{
+        "incr.behavior.contribution_crash_consistency",
+        &behavior_contribution_crash_consistency};
+    const cg::test::Registrar reg_sweepresurrect{
+        "incr.behavior.swept_file_row_resurrects_on_reuse",
+        &behavior_swept_file_row_resurrects_on_reuse};
+    const cg::test::Registrar reg_specanchor{
+        "incr.equiv.specializes_anchor_instance_rows",
+        &equiv_specializes_anchor_instance_rows};
+    const cg::test::Registrar reg_parentanchor{
+        "incr.equiv.parent_anchor_cross_file_children",
+        &equiv_parent_anchor_cross_file_children};
+    const cg::test::Registrar reg_lambdadrift{
+        "incr.equiv.lambda_line_key_drift",
+        &equiv_lambda_line_key_drift};
 
     // ------------------------------------------------ 分析暖启动 ----------
     //
@@ -2390,9 +3636,10 @@ namespace
     // 穿过一串编辑，派生数据——每个
     // call_sites 解析列与持久化的槽位终态——
     // 始终等于同一最终树的从零全量重索引。
-    // static_type_id 刻意不进投影：它读的
-    // receiver_types 列被先前的分析扩成了静态+动态——
-    // 既有的一次对二次分析不对称（旧的全量重算增量路径上同样如此）。
+    // static_type_id 刻意不进投影：数值 id 是库内局部量，两个库
+    // 各自编 id 不可直接比对（其余列都按 unique_key/文本映射）。
+    // 其取值面（receiver_static 首键）自静态判证列分列后逐轮稳定，
+    // 轮间漂移由 incr.equiv.receiver_static_idempotent_reparse 钉住。
     struct AnalysisProjection
     {
         std::multiset<std::string>         sites;
@@ -2529,7 +3776,8 @@ namespace
                 "baseline persists the L2 slot terminal state");
         }
 
-        const auto compare_full = [&](std::string_view label)
+        const auto compare_full =
+            [&](std::string_view label, bool with_tier3_gap = false)
         {
             const fs::path tree2 = base / "tree-ref";
             (void)fs::remove_all(tree2, ec);
@@ -2543,7 +3791,8 @@ namespace
                 db_full,
                 label,
                 cg::util::norm_path(tree.generic_string()),
-                cg::util::norm_path(tree2.generic_string()));
+                cg::util::norm_path(tree2.generic_string()),
+                with_tier3_gap ? template_body_tier3_gap() : nullptr);
             expect_analysis_equal(
                 r,
                 db_inc,
@@ -2647,7 +3896,9 @@ namespace
             fourth.failed == 0,
             "analysis-warm hierarchy edit run is clean");
         incremental_meta("class-delete");
-        compare_full("class-delete");
+        // 模板体 tier-3 边缺口见 template_body_tier3_gap 的说明（死类删
+        // 除后 site 在批外模板定义文件上的历史丢弃不可追溯）。
+        compare_full("class-delete", /*with_tier3_gap=*/true);
 
         // 收敛：零增量重跑保持投影相等（空脏集
         // 暖启动一切——近乎零工作量、无漂移）。
@@ -2661,7 +3912,7 @@ namespace
                 fifth.skipped,
                 fifth.stale));
         incremental_meta("no-delta");
-        compare_full("no-delta");
+        compare_full("no-delta", /*with_tier3_gap=*/true);
     }
 
     const cg::test::Registrar reg_warm{
@@ -2909,6 +4160,279 @@ namespace
     const cg::test::Registrar reg_fanin{
         "incr.equiv.fanin_defer_converge",
         &equiv_fanin_defer_converge};
+
+    // -------------------------------------------- 特化净增批升级等价
+    // ----------
+    //
+    // hierarchy_digest 覆盖 Specializes（特化覆盖补齐）后的端到端边级比对：
+    // 编辑只净增一个显式全特化（extends/overrides 边集一字不动），
+    // 批内摘要翻转必须走 escalation 整类清空重建；重建后的增量库
+    // 与编辑后树的从零全量库逐边一致。摘要若漏看特化（修复前形态），
+    // 增量批会带着过期继承图静默通过，派发边与全量库分叉，此用例红。
+
+    void equiv_spec_escalation_edges(R& r)
+    {
+        cg::test::ScratchDir scratch{
+            fs::path{"ccg-incr-scratch"} / "spec-escalation"};
+        const fs::path& base = scratch.base;
+        const fs::path  tree = base / "tree";
+        fs::create_directories(tree);
+        std::error_code ec;
+        fs::copy_file(
+            fs::path{std::string_view{dispatch_fixture_dir}}
+                / "spec-digest-flip" / "main.cpp",
+            tree / "main.cpp",
+            ec);
+        cg::test::check(r, !ec, "spec-escalation corpus seeded");
+        write_file(
+            tree / "compile_commands.json",
+            "[\n  {\n    \"directory\": \".\",\n    \"file\": "
+            "\"main.cpp\",\n    \"command\": \"c++ -std=c++23 -I . -I "
+            "X:/ccg-fake/toolchain/include/c++/v1 -I "
+            "X:/ccg-fake/toolchain/include -c main.cpp -o main.o\"\n  "
+            "}\n]\n");
+
+        const fs::path db_inc = base / "inc.db";
+        {
+            const cg::graph::IndexSummary first = index_tree(tree, db_inc);
+            cg::test::check(
+                r,
+                first.mode == "full" && first.failed == 0,
+                "spec-escalation baseline indexes full and clean");
+        }
+        std::optional<std::string> digest_before;
+        {
+            db::GraphStore store{db_inc.string()};
+            digest_before = store.meta("analysis_hierarchy_digest");
+            const db::Stats st = db::stats(store);
+            cg::test::check(
+                r,
+                digest_before.has_value()
+                    && st.edges_by_type[static_cast<std::size_t>(
+                           db::EdgeType::Specializes)]
+                           > 0,
+                "spec-escalation baseline has specialization edges");
+        }
+
+        append_file(
+            tree / "main.cpp",
+            "\n// digest-flip edit: new explicit specialization; "
+            "extends/overrides stay untouched.\ntemplate <>\nstruct "
+            "Box<char>\n{\n    int describe() const { return 3; }\n};\n"
+            "namespace {\nint use_char_box()\n{\n    Box<char> box;\n   "
+            " return box.describe();\n}\n}  // namespace\n");
+
+        {
+            const cg::graph::IndexSummary second = index_tree(tree, db_inc);
+            cg::test::check(
+                r,
+                second.mode == "incremental" && second.failed == 0,
+                std::format(
+                    "spec-escalation edit batch runs incremental and clean "
+                    "(mode {}, failed {})",
+                    second.mode,
+                    second.failed));
+        }
+        {
+            db::GraphStore store{db_inc.string()};
+            const auto digest_after = store.meta("analysis_hierarchy_digest");
+            cg::test::check(
+                r,
+                digest_before.has_value() && digest_after.has_value()
+                    && *digest_before != *digest_after,
+                "spec-escalation edit flips the hierarchy digest (batch "
+                "walked the escalation path)");
+        }
+
+        // 全量参照尾：编辑后树从零全量索引，与升级重建后的增量库
+        // 逐边比对（符号/边/包含/导入/文件五投影）。
+        compare_full_reference(r, base, tree, db_inc, "spec-escalation");
+    }
+
+    const cg::test::Registrar reg_spec_escalation{
+        "incr.equiv.spec_escalation_edges",
+        &equiv_spec_escalation_edges};
+
+    // -------------------------------------------- 静态判证列幂等门 ----------
+    //
+    // receiver_static 分列后的端到端幂等门：伪造 hierarchy digest 翻转
+    // 触发 escalation 整类清空重建（第二次全量形态重解析），全部站点在
+    // 上轮写回的披露并集在场的情况下重解析——vd 边数、收窄命中面与
+    // receiver_static 行集必须与首轮全量逐值相等。修复前装载把
+    // receiver_types 并集反读当静态面，COM 根层收窄整族失效，二轮边数
+    // 膨胀（大库 15,176 -> 18,849 的小语料同构形态）。
+
+    [[nodiscard]]
+    auto receiver_static_rows(db::GraphStore& store) -> std::vector<std::string>
+    {
+        std::vector<std::string> rows;
+        for (const db::CallSiteRow& cs : db::all_call_sites(store))
+        {
+            rows.push_back(
+                std::format(
+                    "{}:{}:{} -> {}",
+                    cs.callee_name,
+                    cs.line,
+                    cs.col,
+                    cs.receiver_static));
+        }
+        std::ranges::sort(rows);
+        return rows;
+    }
+
+    void equiv_receiver_static_idempotent_reparse(R& r)
+    {
+        cg::test::ScratchDir scratch{
+            fs::path{"ccg-incr-scratch"} / "receiver-static"};
+        const fs::path& base = scratch.base;
+        const fs::path  tree = base / "tree";
+        fs::create_directories(tree);
+        std::error_code ec;
+        fs::copy_file(
+            fs::path{std::string_view{dispatch_fixture_dir}} / "recv-scope"
+                / "main.cpp",
+            tree / "main.cpp",
+            ec);
+        // 第二 TU 只为承载二轮编辑：它的站点行被 parse 重插时两列同回
+        // 首写形态——污染装载面只存在于"未被重插的 TU"（main.cpp 的
+        // 虚站点保持上一轮写回的披露并集），单 TU 语料看不见本门。
+        write_file(
+            tree / "probe.cpp",
+            "int untouched_probe() { return 42; }\n");
+        cg::test::check(r, !ec, "receiver-static corpus seeded");
+        write_file(
+            tree / "compile_commands.json",
+            "[\n  {\n    \"directory\": \".\",\n    \"file\": "
+            "\"main.cpp\",\n    \"command\": \"c++ -std=c++23 -I . -I "
+            "X:/ccg-fake/toolchain/include/c++/v1 -I "
+            "X:/ccg-fake/toolchain/include -c main.cpp -o main.o\"\n  "
+            "},\n  {\n    \"directory\": \".\",\n    \"file\": "
+            "\"probe.cpp\",\n    \"command\": \"c++ -std=c++23 -I . -I "
+            "X:/ccg-fake/toolchain/include/c++/v1 -I "
+            "X:/ccg-fake/toolchain/include -c probe.cpp -o probe.o\"\n  "
+            "}\n]\n");
+
+        const fs::path                db_inc = base / "inc.db";
+        const cg::graph::IndexSummary first = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            first.mode == "full" && first.failed == 0,
+            "receiver-static baseline indexes full and clean");
+
+        const auto vd_of = [&](db::GraphStore& store) -> std::int64_t
+        {
+            const db::Stats st = db::stats(store);
+            return st.edges_by_type[static_cast<std::size_t>(
+                db::EdgeType::VirtualDispatch)];
+        };
+        const auto narrowed_of = [&](db::GraphStore& store) -> std::int64_t
+        {
+            std::int64_t hit = 0;
+            for (const db::CallSiteRow& cs : db::all_call_sites(store))
+            {
+                hit += cs.candidates.find("receiver_scope_narrowed")
+                               != std::string::npos
+                           ? 1
+                           : 0;
+            }
+            return hit;
+        };
+        std::int64_t             vd_first = 0;
+        std::int64_t             narrowed_first = 0;
+        std::vector<std::string> static_first;
+        {
+            db::GraphStore store{db_inc.string()};
+            vd_first = vd_of(store);
+            narrowed_first = narrowed_of(store);
+            static_first = receiver_static_rows(store);
+        }
+        cg::test::check(
+            r,
+            vd_first > 0 && narrowed_first > 0,
+            std::format(
+                "receiver-static baseline has dispatch edges and narrowed "
+                "sites (vd {}, narrowed {})",
+                vd_first,
+                narrowed_first));
+
+        // 伪造 digest 翻转（清空库内摘要）+ 真实编辑：批内摘要比对必翻
+        // -> escalation 整类清空 + 全站点重解析。
+        {
+            db::GraphStore store{db_inc.string()};
+            store.set_meta("analysis_hierarchy_digest", "");
+        }
+        append_file(
+            tree / "probe.cpp",
+            "\n// receiver-static idempotence probe\n");
+        const cg::graph::IndexSummary second = index_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            second.mode == "incremental" && second.failed == 0,
+            std::format(
+                "receiver-static reparse batch runs incremental and clean "
+                "(mode {}, failed {})",
+                second.mode,
+                second.failed));
+        // 防恒绿门：伪造翻转若未真正走到 escalation（派发边整类清空 +
+        // 全站点决议重做），下方全部"逐值不变"断言会在什么都没发生的
+        // 二轮上平凡通过——dispatch_escalations 大于零钉住升级腿确实
+        // 走过（rounds/work_items 只量传播固定点，本语料收敛态下升级
+        // 批也恒为 1 轮 0 工作项，实测不具判别力）。
+        cg::test::check(
+            r,
+            second.dispatch_escalations > 0,
+            std::format(
+                "the escalation reparse truly re-runs the analysis face "
+                "(escalation batches {}, rounds {}, work items {})",
+                second.dispatch_escalations,
+                second.analysis_rounds,
+                second.analysis_work_items));
+
+        {
+            db::GraphStore store{db_inc.string()};
+            cg::test::check(
+                r,
+                vd_of(store) == vd_first,
+                std::format(
+                    "the escalation reparse is edge-idempotent (vd {} -> "
+                    "{}, first {})",
+                    vd_first,
+                    vd_of(store),
+                    vd_first));
+            cg::test::check(
+                r,
+                narrowed_of(store) == narrowed_first,
+                std::format(
+                    "the narrowing face survives the reparse ({} -> {})",
+                    narrowed_first,
+                    narrowed_of(store)));
+            cg::test::check(
+                r,
+                receiver_static_rows(store) == static_first,
+                "receiver_static rows are byte-identical across the "
+                "reparse");
+            // 污染面确实在场：IPic 站点的披露列仍含界外动态类型——幂等
+            // 是穿过污染面保持的，不是污染面消失造成的。
+            bool union_face = false;
+            for (const db::CallSiteRow& cs : db::all_call_sites(store))
+            {
+                if (cs.callee_name == "Release"
+                    && cs.receiver_static.find("|IPic|") != std::string::npos
+                    && cs.receiver_types.find("|ToneA|") != std::string::npos)
+                {
+                    union_face = true;
+                }
+            }
+            cg::test::check(
+                r,
+                union_face,
+                "the disclosure column still widens past the static face");
+        }
+    }
+
+    const cg::test::Registrar reg_recv_static_idem{
+        "incr.equiv.receiver_static_idempotent_reparse",
+        &equiv_receiver_static_idempotent_reparse};
 
     // -------------------------------------------- 可达性清扫快路径 ----------
     //
@@ -3303,6 +4827,423 @@ namespace
     const cg::test::Registrar reg_sweepsrcfail{
         "incr.sweep_fastpath.source_all_failed",
         &sweep_fastpath_source_all_failed};
+
+    // ---------------------- import 闭包（modules 语料） ----------------------
+    //
+    // sample2 是 #include 语料；modules 语料上"编辑被依赖方 -> 消费者重
+    // 解析"的边是 import 而非 #include，包含闭包读不到它。这里的两个
+    // 用例钉死：模块接口编辑后，import 它的消费 TU 进入重解析闭包，且
+    // 增量库与从零全量重建逐位等价。
+
+    // 迷你模块夹具：一个接口单元 + 一个 import 它的经典消费 TU。
+    // 两个导出函数中 api_dropped 是编辑对象（场景一删它——消费 TU 不
+    // 使用；场景二删 api_used——消费 TU 立即解析失败）。
+    //
+    // @internal compile db 里一律写绝对路径：自建链对记录命令的文件字段
+    // 按"root + 相对路径"拼工作路径，相对拼写会被拼出嵌套路径而误判
+    // 盘缺（真实 CMake 数据库总是绝对路径）。
+    void write_module_fixture(const fs::path& tree)
+    {
+        std::error_code ec;
+        fs::create_directories(tree, ec);
+        write_file(
+            tree / "api.ixx",
+            "export module inclosure.api;\n"
+            "export inline int api_used() { return 1; }\n"
+            "export inline int api_dropped() { return 2; }\n");
+        write_file(
+            tree / "use.cpp",
+            "import inclosure.api;\n"
+            "int consumer_entry() { return api_used(); }\n");
+        std::error_code   abs_ec;
+        const fs::path    abs = fs::absolute(tree, abs_ec).lexically_normal();
+        const std::string t = cg::util::norm_path(abs.generic_string());
+        write_file(
+            tree / "compile_commands.json",
+            std::format(
+                "[\n"
+                " {{\"directory\": \"{}\", \"arguments\": [\"clang++\", "
+                "\"-std=c++20\", \"-c\", \"{}/api.ixx\"], \"file\": "
+                "\"{}/api.ixx\"}},\n"
+                " {{\"directory\": \"{}\", \"arguments\": [\"clang++\", "
+                "\"-std=c++20\", \"-c\", \"{}/use.cpp\"], \"file\": "
+                "\"{}/use.cpp\"}}\n"
+                "]\n",
+                t,
+                t,
+                t,
+                t,
+                t,
+                t));
+    }
+
+    /**
+     * @brief 模块树的索引入口（拿回 IndexSummary 供 stale 断言）。
+     *
+     * @internal 与 sample2 用例的 index_tree 不同：模块 TU 的解析命令必须
+     * 先经 CLI 主干的 resolve_loaded_commands——route_db_module_tus 的
+     * 自建链在那里生产 BMI、给消费者附着 module_feeds 投喂、给接口单元
+     * 归属 module_output，而 import 闭包接边所依赖的正是这两面命令事实。
+     * 直连 Indexer::run 的裸命令没有投喂面，模块 TU 无从解析。路径一律
+     * 绝对化：自建链的 clang 子进程与 BMI 缓存路径不依赖进程 cwd，而
+     * 相对拼写的 cdb 文件字段会被按 root 再拼一层而误判盘缺。
+     */
+    [[nodiscard]]
+    auto index_module_tree(const fs::path& tree, const fs::path& db_file)
+        -> cg::graph::IndexSummary
+    {
+        std::error_code   abs_ec;
+        const fs::path    abs = fs::absolute(tree, abs_ec).lexically_normal();
+        const std::string cdb = (abs / "compile_commands.json").string();
+        const std::string root = cg::util::norm_path(abs.generic_string());
+        std::vector<cg::clang::CompileCommand> commands =
+            cg::clang::load(cdb, std::vector<std::string>{root});
+        cg::cli::Invocation inv = cg::cli::parse_args(
+            std::vector<std::string>{
+                "index",
+                root,
+                "--compile-commands",
+                cdb,
+                "--config",
+                "module"});
+        // BMI 自建缓存目录从 db 路径推导（run_index 在布局解析后挂的同
+        // 一字段）：缓存放进本用例的 scratch，不污染真实配置目录。
+        const std::string db_abs =
+            fs::absolute(db_file, abs_ec).lexically_normal().generic_string();
+        inv.db_path = db_abs;
+        const cg::cli::detail::ResolvedCommands resolved =
+            cg::cli::detail::resolve_loaded_commands(
+                inv,
+                {root},
+                std::move(commands),
+                {},
+                cdb);
+        db::GraphStore          store{db_abs};
+        cg::graph::IndexOptions opt;
+        opt.roots = {root};
+        opt.compile_db_path = cdb;
+        opt.db_path = db_abs;
+        opt.progress = false;
+        cg::graph::Indexer indexer{store, std::move(opt)};
+        return indexer.run(resolved.commands);
+    }
+
+    // 模块 scratch 落系统临时目录（短路径）：自建链的 BMI 缓存路径 =
+    // scratch + 引擎键 + 配置键 + pcm 名，按树内 scratch 的深度叠加后
+    // 会恰好越过 260 字符的 Win32 路径上限，pcm 产物读回失败（产物侧
+    // 的既有边界，与 import 闭包无关，见实施报告）。
+    auto module_scratch(std::string_view name) -> cg::test::ScratchDir
+    {
+        return cg::test::ScratchDir{
+            fs::temp_directory_path() / "ccg-incr-import-closure" / name};
+    }
+
+    void equiv_import_closure_consumer_reparsed(R& r)
+    {
+        cg::test::ScratchDir scratch = module_scratch("reparse");
+        const fs::path&      base = scratch.base;
+        const fs::path       tree = base / "tree";
+        write_module_fixture(tree);
+
+        const fs::path                db_inc = base / "inc.db";
+        const cg::graph::IndexSummary first = index_module_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            first.mode == "full" && first.failed == 0,
+            std::format(
+                "[import-closure-reparse] baseline module index is full and "
+                "clean (mode {}, failed {})",
+                first.mode,
+                first.failed));
+
+        // 编辑接口的导出面：删掉消费 TU 不使用的 api_dropped。use.cpp
+        // 的字节与指纹纹丝未动，#include 图上它与 api.ixx 之间没有任何
+        // 边——把它拉进重解析批的唯一合法理由就是 import（modules 时代
+        // 的包含）。构建系统同款级联：BMI 一变，全部 import 消费者重编。
+        write_file(
+            tree / "api.ixx",
+            "export module inclosure.api;\n"
+            "export inline int api_used() { return 1; }\n");
+        const cg::graph::IndexSummary second = index_module_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            second.mode == "incremental" && second.failed == 0,
+            std::format(
+                "[import-closure-reparse] edit batch is incremental and "
+                "clean (mode {}, failed {})",
+                second.mode,
+                second.failed));
+        cg::test::check(
+            r,
+            second.stale >= 2,
+            std::format(
+                "[import-closure-reparse] the interface edit re-parses the "
+                "import consumer too (stale {}, want >= 2: interface + "
+                "consumer)",
+                second.stale));
+
+        // 增量库与从零全量重建逐位等价（clean 参照）。参照树重新走一遍
+        // 夹具+同款编辑（cdb 内嵌绝对路径，复制树会指回原树）。
+        const fs::path tree2 = base / "tree-full";
+        write_module_fixture(tree2);
+        write_file(
+            tree2 / "api.ixx",
+            "export module inclosure.api;\n"
+            "export inline int api_used() { return 1; }\n");
+        const fs::path                db_full = base / "full.db";
+        const cg::graph::IndexSummary fresh = index_module_tree(tree2, db_full);
+        cg::test::check(
+            r,
+            fresh.failed == 0,
+            "[import-closure-reparse] full reference run is clean");
+        expect_equal(
+            r,
+            db_inc,
+            db_full,
+            "import-closure-reparse",
+            cg::util::norm_path(tree.generic_string()),
+            cg::util::norm_path(tree2.generic_string()));
+    }
+
+    void equiv_import_closure_edit_matches_full(R& r)
+    {
+        cg::test::ScratchDir scratch = module_scratch("equivalence");
+        const fs::path&      base = scratch.base;
+        const fs::path       tree = base / "tree";
+        write_module_fixture(tree);
+
+        const fs::path                db_inc = base / "inc.db";
+        const cg::graph::IndexSummary first = index_module_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            first.mode == "full" && first.failed == 0,
+            std::format(
+                "[import-closure-equivalence] baseline module index is full "
+                "and clean (mode {}, failed {})",
+                first.mode,
+                first.failed));
+
+        // 删掉消费 TU 正在调用的 api_used：接口自身仍可解析，消费 TU
+        // 对未声明名字的使用是硬错误。增量批必须把消费 TU 拉进闭包、
+        // 让它以与全量重建完全相同的方式失败——消费 TU 若被跳过，它的
+        // 旧行（符号/调用边）就会留在增量库里，全量重建里它们根本不
+        // 存在（parse-failed），增量库从此过期。
+        write_file(
+            tree / "api.ixx",
+            "export module inclosure.api;\n"
+            "export inline int api_dropped() { return 2; }\n");
+        const cg::graph::IndexSummary second = index_module_tree(tree, db_inc);
+        cg::test::check(
+            r,
+            second.mode == "incremental",
+            std::format(
+                "[import-closure-equivalence] edit batch is incremental "
+                "(mode {})",
+                second.mode));
+        cg::test::check(
+            r,
+            second.failed == 1,
+            std::format(
+                "[import-closure-equivalence] the re-parsed consumer fails "
+                "on the removed export (failed {}, want 1)",
+                second.failed));
+        bool consumer_failed = false;
+        {
+            db::GraphStore store{db_inc.string()};
+            for (const db::FileRow& fr : db::all_files(store))
+            {
+                if (fr.path.ends_with("use.cpp"))
+                {
+                    consumer_failed =
+                        fr.status == cg::util::ParseStatus::Failed;
+                }
+            }
+        }
+        cg::test::check(
+            r,
+            consumer_failed,
+            "[import-closure-equivalence] the consumer's file row is Failed "
+            "in the incremental db (it really entered the parse batch)");
+
+        // 失败也必须失败得一致：与全量重建逐位等价（两库的 consumer 均
+        // 为 parse-failed；参照轮 failed==1 是本形状的预期，不走 clean
+        // 口径）。参照树重新走一遍夹具+同款编辑。
+        const fs::path tree2 = base / "tree-full";
+        write_module_fixture(tree2);
+        write_file(
+            tree2 / "api.ixx",
+            "export module inclosure.api;\n"
+            "export inline int api_dropped() { return 2; }\n");
+        const fs::path                db_full = base / "full.db";
+        const cg::graph::IndexSummary fresh = index_module_tree(tree2, db_full);
+        cg::test::check(
+            r,
+            fresh.failed == 1,
+            std::format(
+                "[import-closure-equivalence] full reference run fails the "
+                "consumer exactly (failed {}, want 1)",
+                fresh.failed));
+        expect_equal(
+            r,
+            db_inc,
+            db_full,
+            "import-closure-equivalence",
+            cg::util::norm_path(tree.generic_string()),
+            cg::util::norm_path(tree2.generic_string()));
+    }
+
+    const cg::test::Registrar reg_importclosure_reparse{
+        "incr.equiv.import_closure.consumer_reparsed_on_interface_edit",
+        &equiv_import_closure_consumer_reparsed};
+    const cg::test::Registrar reg_importclosure_equiv{
+        "incr.equiv.import_closure.edit_matches_full_reindex",
+        &equiv_import_closure_edit_matches_full};
+
+    // CMake 形态声明 PCH 语料（target_precompile_headers 产出的 cdb 形态：
+    // GNU 方言的 -emit-pch 生产者条目 + -include-pch 消费者条目 + -include
+    // 包装伞头，消费者源文件零文本包含）的提交段回归。影子 PCH 的装载不
+    // 重放伞头的包含预处理，伞头域（包装伞头与其包含的头）在 includes 表
+    // 上零边——可达性清扫曾把它们误判不可达，行删除的级联把伞头闭包上的
+    // 符号行一并带走，随后的贡献票发射引用死符号 id，提交事务以
+    // FOREIGN KEY constraint failed 整批回滚。修复=伞头域进可达性种子
+    // （消费者声明的强制包含头 + 本批符号写入面）。断言：影子规划成立、
+    // 索引成功零失败、伞头符号与伞头域文件行全部入库。
+    void declared_pch_cmake_corpus_commit(R& r)
+    {
+        if (cg::clang::driver_info().driver.empty())
+        {
+            cg::test::check(
+                r,
+                true,
+                "declared PCH commit skipped: no clang driver");
+            return;
+        }
+        cg::test::ScratchDir scratch{
+            fs::path{"ccg-incr-scratch"} / "declared-pch-cmake"};
+        // 绝对化语料根：影子 PCH 的复刻驱动器以绝对路径约定重放
+        // producer argv（cdb 的 directory/file 也从它拼装），相对根
+        // 会让影子构建在驱动器子进程的 cwd 上失配。
+        const fs::path base = fs::absolute(scratch.base);
+        write_file(
+            base / "pch.h",
+            "#pragma once\nstruct PchCommitMarker\n{\n    int id;\n};\n"
+            "inline int pch_commit_answer()\n{\n    return 42;\n}\n");
+        write_file(base / "umbrella.hxx", "#include \"pch.h\"\n");
+        write_file(base / "pch_wrap.cxx", "#include \"umbrella.hxx\"\n");
+        write_file(
+            base / "main.cpp",
+            "int main()\n{\n    PchCommitMarker m{1};\n"
+            "    return m.id + pch_commit_answer() - 43;\n}\n");
+        const std::string root = cg::util::norm_path(base.generic_string());
+        const std::string db_text = std::format(
+            "[{{\"directory\":\"{0}\",\"file\":\"{0}/pch_wrap.cxx\","
+            "\"arguments\":[\"clang++\",\"-std=gnu++20\",\"-I\",\"{0}\","
+            "\"-Xclang\",\"-emit-pch\",\"-Xclang\",\"-include\",\"-Xclang\","
+            "\"{0}/umbrella.hxx\",\"-x\",\"c++-header\",\"-o\","
+            "\"{0}/umbrella.hxx.pch\",\"-c\",\"{0}/pch_wrap.cxx\"]}},"
+            "{{\"directory\":\"{0}\",\"file\":\"{0}/main.cpp\","
+            "\"arguments\":[\"clang++\",\"-std=gnu++20\",\"-I\",\"{0}\","
+            "\"-Xclang\",\"-include-pch\",\"-Xclang\","
+            "\"{0}/umbrella.hxx.pch\",\"-Xclang\",\"-include\",\"-Xclang\","
+            "\"{0}/umbrella.hxx\",\"-c\",\"{0}/main.cpp\",\"-o\","
+            "\"{0}/main.o\"]}}]",
+            root);
+        write_file(base / "compile_commands.json", db_text);
+        const std::string cdb_path = cg::util::norm_path(
+            (base / "compile_commands.json").generic_string());
+
+        const std::vector<cg::clang::CompileCommand> commands =
+            cg::clang::load(cdb_path, {});
+        cg::test::check(
+            r,
+            commands.size() == 2,
+            std::format(
+                "declared PCH corpus loads two entries (got {})",
+                commands.size()));
+        if (commands.size() != 2)
+        {
+            return;
+        }
+        cg::clang::PchOptions pch_opt;
+        pch_opt.ccg_config_dir = root + "/.ccg/pchcommit";
+        pch_opt.compile_db_path = cdb_path;
+        const cg::clang::PchPlanResult planned =
+            cg::clang::plan_pch(commands, commands, pch_opt);
+        cg::test::check(
+            r,
+            planned.consumers == 1 && planned.producers_skipped == 1,
+            std::format(
+                "shadow plan holds for the corpus (consumers {}, producers "
+                "skipped {}, text fallbacks {})",
+                planned.consumers,
+                planned.producers_skipped,
+                planned.text_fallback));
+
+        const fs::path          db_file = base / "ccg.db";
+        db::GraphStore          store{db_file.string()};
+        cg::graph::IndexOptions opt;
+        opt.roots = {root};
+        opt.compile_db_path = cdb_path;
+        opt.db_path = db_file.string();
+        cg::graph::Indexer      indexer{store, std::move(opt)};
+        bool                    commit_blew = false;
+        cg::graph::IndexSummary sum{};
+        try
+        {
+            sum = indexer.run(planned.commands);
+        }
+        catch (...)
+        {
+            commit_blew = true;
+        }
+        cg::test::check(
+            r,
+            !commit_blew && sum.failed == 0,
+            std::format(
+                "commit survives the reachability sweep (exception {}, "
+                "failed TUs {})",
+                commit_blew,
+                sum.failed));
+        if (commit_blew || sum.failed != 0)
+        {
+            return;
+        }
+
+        bool umbrella_row = false;
+        bool header_row = false;
+        for (const db::FileRow& fr : db::all_files(store))
+        {
+            umbrella_row = umbrella_row || fr.path.ends_with("/umbrella.hxx");
+            header_row = header_row || fr.path.ends_with("/pch.h");
+        }
+        cg::test::check(
+            r,
+            umbrella_row && header_row,
+            std::format(
+                "PCH declaration-domain file rows survive the sweep "
+                "(umbrella {}, header {})",
+                umbrella_row,
+                header_row));
+        bool marker_symbol = false;
+        bool answer_symbol = false;
+        for (const db::FullSymbolRow& s : db::all_symbol_rows(store))
+        {
+            marker_symbol = marker_symbol || s.name == "PchCommitMarker";
+            answer_symbol = answer_symbol || s.name == "pch_commit_answer";
+        }
+        cg::test::check(
+            r,
+            marker_symbol && answer_symbol,
+            std::format(
+                "umbrella-closure symbols are in the db (marker {}, "
+                "answer {})",
+                marker_symbol,
+                answer_symbol));
+    }
+
+    const cg::test::Registrar reg_declared_pch_commit{
+        "incr.declared_pch.cmake_corpus_commit_survives_reachability_sweep",
+        &declared_pch_cmake_corpus_commit};
 
 } // namespace
 

@@ -1041,25 +1041,16 @@ export namespace cg::clang
         [[nodiscard]]
         auto stat_source(const std::string& path) -> BmiStat
         {
-            namespace fs = std::filesystem;
-            std::error_code ec;
-            const fs::path  p{path};
-            const auto      mtime = fs::last_write_time(p, ec);
-            if (ec)
+            const cg::util::platform::FileMeta meta{
+                cg::util::platform::file_meta(std::filesystem::path{path})};
+            if (!meta.ok)
             {
                 return {};
             }
-            const auto size = fs::file_size(p, ec);
-            if (ec)
-            {
-                return {};
-            }
-            const std::int64_t ticks =
-                static_cast<std::int64_t>(mtime.time_since_epoch().count());
             return {
                 .ok = true,
-                .mtime = ticks,
-                .size = static_cast<std::int64_t>(size)};
+                .mtime = meta.mtime_ticks,
+                .size = meta.size_bytes};
         }
 
         [[nodiscard]]
@@ -1204,18 +1195,13 @@ export namespace cg::clang
             {
                 return -1;
             }
-            std::error_code ec;
-            const fs::path  path{pcm};
-            if (!fs::is_regular_file(path, ec) || ec)
+            const cg::util::platform::FileMeta meta{
+                cg::util::platform::file_meta(fs::path{pcm})};
+            if (!meta.ok || meta.size_bytes == 0)
             {
                 return -1;
             }
-            const auto actual = fs::file_size(path, ec);
-            if (ec || actual == 0)
-            {
-                return -1;
-            }
-            const auto value = static_cast<std::int64_t>(actual);
+            const auto value = meta.size_bytes;
             if (value != recorded || !pcm_header_ok(pcm))
             {
                 return -1;
@@ -1223,14 +1209,13 @@ export namespace cg::clang
             return value;
         }
 
-        /** @brief 产物字节数；缺失/空/读不到均为 0。 */
+        /** @brief 产物字节数；缺失/空/读不到均为 0（长路径感知）。 */
         [[nodiscard]]
         auto artifact_size(const std::string& path) -> std::int64_t
         {
-            std::error_code ec;
-            const auto      size =
-                std::filesystem::file_size(std::filesystem::path{path}, ec);
-            return ec ? 0 : static_cast<std::int64_t>(size);
+            const cg::util::platform::FileMeta meta{
+                cg::util::platform::file_meta(std::filesystem::path{path})};
+            return meta.ok ? meta.size_bytes : 0;
         }
 
         /**
@@ -2145,6 +2130,197 @@ export namespace cg::clang
         return false;
     }
 
+    namespace detail
+    {
+
+        /**
+         * @brief 单趟 clang-scan-deps P1689 扫描：编译数据库 json 落临时
+         *        文件、run_tool 发射、解析规则集。
+         *
+         * @internal self_build_modules 的 scan_batch 与纯头单元语料的
+         *           classic 降级通道共用同一发射形状（argv0 + 逐文件
+         *           旗标 + 文件清单），差异只在调用方组装的旗标向量；
+         *           抽出共享体使两处发射逐字节同源。
+         *
+         * @param root           编译数据库的 directory 字段（工作目录）。
+         * @param argv0          扫描命令首 token（驱动器或垫片）。
+         * @param scan_deps      clang-scan-deps 可执行路径。
+         * @param files          待扫描文件（绝对路径）。
+         * @param module_units_batch  true 时追加 -x c++-module（模块单元批）。
+         * @param flags_per_file 与 files 对齐的扫描旗标（每文件一份）。
+         * @param scan_err       可空；带回扫描器输出的首行（失败归因）。
+         */
+        [[nodiscard]]
+        auto run_p1689_scan(
+            const std::string&                           root,
+            const std::string&                           argv0,
+            const std::string&                           scan_deps,
+            const std::vector<std::string>&              files,
+            bool                                         module_units_batch,
+            const std::vector<std::vector<std::string>>& flags_per_file,
+            std::string* scan_err) -> std::vector<ScanRule>
+        {
+            namespace fs = std::filesystem;
+            namespace json = cg::util::json;
+            json::Array db;
+            for (std::size_t i = 0; i < files.size(); ++i)
+            {
+                json::Object entry;
+                entry.set("directory", root.empty() ? "." : root);
+                json::Array argv_json;
+                argv_json.add(argv0);
+                for (const std::string& a : flags_per_file[i])
+                {
+                    argv_json.add(a);
+                }
+                if (module_units_batch)
+                {
+                    argv_json.add("-x");
+                    argv_json.add("c++-module");
+                }
+                argv_json.add(files[i]);
+                entry.set("arguments", std::move(argv_json));
+                entry.set("file", files[i]);
+                db.add(std::move(entry));
+            }
+            const std::string db_path = (fs::temp_directory_path()
+                                         / std::format(
+                                             "ccg-scan-{}.json",
+                                             std::chrono::steady_clock::now()
+                                                 .time_since_epoch()
+                                                 .count()))
+                                            .generic_string();
+            {
+                std::ofstream of{fs::path{db_path}, std::ios::binary};
+                of << json::stringify(std::move(db));
+            }
+            const detail::ProcResult r = detail::run_tool(
+                scan_deps,
+                {"-compilation-database=" + db_path, "-format=p1689"});
+            std::error_code ec;
+            fs::remove(fs::path{db_path}, ec);
+            if (scan_err != nullptr)
+            {
+                // 扫描器 stderr 首行不再被整体吞噬（拼接先例同 std 失败路
+                // 径：err 优先，out 兜底）——降级文案用它归因。
+                *scan_err =
+                    r.started
+                        ? detail::first_line_of(r.err.empty() ? r.out : r.err)
+                        : std::string{"spawn failed"};
+            }
+            if (!r.started)
+            {
+                return {};
+            }
+            return detail::parse_p1689(r.out);
+        }
+
+        /**
+         * @brief 纯头单元语料的 classic 降级半边（零命名模块单元通道）。
+         *
+         * @internal module_units 为空时 self_build_modules 无 BMI DAG 可
+         *           建、无 std 可投喂，但 classic TU 文本书写的
+         *           `import "x.hpp";` 仍需降级为 #include（与
+         *           apply_degrade_rules 的头单元半边同一策略），否则 TU
+         *           对裸 argv 解析必败（"not known to be a header
+         *           unit"）。扫描规则门槛沿用 classic 半边：有 P1689 规则
+         *           才进降级（规则的 requires 不报告头单元，头单元名单走
+         *           文本扫描）；std 伞头半边依赖模块 DAG（nodes），本通道
+         *           恒无节点、整段不适用。requires 逐名入 scan_imports
+         *           （失败 TU 的 imports 行兜底），头单元拼写去引号后与
+         *           文本扫描结果并集进 overlay_imports。
+         *
+         * @param opt      自建选项（root/std 值/db 路线标记）。
+         * @param argv0    扫描命令首 token（驱动器）。
+         * @param scan_deps clang-scan-deps 可执行路径。
+         * @param classic  经典编译命令（就地增强：overlay 与 imports 面）。
+         * @return 被（至少）附着了头单元降级的条目数。
+         */
+        auto degrade_classic_header_unit_imports(
+            const SelfBuildOptions&      opt,
+            const std::string&           argv0,
+            const std::string&           scan_deps,
+            std::vector<CompileCommand>& classic) -> std::size_t
+        {
+            std::unordered_map<std::string, ScanRule> classic_rules;
+            for (const CompileCommand& cc : classic)
+            {
+                if (!text_has_import(cc.file))
+                {
+                    continue;
+                }
+                std::vector<std::string> flags;
+                if (opt.db_mode)
+                {
+                    // P1689 伪预处理只关心模块语法；记录 argv 剥掉 MSVC
+                    // 模块开关后作扫描旗标（gnu 方言下为恒等操作）。
+                    flags = detail::strip_msvc_module_switches(cc.argv).argv;
+                }
+                else
+                {
+                    flags.emplace_back(std::format("-std={}", opt.std_value));
+                    if (!opt.root.empty())
+                    {
+                        flags.emplace_back("-I");
+                        flags.push_back(opt.root);
+                    }
+                }
+                const std::string           norm = cg::util::norm_path(cc.file);
+                const std::vector<ScanRule> rules = detail::run_p1689_scan(
+                    opt.root,
+                    argv0,
+                    scan_deps,
+                    {norm},
+                    false,
+                    {flags},
+                    nullptr);
+                if (rules.size() == 1)
+                {
+                    classic_rules.emplace(norm, rules.front());
+                }
+            }
+            std::size_t touched = 0;
+            for (CompileCommand& cc : classic)
+            {
+                const auto rit =
+                    classic_rules.find(cg::util::norm_path(cc.file));
+                if (rit == classic_rules.end())
+                {
+                    continue; // 无扫描规则：不是模块消费者，维持原样
+                }
+                const bool before = cc.overlay.header_unit_includes;
+                for (const ScanRequire& rq : rit->second.requires_names)
+                {
+                    cc.scan_imports.push_back(rq.name);
+                    if (looks_like_header_unit(rq.name))
+                    {
+                        cc.overlay.header_unit_includes = true;
+                        std::string name = rq.name;
+                        if (name.size() >= 2
+                            && ((name.front() == '"' && name.back() == '"')
+                                || (name.front() == '<' && name.back() == '>')))
+                        {
+                            name = name.substr(1, name.size() - 2);
+                        }
+                        cc.overlay_imports.push_back(std::move(name));
+                    }
+                }
+                for (const std::string& name :
+                     text_header_unit_imports(cc.file))
+                {
+                    cc.overlay.header_unit_includes = true;
+                    cg::util::push_unique(cc.overlay_imports, name);
+                }
+                if (!before && cc.overlay.header_unit_includes)
+                {
+                    ++touched;
+                }
+            }
+            return touched;
+        }
+
+    } // namespace detail
+
     /**
      * @brief 一条记录条目的构建配置签名：其记录 .modmap 响应文件路径中
      * ".dir/" 后的路径段。
@@ -2947,6 +3123,40 @@ export namespace cg::clang
         SelfBuildResult out;
         if (module_units.empty())
         {
+            // 纯头单元语料（整库零命名模块单元）：无 BMI DAG 可建、无 std
+            // 可投喂；classic 条目文本携带 import 时仍走 classic 降级半边
+            // （import 行改写 #include），否则头单元消费者对裸 argv 解析
+            // 必败（"not known to be a header unit"，TU 基线即
+            // parse-failed）。无任何文本 import 的 classic 语料维持既有快
+            // 路径原样返回；扫描器不可用（无驱动器/无 clang-scan-deps）
+            // 时 classic_rules 建不起来，同样维持既有行为。
+            const bool classic_import_face = std::ranges::any_of(
+                classic,
+                [](const CompileCommand& cc)
+                { return text_has_import(cc.file); });
+            if (classic_import_face)
+            {
+                const DriverInfo& info = driver_info();
+                const std::string scan_deps =
+                    detail::find_scan_deps(info.driver);
+                if (!info.driver.empty() && !scan_deps.empty())
+                {
+                    const std::size_t touched =
+                        detail::degrade_classic_header_unit_imports(
+                            opt,
+                            info.driver,
+                            scan_deps,
+                            classic);
+                    if (touched > 0)
+                    {
+                        out.notes.push_back(
+                            std::format(
+                                "no named module units: {} classic TU(s) had "
+                                "header-unit imports degraded to text includes",
+                                touched));
+                    }
+                }
+            }
             return out;
         }
 
@@ -3262,59 +3472,24 @@ export namespace cg::clang
                 const std::vector<std::string>* flags = nullptr,
                 std::string* scan_err = nullptr) -> std::vector<ScanRule>
         {
-            json::Array db;
+            // 逐文件旗标展开（flags 缺席时走 unit_scan_flags 的兜底组装）
+            // 后共享 detail::run_p1689_scan 的发射体（json 落盘、run_tool、
+            // 解析）——与纯头单元语料的 classic 降级通道逐字节同源。
+            std::vector<std::vector<std::string>> per_file;
+            per_file.reserve(files.size());
             for (const std::string& file : files)
             {
-                json::Object entry;
-                entry.set("directory", opt.root.empty() ? "." : opt.root);
-                json::Array argv_json;
-                argv_json.add(
-                    scan_argv0.empty() ? std::string{info.driver} : scan_argv0);
-                for (const std::string& a :
-                     flags != nullptr ? *flags : unit_scan_flags(file))
-                {
-                    argv_json.add(a);
-                }
-                if (module_units_batch)
-                {
-                    argv_json.add("-x");
-                    argv_json.add("c++-module");
-                }
-                argv_json.add(file);
-                entry.set("arguments", std::move(argv_json));
-                entry.set("file", file);
-                db.add(std::move(entry));
+                per_file.push_back(
+                    flags != nullptr ? *flags : unit_scan_flags(file));
             }
-            const std::string db_path = (fs::temp_directory_path()
-                                         / std::format(
-                                             "ccg-scan-{}.json",
-                                             std::chrono::steady_clock::now()
-                                                 .time_since_epoch()
-                                                 .count()))
-                                            .generic_string();
-            {
-                std::ofstream of{fs::path{db_path}, std::ios::binary};
-                of << json::stringify(std::move(db));
-            }
-            const detail::ProcResult r = detail::run_tool(
+            return detail::run_p1689_scan(
+                opt.root,
+                scan_argv0.empty() ? std::string{info.driver} : scan_argv0,
                 scan_deps,
-                {"-compilation-database=" + db_path, "-format=p1689"});
-            std::error_code ec;
-            fs::remove(fs::path{db_path}, ec);
-            if (scan_err != nullptr)
-            {
-                // 扫描器 stderr 首行不再被整体吞噬（拼接先例同 std 失败路
-                // 径：err 优先，out 兜底）——降级文案用它归因。
-                *scan_err =
-                    r.started
-                        ? detail::first_line_of(r.err.empty() ? r.out : r.err)
-                        : std::string{"spawn failed"};
-            }
-            if (!r.started)
-            {
-                return {};
-            }
-            return detail::parse_p1689(r.out);
+                files,
+                module_units_batch,
+                per_file,
+                scan_err);
         };
 
         std::vector<std::string> scan_units;
@@ -4191,15 +4366,13 @@ export namespace cg::clang
                     std::chrono::duration<double>(
                         std::chrono::steady_clock::now() - t0)
                         .count();
-                std::error_code      ec;
-                const std::uintmax_t bytes =
-                    fs::file_size(fs::path{std_pcm}, ec);
+                const std::int64_t bytes = detail::artifact_size(std_pcm);
                 out.notes.push_back(
                     std::format(
                         "std BMI {} in {:.1f}s ({} MB, stdlib {}, cache {})",
                         out.reused > 0 ? "reused" : "built",
                         seconds,
-                        ec ? 0 : bytes / (1024 * 1024),
+                        bytes / (1024 * 1024),
                         std_source.stdlib_impl,
                         engine_dir));
                 if (!std_source.compat_path.empty())

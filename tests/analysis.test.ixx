@@ -623,7 +623,7 @@ namespace
         db::GraphStore store{":memory:"};
         (void)index_fixture(store, "field-factory");
         const std::vector<DEdge> dw_edges = dispatch_edges(store);
-        const DEdge* e = find_edge(dw_edges, "S::run", "Impl::f");
+        const DEdge*             e = find_edge(dw_edges, "S::run", "Impl::f");
         cg::test::check(
             r,
             e != nullptr,
@@ -640,13 +640,13 @@ namespace
                 && mq->confidence == 0.7,
             "two factory-assigned fields keep separate slot evidence");
         const auto ambi = site_for(store, "Ambi::run", "f", true);
-        bool ambi_dual_low = false;
+        bool       ambi_dual_low = false;
         if (ambi.has_value())
         {
             // 多候选族口径：两条 low 档候选并列（make_unique_multiple），
             // 决议不得单选升 medium。
             const std::string& text = ambi->candidates;
-            std::size_t       hits = 0;
+            std::size_t        hits = 0;
             for (std::size_t pos = 0;
                  (pos = text.find("make_unique_multiple", pos))
                  != std::string::npos;
@@ -673,8 +673,7 @@ namespace
             r,
             local != nullptr && local->confidence == 0.7,
             "late-declared local unique_ptr assignment is covered too");
-        const DEdge* shared =
-            find_edge(dw_edges, "Shared::run", "Impl::f");
+        const DEdge* shared = find_edge(dw_edges, "Shared::run", "Impl::f");
         cg::test::check(
             r,
             shared != nullptr && shared->confidence == 0.7,
@@ -1196,7 +1195,8 @@ namespace
         }
     }
 
-    /** @brief C 风格转换保留操作数证据、绝不采纳转换目标（SWIG 生成代码形态）。 */
+    /** @brief C 风格转换保留操作数证据、绝不采纳转换目标（SWIG 生成代码形态）。
+     */
     void cstyle_cast_evidence(R& r)
     {
         db::GraphStore store{":memory:"};
@@ -1678,7 +1678,8 @@ namespace
                        != std::string::npos,
             "split declaration/definition resolves via static_final_method");
         // 形态 8：双根各自最近覆盖不同 final 方法 → 并集两成员不猜（接
-        // 收者改写为双根并集——增量 stale-merge 形态，重跑派发断言）。
+        // 收者静态面改写为双根并集——union 接收者/多路径初始化形态，
+        // 重跑派发断言）。
         const cg::db::SymId ra = symbol_id(store, "RootAProbe");
         const cg::db::SymId rb = symbol_id(store, "RootBProbe");
         auto union_row = site_for(store, "probe_final_method_union", "m", true);
@@ -1690,11 +1691,16 @@ namespace
             "form-8 roots and site present");
         if (union_row.has_value() && ra_row.has_value() && rb_row.has_value())
         {
-            union_row->receiver_types = cg::analysis::json_string_array(
+            union_row->receiver_static = cg::analysis::json_string_array(
                 std::vector<std::string>{
                     ra_row->unique_key,
                     rb_row->unique_key});
-            store.refresh_call_site(*union_row);
+            store.exec(
+                std::format(
+                    "UPDATE call_sites SET receiver_static='{}' "
+                    "WHERE site_id={}",
+                    union_row->receiver_static,
+                    union_row->id));
             const cg::analysis::StubTypeOracle   oracle;
             const cg::analysis::PropagationState state =
                 cg::analysis::run(store, oracle);
@@ -1816,10 +1822,9 @@ namespace
      * @brief 多静态类型并集：dispatch 必须对全部静态根取子树并集，
      *        不能只看 front()（评审修正的回归钉）。
      *
-     * @internal 用 refresh_call_site 把 probe_union 站点的 receiver_types
-     *           改写成两个叶类——生产里这是增量运行留下的合流行（静态
-     *           类型∪上一轮动态类型），此处直接固化该输入形态后重跑
-     *           run()+resolve() 检查 DispatchResult。
+     * @internal 把 probe_union 站点的 receiver_static（装载判证列）改写
+     *           成两个叶类——union 接收者/多路径初始化的静态面形态，直接
+     *           固化该输入形态后重跑 run()+resolve() 检查 DispatchResult。
      */
     void static_types_union(R& r)
     {
@@ -1840,9 +1845,14 @@ namespace
         {
             return;
         }
-        row->receiver_types = cg::analysis::json_string_array(
+        row->receiver_static = cg::analysis::json_string_array(
             std::vector<std::string>{l1_row->unique_key, l2_row->unique_key});
-        store.refresh_call_site(*row);
+        store.exec(
+            std::format(
+                "UPDATE call_sites SET receiver_static='{}' "
+                "WHERE site_id={}",
+                row->receiver_static,
+                row->id));
         const cg::analysis::StubTypeOracle   oracle;
         const cg::analysis::PropagationState state =
             cg::analysis::run(store, oracle);
@@ -2018,7 +2028,8 @@ namespace
             "resolved site appends slot_type_truncated without a stray ';'");
     }
 
-    // --------------------------------- 出参包装判据 / 取址方法判据 ------------
+    // --------------------------------- 出参包装判据 / 取址方法判据
+    // ------------
 
     // 结构性判据（collect_detail::is_outparam_wrapper_class /
     // is_addressof_method）尚未接入 collect 主路径；这些测试
@@ -2304,7 +2315,8 @@ namespace
                      .has_value(),
                 "non-template pointer-style class fails C2");
         }
-        // libc++ 智能指针的 operator-> 不是取址方法（单指针结果，双层指针条件挡）。
+        // libc++ 智能指针的 operator->
+        // 不是取址方法（单指针结果，双层指针条件挡）。
         bool saw_smart_arrow = false;
         for (const char* smart : {"unique_ptr", "shared_ptr", "weak_ptr"})
         {
@@ -2748,8 +2760,7 @@ namespace
         std::int64_t inferred = 0;
         for (const DEdge& e : edges)
         {
-            if ((e.src_name == "probe_export"
-                 || e.src_name == "probe_plain"
+            if ((e.src_name == "probe_export" || e.src_name == "probe_plain"
                  || e.src_name == "probe_director")
                 && e.confidence > 0.0)
             {
@@ -2767,13 +2778,11 @@ namespace
             r,
             neg_direct != nullptr && neg_direct->confidence == 1.0,
             "a non-boundary single-impl interface resolves at 1.0");
-        const auto neg_direct_site =
-            site_for(store, "probe_neg", "neg", true);
+        const auto neg_direct_site = site_for(store, "probe_neg", "neg", true);
         cg::test::check(
             r,
             neg_direct_site.has_value() && neg_direct_site->resolved
-                && neg_direct_site->candidates.find(
-                       "family_unique_override")
+                && neg_direct_site->candidates.find("family_unique_override")
                        != std::string::npos,
             "the abstract-host direct link carries family_unique_override");
     }
@@ -3632,6 +3641,153 @@ const cg::test::Registrar reg_tmpl_inherit{
     "analysis.tmpl.inherit_edges",
     &tmpl_inherit_edges};
 
+// --------------------------------------- 特化摘要翻转（增量升级判据） -----
+// hierarchy_digest 必须覆盖 Specializes：净特化边变化且 extends/overrides
+// 边集不变的增量批，摘要仍须翻转（否则 dispatch 全站点升级不触发，库内
+// 保留按旧折算结构算出的过期派发边）。先红后绿：digest 类型清单缺
+// Specializes 时两次摘要相同，本套件红。
+void spec_digest_flip(R& r)
+{
+    const cg::test::ScratchDir scratch{
+        std::filesystem::path{"ccg-analysis-scratch"} / "spec-digest-flip"};
+    const std::filesystem::path tree = scratch.base / "tree";
+    std::filesystem::create_directories(tree);
+    std::error_code ec;
+    std::filesystem::copy_file(
+        std::filesystem::path{fixture("spec-digest-flip")} / "main.cpp",
+        tree / "main.cpp",
+        ec);
+    cg::test::check(r, !ec, "spec-digest-flip corpus seeded");
+    {
+        std::ofstream cdb{tree / "compile_commands.json"};
+        cdb << "[\n  {\n    \"directory\": \".\",\n    \"file\": "
+               "\"main.cpp\",\n    \"command\": \"c++ -std=c++23 -I . -I "
+               "X:/ccg-fake/toolchain/include/c++/v1 -I "
+               "X:/ccg-fake/toolchain/include -c main.cpp -o main.o\"\n  "
+               "}\n]\n";
+    }
+
+    const auto digest_and_edges = [](db::GraphStore&             store,
+                                     std::optional<std::string>& digest,
+                                     std::int64_t&               extends_n,
+                                     std::int64_t&               overrides_n,
+                                     std::int64_t&               specializes_n)
+    {
+        digest = store.meta("analysis_hierarchy_digest");
+        const db::Stats st = db::stats(store);
+        extends_n =
+            st.edges_by_type[static_cast<std::size_t>(db::EdgeType::Extends)];
+        overrides_n =
+            st.edges_by_type[static_cast<std::size_t>(db::EdgeType::Overrides)];
+        specializes_n = st.edges_by_type[static_cast<std::size_t>(
+            db::EdgeType::Specializes)];
+    };
+
+    const std::filesystem::path db_file = scratch.base / "spec.db";
+    std::optional<std::string>  digest_full;
+    std::int64_t                extends_full = 0;
+    std::int64_t                overrides_full = 0;
+    std::int64_t                specializes_full = 0;
+    {
+        db::GraphStore          store{db_file.string()};
+        cg::graph::IndexOptions opt;
+        opt.roots = {cg::util::norm_path(tree.generic_string())};
+        opt.progress = false;
+        opt.compile_db_path = (tree / "compile_commands.json").string();
+        opt.db_path = db_file.string();
+        cg::graph::Indexer            indexer{store, std::move(opt)};
+        const cg::graph::IndexSummary first = indexer.run(
+            cg::clang::load((tree / "compile_commands.json").string(), {}));
+        cg::test::check(
+            r,
+            first.mode == "full" && first.failed == 0,
+            "spec-digest-flip baseline indexes full and clean");
+        digest_and_edges(
+            store,
+            digest_full,
+            extends_full,
+            overrides_full,
+            specializes_full);
+        cg::test::check(
+            r,
+            digest_full.has_value() && specializes_full > 0,
+            std::format(
+                "baseline digest present and specialization edge emitted "
+                "(specializes {})",
+                specializes_full));
+    }
+
+    // 编辑：追加一个显式全特化（Box<char> 无基类——extends/overrides 边
+    // 集不变，净增 specializes 边）。
+    {
+        std::ofstream edit{tree / "main.cpp", std::ios::app};
+        edit << "\n// digest-flip edit: new explicit specialization; "
+                "extends/overrides stay untouched.\ntemplate <>\nstruct "
+                "Box<char>\n{\n    int describe() const { return 3; }\n};\n"
+                "namespace {\nint use_char_box()\n{\n    Box<char> box;\n   "
+                " return box.describe();\n}\n}  // namespace\n";
+    }
+
+    std::optional<std::string> digest_inc;
+    std::int64_t               extends_inc = 0;
+    std::int64_t               overrides_inc = 0;
+    std::int64_t               specializes_inc = 0;
+    {
+        db::GraphStore          store{db_file.string()};
+        cg::graph::IndexOptions opt;
+        opt.roots = {cg::util::norm_path(tree.generic_string())};
+        opt.progress = false;
+        opt.compile_db_path = (tree / "compile_commands.json").string();
+        opt.db_path = db_file.string();
+        opt.seed_files = {cg::util::norm_path((tree / "main.cpp").string())};
+        cg::graph::Indexer            indexer{store, std::move(opt)};
+        const cg::graph::IndexSummary second = indexer.run(
+            cg::clang::load((tree / "compile_commands.json").string(), {}));
+        cg::test::check(
+            r,
+            second.mode == "incremental" && second.failed == 0,
+            std::format(
+                "spec-digest-flip edit batch runs incremental and clean "
+                "(mode {}, failed {})",
+                second.mode,
+                second.failed));
+        digest_and_edges(
+            store,
+            digest_inc,
+            extends_inc,
+            overrides_inc,
+            specializes_inc);
+    }
+
+    // 语料形态自证：extends/overrides 边集逐数不变、特化边净增。
+    cg::test::check(
+        r,
+        extends_inc == extends_full && overrides_inc == overrides_full,
+        std::format(
+            "edit keeps extends/overrides counts ({}/{} -> {}/{})",
+            extends_full,
+            overrides_full,
+            extends_inc,
+            overrides_inc));
+    cg::test::check(
+        r,
+        specializes_inc > specializes_full,
+        std::format(
+            "edit adds a net specialization edge ({} -> {})",
+            specializes_full,
+            specializes_inc));
+    // 红绿核心：特化净变且 extends/overrides 不变时摘要必须翻转。
+    cg::test::check(
+        r,
+        digest_full.has_value() && digest_inc.has_value()
+            && *digest_full != *digest_inc,
+        "hierarchy digest flips on net specialization change");
+}
+
+const cg::test::Registrar reg_spec_digest_flip{
+    "analysis.dispatch.spec_digest_flip",
+    &spec_digest_flip};
+
 // --------------------------------------------- 回调契约 --------------------
 
 void callback_reg_edges(R& r)
@@ -4034,15 +4190,17 @@ void virtual_family_writeback(R& r)
 {
     db::GraphStore store{":memory:"};
     const auto     sum = index_fixture(store, "virtual-family-writeback");
-    cg::test::check(r, sum.failed == 0, "virtual-family-writeback indexes cleanly");
+    cg::test::check(
+        r,
+        sum.failed == 0,
+        "virtual-family-writeback indexes cleanly");
     const std::vector<DEdge> edges = dispatch_edges(store);
     // 手写多实现族：filler->Fill(&r) 的被调解析到 IVFiller::Fill 声明
     // （无函数体无写回行），族内 AppleFiller/BananaFiller 的同位槽各带
     // 实现类——r->Name() 站点拿 [Apple, Banana] 并集，may 超集按 0.4
     // 档发两条候选边（不伪装唯一）。
     const DEdge* apple = find_edge(edges, "consume_two_impls", "Apple::Name");
-    const DEdge* banana =
-        find_edge(edges, "consume_two_impls", "Banana::Name");
+    const DEdge* banana = find_edge(edges, "consume_two_impls", "Banana::Name");
     cg::test::check(
         r,
         apple != nullptr && apple->confidence == 0.4,
@@ -4053,13 +4211,11 @@ void virtual_family_writeback(R& r)
         "virtual family union yields the Banana candidate (0.4)");
     // 披露来源：族并集边的 reason 标注 out_param_family（多类型站点的
     // 槽 reason 经 multiple_reason 展平）。
-    const auto two =
-        site_named(store, "consume_two_impls", "Name");
+    const auto two = site_named(store, "consume_two_impls", "Name");
     cg::test::check(
         r,
         two.has_value()
-            && two->candidates.find("out_param_family")
-                   != std::string::npos,
+            && two->candidates.find("out_param_family") != std::string::npos,
         "family write-back is disclosed via reason=out_param_family");
     // 生成代码同机制：stub 体内 impl->Fill(&out) 直转真实实现并就近消
     // 费——与手写同一查询视野救活，不按生成代码降级。
@@ -4094,15 +4250,12 @@ void virtual_family_writeback(R& r)
     cg::test::check(
         r,
         find_edge(edges, "consume_no_write", "Apple::Name") == nullptr
-            && find_edge(edges, "consume_no_write", "Banana::Name")
-                   == nullptr,
+            && find_edge(edges, "consume_no_write", "Banana::Name") == nullptr,
         "no write-back rows in the family means no dispatch edge");
     // 负例二：跨族隔离——具体类直连装填只回传本函数写回类型，其它
     // 家族的实现类不得混入候选。
-    const DEdge* red =
-        find_edge(edges, "consume_unrelated", "RedColor::Hue");
-    const auto unrelated =
-        site_named(store, "consume_unrelated", "Hue");
+    const DEdge* red = find_edge(edges, "consume_unrelated", "RedColor::Hue");
+    const auto   unrelated = site_named(store, "consume_unrelated", "Hue");
     cg::test::check(
         r,
         red != nullptr,
@@ -4116,8 +4269,7 @@ void virtual_family_writeback(R& r)
     // 静态面裁剪：QI 快速路径形态——出参静态类型是具体类时，族并集
     // [Apple, Banana] 被静态声明面（Apple 及其后代）裁到 [Apple]，静
     // 态可证的唯一性不被巨族 may 集稀释（Banana 不进候选）。
-    const auto clipped =
-        site_named(store, "consume_static_clip", "Name");
+    const auto clipped = site_named(store, "consume_static_clip", "Name");
     cg::test::check(
         r,
         clipped.has_value() && clipped->resolved
@@ -4128,8 +4280,7 @@ void virtual_family_writeback(R& r)
     // 板键不是语义类型面（跳过、由实参键立界），族并集 [Apple, Banana]
     // 被裁到 [Apple]，壳槽不再是 may 并集的无界扩散口（唯一收敛 0.7，
     // Banana 不进候选也不发边）。
-    const DEdge* shell =
-        find_edge(edges, "consume_shell_clip", "Apple::Name");
+    const DEdge* shell = find_edge(edges, "consume_shell_clip", "Apple::Name");
     cg::test::check(
         r,
         shell != nullptr && shell->confidence == 0.7,
@@ -4138,8 +4289,7 @@ void virtual_family_writeback(R& r)
         r,
         find_edge(edges, "consume_shell_clip", "Banana::Name") == nullptr,
         "out-of-face type never leaks into the shell slot");
-    const auto shell_site =
-        site_named(store, "consume_shell_clip", "Name");
+    const auto shell_site = site_named(store, "consume_shell_clip", "Name");
     cg::test::check(
         r,
         shell_site.has_value() && shell_site->resolved
@@ -4205,7 +4355,10 @@ void virtual_family_param_fanout(R& r)
 {
     db::GraphStore store{":memory:"};
     const auto     sum = index_fixture(store, "virtual-family-param-fanout");
-    cg::test::check(r, sum.failed == 0, "virtual-family-param-fanout indexes cleanly");
+    cg::test::check(
+        r,
+        sum.failed == 0,
+        "virtual-family-param-fanout indexes cleanly");
     const std::vector<DEdge> edges = dispatch_edges(store);
     // StringImpl 代理穿透形态：proxy_keep 经接口指针调用（被调解析到
     // IStore::Keep 声明，无体无槽），payload 的动态并集 [PayloadA,
@@ -4237,14 +4390,12 @@ void virtual_family_param_fanout(R& r)
     cg::test::check(
         r,
         fed.has_value()
-            && fed->candidates.find("param_flow_family")
-                   != std::string::npos,
+            && fed->candidates.find("param_flow_family") != std::string::npos,
         "param fan-out is disclosed via reason=param_flow_family");
     // 负例一：具体类接收者直连不扇投——NegaA 只进 NegaStoreA 的 #p0
     // （单候选唯一收敛 0.7），兄弟实现 NegaStoreB 体内站点不得拿到
     // NegaA 证据（已唯一解析站点走精确通道，不被 may 并集污染）。
-    const DEdge* direct =
-        find_edge(edges, "NegaStoreA::Keep", "NegaA::Tag");
+    const DEdge* direct = find_edge(edges, "NegaStoreA::Keep", "NegaA::Tag");
     cg::test::check(
         r,
         direct != nullptr && direct->confidence == 0.7,
@@ -4253,8 +4404,7 @@ void virtual_family_param_fanout(R& r)
     // 无动态证据站点按宿主抽象直连（Nega::Tag 纯虚 × 全库唯一非纯
     // override），High 直连与扇投污染是两个不相干的面——污染守恒由
     // 下方 reason 断言钉住（无 param_flow_family 披露）。
-    const DEdge* sibling =
-        find_edge(edges, "NegaStoreB::Keep", "NegaA::Tag");
+    const DEdge* sibling = find_edge(edges, "NegaStoreB::Keep", "NegaA::Tag");
     cg::test::check(
         r,
         sibling != nullptr && sibling->confidence == 1.0,
@@ -4277,8 +4427,7 @@ void virtual_family_param_fanout(R& r)
             && find_edge(edges, "DeclStoreA::Keep", "PayloadB::Name")
                    == nullptr,
         "bodyless family member receives no fan-out");
-    const DEdge* decl =
-        find_edge(edges, "DeclStoreB::Keep", "PayloadA::Name");
+    const DEdge* decl = find_edge(edges, "DeclStoreB::Keep", "PayloadA::Name");
     cg::test::check(
         r,
         decl != nullptr && decl->confidence == 0.7,
@@ -4377,8 +4526,7 @@ void root_family_receiver_scope(R& r)
     // 操作数证据）——Release 多候选里 ToneA::Release 对 IPic* 接收者是
     // 运行时不可能目标，可达过滤剔除（边与候选双面）；PicA 同在闭包
     // 内保留，may 档 0.4 不伪装唯一。
-    const DEdge* pic =
-        find_edge(edges, "polluted_release", "PicA::Release");
+    const DEdge* pic = find_edge(edges, "polluted_release", "PicA::Release");
     cg::test::check(
         r,
         pic != nullptr && pic->confidence == 0.4,
@@ -4397,10 +4545,8 @@ void root_family_receiver_scope(R& r)
         "the clip is disclosed via reason=receiver_scope_narrowed");
     // 负例一：根协议静态根（闭包 = 全体实现）——判据空转，全部候选
     // 原样保留、披露后缀不出现（判据无贡献时不改写披露面）。
-    const DEdge* root_pic =
-        find_edge(edges, "root_release", "PicA::Release");
-    const DEdge* root_tone =
-        find_edge(edges, "root_release", "ToneA::Release");
+    const DEdge* root_pic = find_edge(edges, "root_release", "PicA::Release");
+    const DEdge* root_tone = find_edge(edges, "root_release", "ToneA::Release");
     cg::test::check(
         r,
         root_pic != nullptr && root_pic->confidence == 0.4
@@ -4418,13 +4564,11 @@ void root_family_receiver_scope(R& r)
     cg::test::check(
         r,
         find_edge(edges, "orphan_release", "ToneA::Release") != nullptr
-            && find_edge(edges, "orphan_release", "ToneB::Release")
-                   != nullptr,
+            && find_edge(edges, "orphan_release", "ToneB::Release") != nullptr,
         "fully-out-of-scope candidates fall back to the full set");
     // 单候选形态：唯一实现收敛 0.7（nearest_converged 既有路径），过
     // 滤不启用、档位与 reason 原样。
-    const DEdge* single =
-        find_edge(edges, "single_release", "PicA::Release");
+    const DEdge* single = find_edge(edges, "single_release", "PicA::Release");
     cg::test::check(
         r,
         single != nullptr && single->confidence == 0.7,
@@ -4434,8 +4578,7 @@ void root_family_receiver_scope(R& r)
     // 留在界内；部分盲区形态（动态集 = 界内直连实现 DirectGear + 界外
     // ToneA + 特化路径 GearImpl）下全滤空回退救不了被误砍的 GearImpl，
     // 只有 specializes 反向折算能保住它；界外 ToneA 照常被剔。
-    const DEdge* gear =
-        find_edge(edges, "crtp_release", "GearImpl::Release");
+    const DEdge* gear = find_edge(edges, "crtp_release", "GearImpl::Release");
     cg::test::check(
         r,
         gear != nullptr && gear->confidence == 0.4,
@@ -4463,6 +4606,132 @@ void root_family_receiver_scope(R& r)
 const cg::test::Registrar reg_root_family_receiver_scope{
     "analysis.root_family_receiver_scope",
     &root_family_receiver_scope};
+
+/**
+ * @brief receiver_static 列的分离语义：parse 首写接收者的纯声明静态
+ *        类型，dispatch 写回只扩 receiver_types（静态∪动态披露并集），
+ *        静态判证列在整轮提交后保持纯净。
+ * @internal 一列双载是温启动批边数膨胀的根因。整轮 index（parse 首写
+ *           + dispatch 写回）之后静态列必须仍只含声明面：写回若把
+ *           并集覆写进静态列，Polluted 站点的动态类型（PicA/ToneA 形参
+ *           槽污染面）就会在场，本例红；parse 漏写静态列，IPic 缺席，
+ *           同红。root_release 对照站（静态根 IRoot）同理两列分离。
+ */
+void receiver_static_column_purity(R& r)
+{
+    db::GraphStore store{":memory:"};
+    const auto     sum = index_fixture(store, "recv-scope");
+    cg::test::check(r, sum.failed == 0, "recv-scope indexes cleanly");
+    const auto polluted = site_named(store, "polluted_release", "Release");
+    cg::test::check(r, polluted.has_value(), "polluted_release site present");
+    if (polluted.has_value())
+    {
+        cg::test::check(
+            r,
+            polluted->receiver_static.find("|IPic|") != std::string::npos
+                && polluted->receiver_static.find("PicA") == std::string::npos
+                && polluted->receiver_static.find("ToneA") == std::string::npos,
+            "receiver_static keeps the declared-only face after the "
+            "dispatch write-back");
+        cg::test::check(
+            r,
+            polluted->receiver_types.find("|IPic|") != std::string::npos
+                && polluted->receiver_types.find("|PicA|") != std::string::npos
+                && polluted->receiver_types.find("|ToneA|")
+                       != std::string::npos,
+            "receiver_types carries the static-union-dynamic disclosure");
+    }
+    const auto rooted = site_named(store, "root_release", "Release");
+    cg::test::check(
+        r,
+        rooted.has_value()
+            && rooted->receiver_static.find("|IRoot|") != std::string::npos
+            && rooted->receiver_static.find("|PicA|") == std::string::npos,
+        "root-protocol site keeps its static column declared-only");
+}
+
+const cg::test::Registrar reg_receiver_static_purity{
+    "analysis.receiver_static_column_purity",
+    &receiver_static_column_purity};
+
+/**
+ * @brief 派发装载的静态判证面读 receiver_static 列：披露列
+ *        receiver_types 被篡改成罩住全族的宽并集后重跑，接收者可达
+ *        收窄行为必须纹丝不动。
+ * @internal 篡改模拟温启动库上轮写回的更宽并集（修复前披露列被装载
+ *           反读当静态面：闭包罩住全部候选，scoped==candidates，收窄
+ *           分支不触发，ToneA 假边整族披露）。静态列保持 [IPic] 时
+ *           ToneA 必须仍被剔出候选。
+ */
+void dispatch_static_face_reads_static_column(R& r)
+{
+    db::GraphStore store{":memory:"};
+    const auto     sum = index_fixture(store, "recv-scope");
+    cg::test::check(r, sum.failed == 0, "recv-scope indexes cleanly");
+    const auto polluted = site_named(store, "polluted_release", "Release");
+    cg::test::check(r, polluted.has_value(), "polluted_release site present");
+    if (!polluted.has_value())
+    {
+        return;
+    }
+    // 全族宽并集（IRoot 生态全体实现 + 接口），拼进披露列——闭包罩住
+    // Release 族的全部候选（PicA/PicB/ToneA/ToneB）。
+    std::vector<std::string> family;
+    for (const std::string_view name :
+         {"IRoot", "IPic", "PicA", "PicB", "ITone", "ToneA", "ToneB"})
+    {
+        const cg::db::SymId id = symbol_id(store, name);
+        const auto          row = cg::db::get_symbol(store, id);
+        if (row.has_value())
+        {
+            family.push_back(row->unique_key);
+        }
+    }
+    cg::test::check(
+        r,
+        family.size() == 7,
+        "the whole IRoot family resolves to keys");
+    store.exec(
+        std::format(
+            "UPDATE call_sites SET receiver_types='{}' WHERE site_id={}",
+            cg::analysis::json_string_array(family),
+            polluted->id));
+    const cg::analysis::StubTypeOracle   oracle;
+    const cg::analysis::PropagationState state =
+        cg::analysis::run(store, oracle);
+    const cg::analysis::DispatchResult dispatch =
+        cg::analysis::resolve(store, state);
+    const cg::analysis::ResolvedCallSite* site = nullptr;
+    for (const cg::analysis::ResolvedCallSite& s : dispatch.sites)
+    {
+        if (s.site_id == polluted->id)
+        {
+            site = &s;
+        }
+    }
+    bool has_tone = false;
+    bool narrowed = false;
+    if (site != nullptr)
+    {
+        for (const cg::analysis::DispatchCandidate& c : site->candidates)
+        {
+            has_tone =
+                has_tone || c.target_key.find("|ToneA|") != std::string::npos;
+            narrowed = narrowed
+                       || c.reason.find("receiver_scope_narrowed")
+                              != std::string::npos;
+        }
+    }
+    cg::test::check(
+        r,
+        site != nullptr && site->resolved && !has_tone && narrowed,
+        "the static face stays clean no matter how wide the disclosure "
+        "column is");
+}
+
+const cg::test::Registrar reg_static_face_source{
+    "analysis.dispatch_static_face_reads_static_column",
+    &dispatch_static_face_reads_static_column};
 const cg::test::Registrar reg_shell_move_field{
     "analysis.shell_move_field",
     &shell_move_field};
@@ -4585,11 +4854,11 @@ void receiver_declared_root(R& r)
     {
         return;
     }
-    // 模拟采集面静态缺口：清空三个宿主站点的 receiver_types，声明行
-    // （type_hints 的 Declared 行）保持原样。
+    // 模拟采集面静态缺口：清空三个宿主站点的 receiver_static（装载判证
+    // 列），声明行（type_hints 的 Declared 行）保持原样。
     store.exec(
         std::format(
-            "UPDATE call_sites SET receiver_types='[]' WHERE site_id IN "
+            "UPDATE call_sites SET receiver_static='[]' WHERE site_id IN "
             "({},{},{})",
             leaf_site->id,
             multi_site->id,
@@ -4678,7 +4947,8 @@ auto propagated_hint_equal(
 void warm_preloaded_equivalence(R& r)
 {
     db::GraphStore                store{":memory:"};
-    const cg::graph::IndexSummary sum = index_fixture(store, "dispatch-evidence");
+    const cg::graph::IndexSummary sum =
+        index_fixture(store, "dispatch-evidence");
     cg::test::check(r, sum.failed == 0, "dispatch-evidence indexes cleanly");
     // 脏集 = 库里任一文件（行脏种子触发闭包重算与 warm 回填混合）。
     const std::vector<cg::db::FileRow>  files = cg::db::all_files(store);
@@ -4762,7 +5032,8 @@ const cg::test::Registrar reg_warm_preloaded_equivalence{
 void snapshot_roundtrip_equivalence(R& r)
 {
     db::GraphStore                store{":memory:"};
-    const cg::graph::IndexSummary sum = index_fixture(store, "dispatch-evidence");
+    const cg::graph::IndexSummary sum =
+        index_fixture(store, "dispatch-evidence");
     cg::test::check(r, sum.failed == 0, "dispatch-evidence indexes cleanly");
     const std::vector<cg::db::FileRow> files = cg::db::all_files(store);
     cg::test::check(r, !files.empty(), "fixture has tracked files");
@@ -5252,7 +5523,10 @@ const cg::test::Registrar reg_decode_ref{
  *           机器上执行向量指令会非法指令异常），因此只支持标量的机器
  *           上向量档检查合法为空、分派路径仍与标量 oracle 全量比对。
  *           另验证分派档位与探测能力快照的映射一致（探测一次定型的
- *           契约）与 SymBits::or_with 分派路径的端到端等价。
+ *           契约）与 SymBits::or_with 分派路径的端到端等价。缓冲统一
+ *           走 propagate_detail 的对齐存储（AlignedWords，与 SymBits
+ *           生产形态同型），满足向量档对齐版指令的基址 64 字节对齐
+ *           契约（见 symbits.kernels.h 的 OrWordsFn 说明）。
  */
 void symbits_tier_bit_equivalence(R& r)
 {
@@ -5283,7 +5557,7 @@ void symbits_tier_bit_equivalence(R& r)
                                    16, 31, 32, 63, 64, 65, 127, 128, 129, 137};
     const auto        make_words = [&](std::size_t n, unsigned kind)
     {
-        std::vector<std::uint64_t> v(n, 0);
+        pd::AlignedWords v(n, 0);
         for (std::size_t i = 0; i < n; ++i)
         {
             if (kind == 1)
@@ -5310,13 +5584,13 @@ void symbits_tier_bit_equivalence(R& r)
         {
             for (unsigned src_kind = 0; src_kind < 4; ++src_kind)
             {
-                const std::vector<std::uint64_t> dst = make_words(n, dst_kind);
-                const std::vector<std::uint64_t> src = make_words(n, src_kind);
-                std::vector<std::uint64_t>       out_scalar = dst;
+                const pd::AlignedWords dst = make_words(n, dst_kind);
+                const pd::AlignedWords src = make_words(n, src_kind);
+                pd::AlignedWords       out_scalar = dst;
                 pd::or_words_scalar(out_scalar.data(), src.data(), n);
                 if (tier >= BitsTier::Avx2)
                 {
-                    std::vector<std::uint64_t> out_avx2 = dst;
+                    pd::AlignedWords out_avx2 = dst;
                     pd::or_words_avx2(out_avx2.data(), src.data(), n);
                     avx2_ran = true;
                     if (out_avx2 != out_scalar)
@@ -5326,7 +5600,7 @@ void symbits_tier_bit_equivalence(R& r)
                 }
                 if (tier == BitsTier::Avx512)
                 {
-                    std::vector<std::uint64_t> out_avx512 = dst;
+                    pd::AlignedWords out_avx512 = dst;
                     pd::or_words_avx512(out_avx512.data(), src.data(), n);
                     avx512_ran = true;
                     if (out_avx512 != out_scalar)
@@ -5989,11 +6263,11 @@ const cg::test::Registrar reg_symbits_tier_bit_equivalence{
  * @internal CRTP 模板基形态（class Impl : Base<Impl>）的 extends 边挂在
  *           主模板行、特化行无 extends 出边——只走 extends 的祖先链到
  *           特化行即死，nearest_overrides 对方法宿主在主模板行的家族
- *           结构性零交集（family_ambiguous 站点中 CRTP 模板主/实例链断裂带的根因）。四形态断言：
- *           动态路径唯一默认实现（famamb -> direct_new 收敛 1.0）、静
- *           态路径 final 接收者（absent -> static_final_unique，且绝不
- *           指向家族内兄弟覆盖）、两级模板链（折算与 extends 混合跳跃
- *           三步达宿主）、跨家族隔离护栏（同名方法互不串，零误连）。
+ *           结构性零交集（family_ambiguous 站点中 CRTP
+ * 模板主/实例链断裂带的根因）。四形态断言： 动态路径唯一默认实现（famamb ->
+ * direct_new 收敛 1.0）、静 态路径 final 接收者（absent ->
+ * static_final_unique，且绝不 指向家族内兄弟覆盖）、两级模板链（折算与 extends
+ * 混合跳跃 三步达宿主）、跨家族隔离护栏（同名方法互不串，零误连）。
  */
 void crtp_template_fold_upfold(R& r)
 {
@@ -6004,8 +6278,7 @@ void crtp_template_fold_upfold(R& r)
 
     // 形态 A：dyn=AcmeGadget 的距离表折算后含主模板行（唯一步），唯一
     // 默认实现收敛——direct_new 强证据保 1.0。
-    const auto gadget =
-        site_for(store, "probe_gadget_dynamic", "tick", true);
+    const auto gadget = site_for(store, "probe_gadget_dynamic", "tick", true);
     cg::test::check(
         r,
         gadget.has_value() && gadget->resolved
@@ -6029,8 +6302,7 @@ void crtp_template_fold_upfold(R& r)
     // 形态 B：final 具体类无成员，最近覆盖只能落主模板行——折算前
     // absent 不直连，折算后 static_final_unique；唯一性护栏：绝不指向
     // 家族内兄弟覆盖 AcmePlainUser::cost。
-    const auto sealed =
-        site_for(store, "probe_sealed_static", "cost", true);
+    const auto sealed = site_for(store, "probe_sealed_static", "cost", true);
     cg::test::check(
         r,
         sealed.has_value() && sealed->resolved
@@ -6049,8 +6321,7 @@ void crtp_template_fold_upfold(R& r)
         r,
         sealed_edge != nullptr
             && sealed_edge->dst_name.find("cost") != std::string::npos
-            && sealed_edge->dst_name.find("AcmePlainUser")
-                   == std::string::npos,
+            && sealed_edge->dst_name.find("AcmePlainUser") == std::string::npos,
         "static final direct never points at the sibling override");
 
     // 形态 E：两级模板链连跳三步（特化行 -> 主模板 -> dependent 基类
@@ -6059,8 +6330,7 @@ void crtp_template_fold_upfold(R& r)
     cg::test::check(
         r,
         deep.has_value() && deep->resolved
-            && deep->candidates.find("_nearest_converged")
-                   != std::string::npos,
+            && deep->candidates.find("_nearest_converged") != std::string::npos,
         "two-level template chain reaches the primary host");
     bool deep_edge = false;
     for (const DEdge& e : edges)
@@ -6078,8 +6348,7 @@ void crtp_template_fold_upfold(R& r)
 
     // 形态 C：跨家族隔离——同名 tag 方法、独立 CRTP 家族，AcmeBeta 的
     // 候选面绝不混入 AcmeAlpha 家族成员（零误连纪律）。
-    const auto cross =
-        site_for(store, "probe_cross_family", "tag", true);
+    const auto cross = site_for(store, "probe_cross_family", "tag", true);
     cg::test::check(
         r,
         cross.has_value() && cross->resolved
@@ -6141,8 +6410,7 @@ void implicit_this_template_crtp(R& r)
     const DEdge* uniq_edge = nullptr;
     for (const DEdge& e : edges)
     {
-        if (e.src_name == "AcmePartBase::QueryInterface"
-            && e.confidence == 1.0)
+        if (e.src_name == "AcmePartBase::QueryInterface" && e.confidence == 1.0)
         {
             uniq_edge = &e;
         }
@@ -6188,8 +6456,7 @@ void implicit_this_template_crtp(R& r)
     bool multi_inferred = false;
     for (const DEdge& e : edges)
     {
-        if (e.src_name == "AcmeProxyBase::QueryInterface"
-            && e.confidence > 0.0)
+        if (e.src_name == "AcmeProxyBase::QueryInterface" && e.confidence > 0.0)
         {
             multi_inferred = true;
         }
@@ -6242,7 +6509,10 @@ void return_shell_passthrough(R& r)
 {
     db::GraphStore store{":memory:"};
     const auto     sum = index_fixture(store, "return-shell-passthrough");
-    cg::test::check(r, sum.failed == 0, "return-shell-passthrough indexes cleanly");
+    cg::test::check(
+        r,
+        sum.failed == 0,
+        "return-shell-passthrough indexes cleanly");
     const std::vector<DEdge> edges = dispatch_edges(store);
 
     // 中继工厂：#ret 上的拷贝源别名行（槽级单值边）。
@@ -6315,8 +6585,8 @@ void return_shell_passthrough(R& r)
         const auto owner = cg::db::get_symbol(store, row.owner_id);
         if (owner && owner->qualified_name == "ConsumeBrace"
             && row.var_name == "s"
-            && row.source != static_cast<int>(
-                                 cg::analysis::HintSource::Declared)
+            && row.source
+                   != static_cast<int>(cg::analysis::HintSource::Declared)
             && row.type_set.find("AcmeHandle") != std::string::npos)
         {
             brace_shell_type = true;
@@ -6555,8 +6825,8 @@ void recvfail_guard(R& r)
     // 违例。字面 reason 匹配对"换路径迁移"结构性失明（真库对照实锤：守
     // 卫挡掉 implicit_this 后同一站点被 family_unique_override 重新
     // 接管仍 High）。
-    const double deref_top = top_inferred_confidence(
-        edges, "AcmeHostWidget::ProduceJson");
+    const double deref_top =
+        top_inferred_confidence(edges, "AcmeHostWidget::ProduceJson");
     cg::test::check(
         r,
         deref_top <= 0.7,
@@ -6565,8 +6835,8 @@ void recvfail_guard(R& r)
 
     // 形态二（链式 getter）：非虚中间环节不可达，接收者双空 + 在场位
     // ——回退整档不接管，站点维持披露（无推断边、原因如实）。
-    const DEdge* chain_wrong = find_edge(
-        edges, "AcmeHostWidget::ChainCall", "AcmeHostWidget::AddRef");
+    const DEdge* chain_wrong =
+        find_edge(edges, "AcmeHostWidget::ChainCall", "AcmeHostWidget::AddRef");
     cg::test::check(
         r,
         chain_wrong == nullptr,
@@ -6636,12 +6906,15 @@ void iid_lock_write_through(R& r)
 {
     db::GraphStore store{":memory:"};
     const auto     sum = index_fixture(store, "iid-lock-write-through");
-    cg::test::check(r, sum.failed == 0, "iid-lock-write-through indexes cleanly");
+    cg::test::check(
+        r,
+        sum.failed == 0,
+        "iid-lock-write-through indexes cleanly");
     const std::vector<DEdge> edges = dispatch_edges(store);
 
-    const auto row_of =
-        [&](std::string_view owner, std::string_view var,
-            std::string_view reason) -> bool
+    const auto row_of = [&](std::string_view owner,
+                            std::string_view var,
+                            std::string_view reason) -> bool
     {
         for (const cg::db::TypeHintRow& row : store.all_type_hints())
         {
@@ -6691,10 +6964,7 @@ void iid_lock_write_through(R& r)
             qi_unique = true;
         }
     }
-    cg::test::check(
-        r,
-        qi_unique,
-        "the direct link edge lands at exactly 1.0");
+    cg::test::check(r, qi_unique, "the direct link edge lands at exactly 1.0");
 
     // 双实现接口：无唯一边（熔断下同样不产唯一边）。
     bool wide_unique = false;
@@ -6768,8 +7038,12 @@ const cg::test::Registrar reg_iid_lock_write_through{
 void unrelated_absence_final_seal_gates(R& r)
 {
     db::GraphStore store{":memory:"};
-    const auto     sum = index_fixture(store, "dispatch-unrelated-absence-final-seal");
-    cg::test::check(r, sum.failed == 0, "dispatch-unrelated-absence-final-seal indexes cleanly");
+    const auto     sum =
+        index_fixture(store, "dispatch-unrelated-absence-final-seal");
+    cg::test::check(
+        r,
+        sum.failed == 0,
+        "dispatch-unrelated-absence-final-seal indexes cleanly");
     const std::vector<DEdge> edges = dispatch_edges(store);
 
     // 态一：异族缺席豁免 + 类级 final 封口 -> 提档 medium（0.7）。
@@ -6851,8 +7125,12 @@ const cg::test::Registrar reg_unrelated_absence_final_seal_gates{
 void truncation_gate_unique_bypass_gates(R& r)
 {
     db::GraphStore store{":memory:"};
-    const auto     sum = index_fixture(store, "dispatch-truncation-gate-unique-bypass");
-    cg::test::check(r, sum.failed == 0, "dispatch-truncation-gate-unique-bypass indexes cleanly");
+    const auto     sum =
+        index_fixture(store, "dispatch-truncation-gate-unique-bypass");
+    cg::test::check(
+        r,
+        sum.failed == 0,
+        "dispatch-truncation-gate-unique-bypass indexes cleanly");
     const std::vector<DEdge> edges = dispatch_edges(store);
 
     // 硬闸臂：截断观测位为真 + 家族非唯一 -> 不提档。
@@ -6911,7 +7189,10 @@ void tmpl_shell_pure_host_direct(R& r)
 {
     db::GraphStore store{":memory:"};
     const auto     sum = index_fixture(store, "dispatch-tmpl-shell-pure-host");
-    cg::test::check(r, sum.failed == 0, "dispatch-tmpl-shell-pure-host indexes cleanly");
+    cg::test::check(
+        r,
+        sum.failed == 0,
+        "dispatch-tmpl-shell-pure-host indexes cleanly");
     const std::vector<DEdge> edges = dispatch_edges(store);
 
     // 壳清洗臂：final 密封根直连（既有 1.5 优先，壳根不再假缺席）。
@@ -6967,7 +7248,10 @@ void family_closure_gap_gates(R& r)
 {
     db::GraphStore store{":memory:"};
     const auto     sum = index_fixture(store, "dispatch-family-closure-gap");
-    cg::test::check(r, sum.failed == 0, "dispatch-family-closure-gap indexes cleanly");
+    cg::test::check(
+        r,
+        sum.failed == 0,
+        "dispatch-family-closure-gap indexes cleanly");
     const std::vector<DEdge> edges = dispatch_edges(store);
 
     // 守卫臂一（闭包缺边 × 有名接收者）：无 High 直连（结构判据，
@@ -6993,8 +7277,7 @@ void family_closure_gap_gates(R& r)
         "inferred edge, whatever the reason path");
 
     // 对照臂（闭包完备的真唯一家族）：宿主抽象直连保持（守卫零误伤）。
-    const DEdge* stamp =
-        find_edge(edges, "stamp_one", "AcmeStampLeaf::Stamp");
+    const DEdge* stamp = find_edge(edges, "stamp_one", "AcmeStampLeaf::Stamp");
     cg::test::check(
         r,
         stamp != nullptr && stamp->confidence == 1.0,
@@ -7041,12 +7324,15 @@ void static_face_priority(R& r)
 {
     db::GraphStore store{":memory:"};
     const auto     sum = index_fixture(store, "dispatch-static-face-priority");
-    cg::test::check(r, sum.failed == 0, "dispatch-static-face-priority indexes cleanly");
+    cg::test::check(
+        r,
+        sum.failed == 0,
+        "dispatch-static-face-priority indexes cleanly");
     const std::vector<DEdge> edges = dispatch_edges(store);
 
     // 守卫臂：密封静态面 × 全批面外并集——静态直连夺回（1.0）。
-    const DEdge* direct = find_edge(
-        edges, "disconnect_off_face", "AcmeSessionObj::Release");
+    const DEdge* direct =
+        find_edge(edges, "disconnect_off_face", "AcmeSessionObj::Release");
     cg::test::check(
         r,
         direct != nullptr && direct->confidence == 1.0,
@@ -7069,8 +7355,8 @@ void static_face_priority(R& r)
     // 对照臂：部分面内批（含声明类型）——守卫不抢班，站点留在动态
     // 带（多候选 0.4 披露 + 生命周期可达收窄，候选含声明类型），绝不
     // 被静态直连替换。
-    const DEdge* conv = find_edge(
-        edges, "disconnect_mix_face", "AcmeSessionObj::Release");
+    const DEdge* conv =
+        find_edge(edges, "disconnect_mix_face", "AcmeSessionObj::Release");
     cg::test::check(
         r,
         conv != nullptr && conv->confidence == 0.4,
@@ -7090,3 +7376,54 @@ void static_face_priority(R& r)
 const cg::test::Registrar reg_static_face_priority{
     "analysis.dispatch.static_face_priority",
     &static_face_priority};
+
+/**
+ * @brief call_sites.qualified 的限定判据行为锚点。
+ *
+ * @internal 夹具 qualified-ast：普通调用的限定判定走引用名范围差
+ * ∪ 被调子式 NamespaceRef 子游标——宏展开错位形态（extent 两端
+ * spelling 落在宏定义与调用行、跨度超 token 卫生闸上限）不再因闸
+ * 拒绝而漏报，显式普通类型模板实参（产出 TypeRef 子游标但无限定
+ * 符）不误报；构造调用保持 token 判据（限定符挂在外层
+ * CXXFunctionalCastExpr，内层构造表达式不可达）。每形态一个独立
+ * caller，断言按 (caller, callee, is_virtual) 定位。
+ */
+void qualified_call_ast_criterion(R& r)
+{
+    db::GraphStore store{":memory:"};
+    (void)index_fixture(store, "qualified-ast");
+    struct Want
+    {
+        std::string_view caller;
+        std::string_view callee;
+        bool             virt;
+        bool             qualified;
+    };
+    const Want wants[] = {
+        {"a_qual_member", "vstep", true, true},
+        {"b_unqual_member", "vstep", true, false},
+        {"c_qual_ns", "make", false, true},
+        {"d_qual_global", "vfree", false, true},
+        {"e_plain", "vfree", false, false},
+        {"f_arg_qual", "vstep", true, false},
+        {"f_arg_qual", "make", false, true},
+        {"g_macro_qual", "vstep", true, true},
+        {"h_tmpl_ns_arg", "vqual_t", false, true},
+        {"i_tmpl_plain_arg", "vqual_t", false, false},
+        {"j_ctor_qual", "T", false, true},
+        {"k_ctor_plain", "PlainS", false, false},
+    };
+    for (const Want& w : wants)
+    {
+        const auto site = site_for(store, w.caller, w.callee, w.virt);
+        cg::test::check(
+            r,
+            site.has_value() && site->qualified == w.qualified,
+            std::string{w.caller} + " -> " + std::string{w.callee}
+                + " qualified expected " + (w.qualified ? "1" : "0"));
+    }
+}
+
+const cg::test::Registrar reg_qualified_call_ast{
+    "analysis.call_site.qualified_ast_criterion",
+    &qualified_call_ast_criterion};

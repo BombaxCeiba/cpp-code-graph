@@ -16,9 +16,10 @@ module;
  *      播种重写集（主文件自己的站点必须清除+重写，否则一次正文编辑
  *      把编辑前的旧行留下，而阶段 A 已刷新其符号）。
  *   3. 脏 TU 在工人池上解析+提取（每工人一个 CXIndex）；随后第二遍解析
- *      （悬垂边覆盖）处理其边引用了被清除符号的 TU 与包含集变化；
- *      失败与盘上缺失的主文件同被抹除者一样播种其前向闭包，使共享
- *      头的出现计数不再统计死 TU。
+ *      （配置变更域）把编译数据库/包含图/内容变更驱动的种子（抹除/失
+ *      败/盘缺/摘要退役文件的前向闭包与包含差目标）的观察者闭包翻位
+ *      补解析；失败与盘上缺失的主文件同被抹除者一样播种其前向闭包，
+ *      使共享头的出现计数不再统计死 TU。
  *   4. 单一批次事务：阶段 A 符号 upsert（稳定 id）、仅限拥有完整 TU
  *      覆盖的文件的逐文件清除（其出现计数得以精确重建）、阶段 B
  *      三层边解析（被清除符号已退役）、包含、状态、指纹，以及抹除
@@ -263,20 +264,34 @@ export namespace cg::graph
         std::int64_t call_sites = 0;
         std::int64_t dispatch_edges = 0;
         std::int64_t dispatch_fallback_sites = 0;
+        /**
+         * @brief 本运行 escalation 判定为真的提交批数（派发全站点重解析腿）。
+         *
+         * @internal 触发面：传播增量态降级、继承/覆盖/特化边集摘要变化、
+         *           `#external` 行集变化、名字桶警报真触发（延迟批经 meta
+         *           传递）。> 0 证明该批真的走了派发边整类清空重建（vd 边
+         *           删除 + 全站点重解析）——传播侧 rounds/work_items 只量
+         *           固定点传播（收敛态语料上 escalation 批也可为 0，实测
+         *           rounds=1/work_items=0），幂等门要钉"重解析真发生"须用
+         *           本计数。
+         */
+        std::int64_t dispatch_escalations = 0;
         std::int64_t analysis_failed_tus = 0;
-        /** @brief 全局传播固定点迭代轮数/工作量（可观测性；触顶时 budget=true）。 */
+        /** @brief 全局传播固定点迭代轮数/工作量（可观测性；触顶时
+         * budget=true）。 */
         std::int64_t analysis_rounds = 0;
         std::int64_t analysis_work_items = 0;
         bool         analysis_budget_exhausted = false;
         /** @brief 外部边界 RTA 写入的 `#external` 行数（root set 线）。 */
         std::int64_t external_rta_hints = 0;
         /**
-         * @brief 运行收尾时仍未收敛的派发滞后文件数（defer_dispatch 延迟收敛）。
+         * @brief 运行收尾时仍未收敛的派发滞后文件数（defer_dispatch
+         * 延迟收敛）。
          *
          * @internal 0 = 派发数据与已提交行一致（全量分析刚跑过或从未延迟）。
          * 与 meta `dispatch_stale` 同源，供 update 渲染与 hook 注入显式标注。
          */
-        std::int64_t             dispatch_stale_files = 0;
+        std::int64_t dispatch_stale_files = 0;
         /**
          * @brief 指令哈希门槛的门控观测计数（只观测不改行为）。
          *
@@ -296,11 +311,11 @@ export namespace cg::graph
          * 本运行落账分区数；headcache_enabled 为false 时全 0（CCG_HEADCACHE=0
          * 或 fb 波式分解在开——两者不兼容，记录面被搬空）。
          */
-        std::int64_t headcache_enabled = 0;
-        std::int64_t headcache_lookups = 0;
-        std::int64_t headcache_hits = 0;
-        std::int64_t headcache_records = 0;
-        std::int64_t edges_by_type[cg::db::edge_type_count] = {};
+        std::int64_t             headcache_enabled = 0;
+        std::int64_t             headcache_lookups = 0;
+        std::int64_t             headcache_hits = 0;
+        std::int64_t             headcache_records = 0;
+        std::int64_t             edges_by_type[cg::db::edge_type_count] = {};
         double                   elapsed_seconds = 0;
         std::int64_t             db_size_bytes = 0;
         std::vector<std::string> roots;
@@ -484,6 +499,11 @@ export namespace cg::graph
         /**
          * @brief 清除折叠到保留行（最小 id 胜出）之上的多余 files 行。
          *
+         * @param healed_affected 非空时收进被 CASCADE 清票的符号集（先读后
+         *                        删；归零仲裁候选，交给提交段记账块并
+         *                        集——票数通道的受影响集纪律与显式撤票
+         *                        同款）。
+         *
          * @internal
          * 折叠复行是早期大小写漂移运行留下的残骸（一个文件的两种拼写，各带
          * 一份重复的头子图）。包含解析器不区分大小写地匹配，两种拼写永远
@@ -493,8 +513,9 @@ export namespace cg::graph
          * 一切，使幸存行从新提取重写。删除 files 行时外键级联清除其符号/
          * 站点/包含/指纹行。
          */
-        inline auto heal_folded_duplicate_files(cg::db::GraphStore& store)
-            -> bool
+        inline auto heal_folded_duplicate_files(
+            cg::db::GraphStore&         store,
+            std::vector<cg::db::SymId>* healed_affected = nullptr) -> bool
         {
             const std::vector<cg::db::FileRow> files = cg::db::all_files(store);
             std::unordered_map<std::string, cg::db::FileRow> first;
@@ -520,6 +541,16 @@ export namespace cg::graph
             auto tx = store.begin_tx();
             for (const cg::db::FileId fid : losers)
             {
+                // 受影响集先于删除物化（票行随后随文件行 CASCADE 消失，
+                // 删除后读不到）。
+                if (healed_affected != nullptr)
+                {
+                    for (const cg::db::SymId sid :
+                         store.contributions_of_file(fid))
+                    {
+                        healed_affected->push_back(sid);
+                    }
+                }
                 // 删除纪律（先删引用方再删被引用方）：先显式清掉该行的符号/
                 // 站点/包含/边等引用行，files 行最后删——不依赖外键 CASCADE
                 // 兜底，与提交段 purge_file→erase_file 的既有顺序一致。
@@ -2036,16 +2067,15 @@ export namespace cg::graph
                 const bool trace_purge =
                     cg::util::cstd::get_env("CCG_DEBUG_PURGE").has_value();
                 std::size_t touched_buckets = 0;
-                const auto  trace_bucket =
-                    [&](std::string_view  verdict,
-                        const std::string& bucket_name,
-                        std::size_t        pre_fn_n,
-                        std::size_t        post_fn_n,
-                        std::size_t        pre_fn_tpl_n,
-                        std::size_t        post_fn_tpl_n,
-                        std::size_t        pre_any_n,
-                        std::size_t        post_any_n,
-                        const Entry&       survivor)
+                const auto  trace_bucket = [&](std::string_view   verdict,
+                                               const std::string& bucket_name,
+                                               std::size_t        pre_fn_n,
+                                               std::size_t        post_fn_n,
+                                               std::size_t        pre_fn_tpl_n,
+                                               std::size_t        post_fn_tpl_n,
+                                               std::size_t        pre_any_n,
+                                               std::size_t        post_any_n,
+                                               const Entry&       survivor)
                 {
                     if (!trace_purge)
                     {
@@ -2078,13 +2108,13 @@ export namespace cg::graph
                 };
                 for (const auto& [name, bucket] : by_name_)
                 {
-                    std::size_t pre_fn = 0;
-                    std::size_t post_fn = 0;
-                    std::size_t pre_fn_tpl = 0;
-                    std::size_t post_fn_tpl = 0;
-                    std::size_t pre_any = 0;
-                    std::size_t post_any = 0;
-                    bool        touches = false;
+                    std::size_t  pre_fn = 0;
+                    std::size_t  post_fn = 0;
+                    std::size_t  pre_fn_tpl = 0;
+                    std::size_t  post_fn_tpl = 0;
+                    std::size_t  pre_any = 0;
+                    std::size_t  post_any = 0;
+                    bool         touches = false;
                     const Entry* survivor = nullptr;
                     for (const Entry& e : bucket)
                     {
@@ -2133,10 +2163,7 @@ export namespace cg::graph
                         for (const Entry& e : bucket)
                         {
                             if (purged.contains(e.id)
-                                && !terminal_survives(
-                                    e.id,
-                                    e.file_id,
-                                    e.flags))
+                                && !terminal_survives(e.id, e.file_id, e.flags))
                             {
                                 return true; // 有真死亡成员：桶真会缩小
                             }
@@ -2149,16 +2176,16 @@ export namespace cg::graph
                                 && post_fn_tpl == 1)))
                     {
                         const bool genuine = terminal_lift_genuine();
-                        trace_bucket(genuine ? "HIT-fn" : "HIT-fn-VETOED",
-                                     name,
-                                     pre_fn,
-                                     post_fn,
-                                     pre_fn_tpl,
-                                     post_fn_tpl,
-                                     pre_any,
-                                     post_any,
-                                     survivor != nullptr ? *survivor
-                                                         : Entry{});
+                        trace_bucket(
+                            genuine ? "HIT-fn" : "HIT-fn-VETOED",
+                            name,
+                            pre_fn,
+                            post_fn,
+                            pre_fn_tpl,
+                            post_fn_tpl,
+                            pre_any,
+                            post_any,
+                            survivor != nullptr ? *survivor : Entry{});
                         if (genuine)
                         {
                             return true;
@@ -2168,16 +2195,16 @@ export namespace cg::graph
                     if (pre_any >= 2 && post_any == 1)
                     {
                         const bool genuine = terminal_lift_genuine();
-                        trace_bucket(genuine ? "HIT-any" : "HIT-any-VETOED",
-                                     name,
-                                     pre_fn,
-                                     post_fn,
-                                     pre_fn_tpl,
-                                     post_fn_tpl,
-                                     pre_any,
-                                     post_any,
-                                     survivor != nullptr ? *survivor
-                                                         : Entry{});
+                        trace_bucket(
+                            genuine ? "HIT-any" : "HIT-any-VETOED",
+                            name,
+                            pre_fn,
+                            post_fn,
+                            pre_fn_tpl,
+                            post_fn_tpl,
+                            pre_any,
+                            post_any,
+                            survivor != nullptr ? *survivor : Entry{});
                         if (genuine)
                         {
                             return true;
@@ -2189,11 +2216,12 @@ export namespace cg::graph
                 {
                     try
                     {
-                        std::println(std::cerr,
-                                     "PURGE LIFT miss touched_buckets={} "
-                                     "purged={}",
-                                     touched_buckets,
-                                     purged.size());
+                        std::println(
+                            std::cerr,
+                            "PURGE LIFT miss touched_buckets={} "
+                            "purged={}",
+                            touched_buckets,
+                            purged.size());
                     }
                     catch (...)
                     {
@@ -2472,19 +2500,25 @@ export namespace cg::graph
         };
 
         /**
-         * @brief extends/overrides 边集摘要（边变化检测的依据）。
+         * @brief extends/overrides/specializes 边集摘要（边变化检测的依据）。
          *
-         * @internal (src, dst, type) 全序拼接后 sha256：任何一条继承/覆盖边的
-         *           增删都翻转摘要。dispatch 家族缓存只在运行内，库内无从按家
-         *           族增量——摘要翻转即"家族结构变化"的诚实下界，触发全站点
-         *           升级（接口头巨族由 resolve 的家族级缓存消化）。
+         * @internal (src, dst, type) 全序拼接后 sha256：任何一条继承/覆盖/特
+         *           化边的增删都翻转摘要。dispatch 家族缓存只在运行内，库内
+         *           无从按家族增量——摘要翻转即"家族结构变化"的诚实下界，
+         *           触发全站点升级（接口头巨族由 resolve 的家族级缓存消化）。
+         *           Specializes 必须在列：dispatch 的 spec_fwd_/spec_down_ 折
+         *           算与 propagate 的派生槽都消费特化边，净特化变化而无
+         *           extends/overrides 净变化的批若摘要不翻转，会静默保留按
+         *           旧折算结构算出的过期派发边（spec-digest-flip 夹具锁死）。
          */
         [[nodiscard]]
         inline auto hierarchy_digest(cg::db::GraphStore& store) -> std::string
         {
             std::vector<std::string> parts;
             for (const cg::db::EdgeType type :
-                 {cg::db::EdgeType::Extends, cg::db::EdgeType::Overrides})
+                 {cg::db::EdgeType::Extends,
+                  cg::db::EdgeType::Overrides,
+                  cg::db::EdgeType::Specializes})
             {
                 for (const cg::db::EdgeRow& e :
                      cg::db::edges_of_type(store, type))
@@ -2535,7 +2569,8 @@ export namespace cg::graph
         }
 
         /**
-         * @brief 全局传播固定点 + dispatch 解析 + 写回的提交段序列（唯一实现）。
+         * @brief 全局传播固定点 + dispatch 解析 +
+         * 写回的提交段序列（唯一实现）。
          *
          * @internal 两个入口共用：普通索引/update 批（Indexer::run 的提交事务
          * 内，阶段 A/B 行已就位）与收敛批（converge_dispatch，编辑批延迟
@@ -2581,6 +2616,15 @@ export namespace cg::graph
             const std::vector<std::string>* doomed_keys = nullptr;
             /** @brief 脏文件已删除符号的非限定名（`fn` 消费者保守匹配）。 */
             const std::vector<std::string>* doomed_names = nullptr;
+            /**
+             * @brief 名字桶真触发（复核闸放行）的升级腿。
+             *
+             * @internal 与 hierarchy/external 变化同一既有升级开关：置位
+             *           则 dispatch 全站点决议重做+派发边整类清空重写。
+             *           延迟批经 meta `dispatch_name_escalation` 跨批传
+             *           递（编辑批落盘、收敛批读到即消费清除）。
+             */
+            bool name_escalation = false;
         };
 
         /**
@@ -3141,8 +3185,9 @@ export namespace cg::graph
             {
                 doomed_names.push_back(name);
             }
-            // 边变化检测（评审修正，升级制前提）：extends/overrides 边集摘
-            // 要与上次提交比对——变了则家族结构变化，dispatch 全站点升级。
+            // 边变化检测（评审修正，升级制前提）：extends/overrides/
+            // specializes 边集摘要与上次提交比对——变了则家族结构变化，
+            // dispatch 全站点升级。
             const std::string hier_now = hierarchy_digest(store);
             bool              hierarchy_changed = false;
             if (const auto prev = store.meta("analysis_hierarchy_digest");
@@ -3276,18 +3321,26 @@ export namespace cg::graph
                      {"analysis_prop_family_pf_slots",
                       static_cast<std::int64_t>(state.family_pf_fed_slots)},
                      {"analysis_prop_loops_us",
-                      state.arg_param_us + state.param_fanout_us + state.writeback_us
-                          + state.return_flow_us}})
+                      state.arg_param_us + state.param_fanout_us
+                          + state.writeback_us + state.return_flow_us}})
             {
                 store.set_meta(key, std::to_string(us));
             }
             const auto t_disp0 = std::chrono::steady_clock::now();
             // dispatch 升级判定：传播增量态降级（槽表版本失配或暖启动表空）、
-            // 继承/覆盖边集变化或 `#external` 行集变化时任一虚站点的候选/
-            // 标记都可能变——全站点重解析（家族级缓存在 resolve 内部消化
-            // 接口头的巨族形态）。
-            const bool escalation =
-                !state.incremental || hierarchy_changed || external_changed;
+            // 继承/覆盖边集变化、`#external` 行集变化、或名字桶警报真触发
+            // （复核闸放行；延迟批经 meta 传递，读到即消费）时任一虚站点
+            // 的候选/标记都可能变——全站点重解析（家族级缓存在 resolve
+            // 内部消化接口头的巨族形态）。
+            const bool name_escalation =
+                ctx.name_escalation
+                || store.meta("dispatch_name_escalation").value_or("") == "1";
+            const bool escalation = !state.incremental || hierarchy_changed
+                                    || external_changed || name_escalation;
+            if (escalation)
+            {
+                ++sum.dispatch_escalations;
+            }
             const cg::analysis::DispatchResult dispatch =
                 cg::analysis::resolve(store, state, &analysis_rows, escalation);
             const auto t_disp1 = std::chrono::steady_clock::now();
@@ -3422,9 +3475,9 @@ export namespace cg::graph
             sum.dispatch_edges = cg::db::count_edges_of_type(
                 store,
                 cg::db::EdgeType::VirtualDispatch);
-            // ---- 槽终态落库（增量路径）：降级 = 整表重写；增量 = 值基 diff（写
-            // 变化行 + 删消失行）。type_set 用与 hints 物化一致的 JSON 形态。
-            // 本批 warm 的权威行集（驻留命中时是驻留，否则是装载的
+            // ---- 槽终态落库（增量路径）：降级 = 整表重写；增量 = 值基
+            // diff（写 变化行 + 删消失行）。type_set 用与 hints 物化一致的 JSON
+            // 形态。 本批 warm 的权威行集（驻留命中时是驻留，否则是装载的
             // plan.warm）。
             // ----
             const std::unordered_map<std::string, cg::db::AnalysisSlotRow>*
@@ -3584,6 +3637,7 @@ export namespace cg::graph
             store.erase_meta("dispatch_prev_callees");
             store.erase_meta("dispatch_doomed_keys");
             store.erase_meta("dispatch_doomed_names");
+            store.erase_meta("dispatch_name_escalation");
             // ---- indirect_calls 消费
             // （槽终态写回后跑，槽索引用内存终态）----
             const auto t_ind0 = std::chrono::steady_clock::now();
@@ -3922,7 +3976,30 @@ export namespace cg::graph
             std::unordered_set<cg::db::FileId>&    failed_entries;
             std::unordered_set<cg::db::FileId>&    all_failed_fids;
             std::unordered_set<cg::db::SymId>&     doomed;
+            /**
+             * @brief 重写集（首遍解析的包含闭包 ∪
+             * 配置变更域第二遍种子的闭包）。
+             *
+             * @internal 行清除面=本批将重解析的观察者闭包。名字桶全塞
+             *           与死者社会关系种子已删——分析层判定无权把文件
+             *           升格进此面（升格文件的行清除将无重提取回填）。
+             */
             const std::unordered_set<cg::db::FileId>& reached;
+            /**
+             * @brief 终态确证真死的键行（挂在行清除面够不到的文件上）。
+             *
+             * @internal 复核闸同一判据收集（编辑/模板实例档精确比对）；
+             *           提交段显式删行，外键级联清边/线索/站点/子成员。
+             */
+            const std::vector<cg::db::SymId>& dead_symbol_rows;
+            /**
+             * @brief 名字桶真触发（复核闸放行）置位的分析层升级开关。
+             *
+             * @internal 消费点是 commit 段 dispatch 的 escalation 判定
+             *           （全站点决议重做+派发边整类清空）；延迟批落 meta
+             *           dispatch_name_escalation 跨批传递。
+             */
+            bool name_lift_escalation = false;
             /**
              * @brief 新鲜度扫描攒下的指纹/哈希载荷（引用 run 局部向量）。
              *
@@ -4064,54 +4141,37 @@ export namespace cg::graph
          * 进入上方 catch（那会把成功解析的 TU 误标为失败）；CCG_DEBUG_DIAGS
          * 的打印刻意留在 try 内——那里的抛出只影响已带解析错误的 TU。
          * 干跑在库持行时也解析脏集：计划必须陈述真实运行将重解析的确切
-         * 内容，且第二遍解析（悬垂边覆盖）的包含差种子只能从新提取
-         * 导出；对空库每个 TU 按构造都是新工作，计划不解析也已精确。
+         * 内容，且包含差种子只能从新提取导出；对空库每个 TU 按构造都是
+         * 新工作，计划不解析也已精确。
          *
-         * 【第二遍解析：悬垂边覆盖】本运行清除的符号（重解析主文件在新提取中的
-         * 缺失键、抹除文件中定义的一切、经 parent_id 级联删除的成员）使
-         * 其他干净文件中的边失效：那些文件的站点按全量重索引的重解析方式
-         * 精确重写，故其 TU 现在解析。同一遍解析覆盖包含集变化（TU 增删包含
-         * 改变谁观察目标文件的站点）与失败/盘缺主文件的观察者退出。全程
-         * 只读，故干跑也执行它以算出精确计划。父级联：清除记录级联到定义
-         * 在别处的成员；那些文件必须重提取以恢复链接（doomed 与 covered
-         * 只增长、均有界，循环达不动点）。包含图差量：出现计数统计的是
-         * 观察者（传递闭包含站点文件的 TU），故观察者集合变化的文件必须
-         * 全量重覆盖——播其整个前向闭包，后向扩展再拉入每个当前观察者。
-         * 观察者集合在下列情况变化：文件自身包含表变了（内容脏或新）、
-         * 或 TU 离开/加入 TU 集（抹除/新主文件）。seeded 与 reached 分立：
-         * 文件可能已在 reached 中（解析前后向扩展访问过）而其前向闭包仍
-         * 需播种——被抹除主文件恰是此形态。失败与盘缺主文件与被丢弃条目
-         * 一样失去其行：它们过去观察的一切必须从共享头出现计数中扣除
-         * 该份 bump，否则计数一直统计死 TU 直到从零重建；快照 fwd 图此处
-         * 仍带着它们的包含，正是播种所需。解析重数变化（实测发现）：
-         * 出现计数按（主文件, 命令摘要）解析各计一次 bump。已索引主文件
-         * 的存活条目数变化——两条发散重复条目之一被丢弃（幸存摘要仍匹配，
-         * 故无物过期、运行报告全跳过）、第二条加入、或最后一条消失而另有
-         * TU 仍包含该文件——该主文件整个包含闭包中的站点永远多计死解析
-         * （或少计新解析）：被丢弃摘要成了幻影观察者，"完整 TU 覆盖"永不
-         * 重燃。把重数变化当作被抹除主文件的观察者退出处理：播主文件前向
-         * 闭包、后向扩展拉入每个当前观察者、被覆盖文件的计数只从存活条目
-         * 集重建。纯摘要替换（计数不变）排除在外：解析数未变，主文件自身
-         * 的重解析已覆盖其站点。批次中带新鲜包含行的文件：逐文件对已记录
-         * 行做差；每个新增或移除目标的闭包都改变了观察者集合。未变文件
-         * （不在 reached 集）列同样的包含——廉价跳过。
+         * 【解析范围封死】解析范围=包含闭包∪（引擎/配置变更），封死于
+         * 此：首遍翻位处理包含闭包；第二遍翻位只处理配置/内容变更驱
+         * 动的种子（抹除/失败/盘缺/摘要退役的前向闭包、包含差目标——
+         * 编译数据库与包含图的世界变化）。解析完成后的一切分析层判定
+         * （悬垂边、覆盖末日、名字桶警报）无权再把文件塞进解析范围——
+         * 旧的 existing_files 全塞+翻位+二跑链（曾以 670 TU 重做全库解
+         * 析去抢救一个名字桶）与死者社会关系种子（doomed 的边站点/定义
+         * 文件）已删。解析重数变化（实测发现）：出现计数按（主文件, 命
+         * 令摘要）解析各计一次 bump。已索引主文件的存活条目数变化——
+         * 两条发散重复条目之一被丢弃、第二条加入、或最后一条消失而另有
+         * TU 仍包含该文件——该主文件整个包含闭包中的站点会永远多计死
+         * 解析（或少计新解析）：把重数变化当作被抹除主文件的观察者退出
+         * 处理（播前向闭包进第二遍）。批次中带新鲜包含行的文件：逐文件
+         * 对已记录行做差；每个新增或移除目标的闭包都改变观察者集合。
          *
-         * 【覆盖末日】至此的 doomed 集来自已解析主文件、
-         * 抹除/失败/缺失文件与级联——但存储阶段还要清除每个重写覆盖非主
-         * 文件的过期键（对批次联合的逐文件清除），而删除内联死类的头编辑
-         * 不经上述任何路径进入集合。在此以存储所用的同一规则计算完整覆盖
-         * 清除集：覆盖文件的存储键减去其批次级新鲜键联合。被增长末日新牵连
-         * 的文件（悬垂站点、定义在别处的级联子成员）并入覆盖集重查。随后
-         * 探测清除提升歧义：第 3 层因被调用者名字匹配多候选而丢弃的调用点，
-         * 在本运行清除到只剩一个时变得可解析——但丢弃的站点没留存储行，
-         * 上方任何悬垂边种子都够不到持有它的干净文件。故在覆盖末日之后、
-         * 对完整清除集（主文件定义与头定义的清除都要）探测；命中则升级到
-         * 全覆盖重解析——每个被跟踪文件并入重写集、闭包拉入每个观察者，
-         * 整个语料重解析、每个站点对清除后符号表重解析——与 --force 的
-         * 种子化同理，是等价于全量重索引逐站点重解析的唯一状态。反方向
-         * （新添符号使干净文件的边变得可解析）不做重试——未解析的
-         * callee 本不入库，无行可循，这是文档化的已知边界。
-         * 第二遍解析仅供存储阶段；干跑已把它们计入计划、存前即止。
+         * 【覆盖末日】doomed 集来自已解析主文件的缺失键、抹除/失败/缺失
+         * 文件与同文件级联（级联子：父键死子键失配）。覆盖末日的对账域
+         * 收死在本批 fresh 提取并集覆盖的文件内——未重解析文件的键缺席
+         * fresh 并集是伪前提（它们没有重新提取，不代表死亡），跨文件扩散
+         * （死者社会关系经边站点/定义文件引新文件入域）整体删除，跨文件
+         * 影响由分析层全站点重做兜住。随后探测清除提升歧义：第 3 层因被
+         * 调用者名字匹配多候选而丢弃的调用点，在本运行清除到只剩一个时
+         * 变得可解析——但丢弃的站点没留存储行，无行可循。复核闸（终态
+         * 三档）放行的真触发不再升级解析，而是置分析层升级开关：commit
+         * 段 dispatch 走全站点决议重做+派发边整类清空重写（既有
+         * escalation 机制；延迟批经 meta dispatch_name_escalation 跨批传
+         * 递）。反方向（新添符号使干净文件的边变得可解析）不做重试——
+         * 未解析的 callee 本不入库，无行可循，这是文档化的已知边界。
          *
          * 【计划输出】计划级 purgedFiles：已提交计数来自批次后状态的孤儿
          * 清扫，故计划模拟该状态。文件：快照加每个成功提取点名的文件
@@ -4259,8 +4319,13 @@ export namespace cg::graph
             sum.roots = opt_.roots;
             sum.dry_run = opt_.dry_run;
 
-            const bool folded_damage =
-                !opt_.dry_run && detail::heal_folded_duplicate_files(store_);
+            // 批内通道：heal 清票的受影响集只属于本批（同 Indexer 多批
+            // 场景防跨批污染）。
+            heal_vote_affected_.clear();
+            const bool folded_damage = !opt_.dry_run
+                                       && detail::heal_folded_duplicate_files(
+                                           store_,
+                                           &heal_vote_affected_);
             // ===== 解析期租约心跳（真库实测事故的修复）=====
             // caller-held（index 接管后的主批与清队追轮、update 的引擎批）
             // 时，解析段整个只读窗口的租约由伴随线程周期续租；提交段拿写
@@ -4541,6 +4606,155 @@ export namespace cg::graph
                 }
             }
 
+            // import 边并入反向图：import 是 modules 时代的包含——
+            // "解析范围=包含闭包"在 modules 语料上的正确读法是 #include
+            // ∪ import。编辑模块接口（改导出面/删类型）后，import 它的
+            // 消费 TU 在 #include 图上与接口无任何边，不补这层边它们就
+            // 不进闭包、不重解析，提取产物就地过期（增量库≠全量库）——
+            // 向构建系统的依赖级联看齐：BMI 一变，全部 import 消费者重编。
+            //
+            // 模块名 → 接口文件的映射由命令面两跳拼出（库内不持久化
+            // 模块归属，两条既有机制——CXXModules.json 的 BmiMap 与自建
+            // 链的 P1689 provides——都活在路由层，到不了这里；而每条命令
+            // 都携带两跳的原材料）：
+            //   模块名 --（任一条目的 module_feeds 投喂）--> pcm 绝对路径
+            //   pcm   --（接口单元自己的 module_output 产出）--> 接口源文件
+            // 边取两路并集：
+            //   imports 表的书写 import 行（含降级 TU 的行 0 扫描行）；
+            //   命令的投喂面（module_feeds 是解析真正消费过的 BMI 集合，
+            //   与构建系统的依赖清单同宽——它还覆盖无书写 import 的模块
+            //   实现单元：实现单元经投喂隐式依赖自己的接口，imports 表
+            //   对此无行）。
+            // 映射缺失（外部预建 BMI 如 std、产出条目不在本编译库）的
+            // 模块名跳过并计数，绝不崩：多解析一只 TU 是代价，漏解析一
+            // 只 TU 是正确性缺口，宁可前者。
+            std::unordered_map<std::string, std::string> interface_of_pcm;
+            for (const cg::clang::CompileCommand& cmd : commands)
+            {
+                if (!cmd.module_output.empty())
+                {
+                    interface_of_pcm.emplace(cmd.module_output, cmd.file);
+                }
+            }
+            // 名字 → pcm 集合：同名多 pcm（外部投喂与库内自建并存、多配
+            // 置同名异源）时任一 pcm 命中产出条目即成边——按名首写胜出会
+            // 让命令序在先的外部条目遮蔽库内自建 pcm，整模块的 import 边
+            // 静默转 unmapped（消费者不进闭包、增量库≠全量库）。
+            std::unordered_map<std::string, std::unordered_set<std::string>>
+                pcms_of_module;
+            for (const cg::clang::CompileCommand& cmd : commands)
+            {
+                for (const cg::clang::ModuleFeed& feed : cmd.module_feeds)
+                {
+                    pcms_of_module[feed.name].insert(feed.pcm);
+                }
+            }
+            std::int64_t import_edges = 0;
+            std::int64_t import_unmapped = 0;
+            // unmapped 分列（诊断面，和恒等于 import_unmapped）：名字无投
+            // 喂 = std/外部预建（正确跳过）；有投喂但无产出条目 = pcm 的
+            // 生产者不在本编译库（外部预建投喂）；头单元拼写 = 头路径名
+            // 字形态（其闭包由 #include 面承载，此处恒为噪音）。
+            std::int64_t import_unmapped_unfed_name = 0;
+            std::int64_t import_unmapped_fed_no_iface = 0;
+            std::int64_t import_unmapped_header_unit = 0;
+            // 接边块的无入边跳过（合法形态计数，使命令拼写漂移导致的边
+            // 丢失可观测）：接口行不存在（fresh 主文件，本就要解析）或
+            // 自指；消费者无文件行（cmd.file 拼写与 files 表行不齐）。
+            std::int64_t import_skip_no_iface_row = 0;
+            std::int64_t import_skip_no_consumer_row = 0;
+            const auto   add_import_edge =
+                [&](const std::string& module_name, cg::db::FileId consumer)
+            {
+                const auto feed_it = pcms_of_module.find(module_name);
+                if (feed_it == pcms_of_module.end())
+                {
+                    ++import_unmapped;
+                    if (cg::clang::detail::looks_like_header_unit(module_name))
+                    {
+                        ++import_unmapped_header_unit;
+                    }
+                    else
+                    {
+                        ++import_unmapped_unfed_name;
+                    }
+                    return;
+                }
+                // 集内多个 pcm 都命中产出条目时取字典序最小的接口路径：
+                // 集合迭代序不定，边的目标必须跨运行确定。
+                const std::string* iface = nullptr;
+                for (const std::string& pcm : feed_it->second)
+                {
+                    if (const auto iface_it = interface_of_pcm.find(pcm);
+                        iface_it != interface_of_pcm.end()
+                        && (iface == nullptr || iface_it->second < *iface))
+                    {
+                        iface = &iface_it->second;
+                    }
+                }
+                if (iface == nullptr)
+                {
+                    ++import_unmapped;
+                    ++import_unmapped_fed_no_iface;
+                    return;
+                }
+                const cg::db::FileId target = read_fid_of(*iface);
+                if (target == 0 || target == consumer)
+                {
+                    // 接口行尚不存在（fresh 主文件，本就要解析）或自指
+                    // （不该出现的形态）：不入边。
+                    ++import_skip_no_iface_row;
+                    return;
+                }
+                rev[target].push_back(consumer);
+                ++import_edges;
+            };
+            for (const cg::db::ImportLink& link : cg::db::all_imports(store_))
+            {
+                add_import_edge(link.module_name, link.file);
+            }
+            for (const cg::clang::CompileCommand& cmd : commands)
+            {
+                const cg::db::FileId consumer = read_fid_of(cmd.file);
+                if (consumer == 0)
+                {
+                    // fresh 主文件：无既有行可过期，本就要解析；但拼写漂
+                    // 移（cmd.file ≠ files 表行）的既有文件也落此处——计
+                    // 数使其可观测。
+                    ++import_skip_no_consumer_row;
+                    continue;
+                }
+                for (const cg::clang::ModuleFeed& feed : cmd.module_feeds)
+                {
+                    add_import_edge(feed.name, consumer);
+                }
+            }
+            if (cg::util::cstd::get_env("CCG_DEBUG_DIAGS").has_value()
+                && (!pcms_of_module.empty() || import_unmapped > 0))
+            {
+                try
+                {
+                    std::println(
+                        std::cerr,
+                        "IMPORT-CLOSURE modules={} interfaces={} edges={} "
+                        "unmapped={} unmapped-unfed-name={} "
+                        "unmapped-fed-no-iface={} unmapped-header-unit={} "
+                        "edge-skip-no-iface-row={} edge-skip-no-consumer-row={}",
+                        pcms_of_module.size(),
+                        interface_of_pcm.size(),
+                        import_edges,
+                        import_unmapped,
+                        import_unmapped_unfed_name,
+                        import_unmapped_fed_no_iface,
+                        import_unmapped_header_unit,
+                        import_skip_no_iface_row,
+                        import_skip_no_consumer_row);
+                }
+                catch (...)
+                {
+                }
+            }
+
             std::unordered_set<cg::db::FileId>  content_dirty;
             std::unordered_set<cg::db::FileId>  erased; // 缺失主文件 + 已删文件
             std::vector<cg::db::FingerprintRow> fp_writes;
@@ -4644,11 +4858,10 @@ export namespace cg::graph
 
             // ===== 头级缓存与指令门槛的公共输入 =====
             // 包含图前向边（includer -> 解析目标）提前构建：下方闭包摘要
-            // （缓存键输入）与第二遍解析（悬垂边覆盖）的包含差量共用
+            // （缓存键输入）与第二遍解析（配置变更域）的包含差量共用
             // （原先在第一遍解析之后建，头级缓存需要在解析池之前拿到——
             // 同一段代码原样上移，下方原址删除）。
-            std::unordered_map<cg::db::FileId, std::vector<cg::db::FileId>>
-                fwd;
+            std::unordered_map<cg::db::FileId, std::vector<cg::db::FileId>> fwd;
             for (const cg::db::IncludeLink& link : include_links)
             {
                 const auto it = path_of.find(link.includer);
@@ -4673,10 +4886,9 @@ export namespace cg::graph
                 const bool c1_debug =
                     cg::util::cstd::get_env("CCG_DEBUG_C1").has_value();
                 const auto old_digests = store_.file_instr_digest_all();
-                const auto scan_into =
-                    [&](cg::db::FileId fid,
-                        const std::string& path,
-                        bool is_main)
+                const auto scan_into = [&](cg::db::FileId     fid,
+                                           const std::string& path,
+                                           bool               is_main)
                     -> std::optional<cg::util::instrdigest::InstrDigest>
                 {
                     std::optional<cg::util::instrdigest::InstrDigest> fresh =
@@ -4720,15 +4932,14 @@ export namespace cg::graph
                     {
                         continue;
                     }
-                    const bool is_main =
-                        main_paths.contains(pit->second)
-                        || main_file_ids.contains(fid);
+                    const bool is_main = main_paths.contains(pit->second)
+                                         || main_file_ids.contains(fid);
                     const auto fresh = scan_into(fid, pit->second, is_main);
                     if (!fresh.has_value())
                     {
                         continue;
                     }
-                    const auto oit = old_digests.find(fid);
+                    const auto  oit = old_digests.find(fid);
                     const char* cls = "normal";
                     if (oit == old_digests.end())
                     {
@@ -4774,7 +4985,7 @@ export namespace cg::graph
                 }
             }
 
-            const auto                         expand_closure =
+            const auto expand_closure =
                 [&](const std::vector<cg::db::FileId>& seed_list)
             {
                 std::vector<cg::db::FileId> queue;
@@ -4898,10 +5109,9 @@ export namespace cg::graph
             // 40% 线）且回放轮出现 1 个空键符号漂移（__print@stdexec 头，
             // 根因未诊断完），宁漏勿错：回放路径在语料尺度证明等价之前不
             // 进默认路径。fb 波式分解在开时同样禁用（记录面会被搬空）。
-            const bool headcache_on =
-                cg::util::cstd::get_env("CCG_HEADCACHE")
-                    == std::optional<std::string>{"1"}
-                && !fb_active_;
+            const bool headcache_on = cg::util::cstd::get_env("CCG_HEADCACHE")
+                                          == std::optional<std::string>{"1"}
+                                      && !fb_active_;
             if (headcache_on)
             {
                 // 闭包摘要（缓存键的包含闭包输入）：每个既有文件在其联合
@@ -4924,7 +5134,7 @@ export namespace cg::graph
                 for (const cg::db::FileRow& fr : existing_files)
                 {
                     std::vector<std::pair<std::string, const std::string*>>
-                        parts;
+                                                       parts;
                     std::unordered_set<cg::db::FileId> seen{fr.id};
                     std::vector<cg::db::FileId>        queue{fr.id};
                     while (!queue.empty())
@@ -4935,8 +5145,7 @@ export namespace cg::graph
                         parts.emplace_back(
                             path_of.at(f),
                             hit != hash_now.end() ? &hit->second : nullptr);
-                        if (const auto fit = fwd.find(f);
-                            fit != fwd.end())
+                        if (const auto fit = fwd.find(f); fit != fwd.end())
                         {
                             for (const cg::db::FileId t : fit->second)
                             {
@@ -4961,11 +5170,11 @@ export namespace cg::graph
                     }
                     head_closure_of_.emplace(
                         fr.path,
-                        cg::util::sha256_hex(
-                            std::as_bytes(std::span{buf})));
+                        cg::util::sha256_hex(std::as_bytes(std::span{buf})));
                 }
                 headcache_ = std::make_unique<headcache::HeadCache>(
-                    engine_token + "#" + roots_digest, &head_closure_of_);
+                    engine_token + "#" + roots_digest,
+                    &head_closure_of_);
                 headcache_->load(store_, path_of);
                 // 主文件锚哈希面：每个去重条目的主文件内容哈希（重解析者
                 // 用计划算好的新哈希，未动者回退库存哈希——库存哈希在提交
@@ -4980,13 +5189,11 @@ export namespace cg::graph
                     }
                     if (!plans[i].hash.empty())
                     {
-                        hc_main_hash_of_[plans[i].cmd->file] =
-                            plans[i].hash;
+                        hc_main_hash_of_[plans[i].cmd->file] = plans[i].hash;
                     }
                     else if (plans[i].fid != 0)
                     {
-                        const auto rit =
-                            row_by_path.find(plans[i].cmd->file);
+                        const auto rit = row_by_path.find(plans[i].cmd->file);
                         if (rit != row_by_path.end()
                             && rit->second.content_hash.has_value())
                         {
@@ -5098,6 +5305,7 @@ export namespace cg::graph
                     lt.job = t;
                     lt.cmd = jobs[t].cmd;
                     lt.fid = jobs[t].fid;
+                    lt.digest = jobs[t].digest;
                     lt.analysis = std::move(results[t].analysis);
                     lt.includes = std::move(ex.includes);
                     lt.imports = std::move(ex.imports);
@@ -6051,29 +6259,21 @@ export namespace cg::graph
             {
                 try
                 {
-                    std::println(std::cerr,
-                                 "PURGE doomed_after_cascade={} wave1_jobs={}",
-                                 doomed.size(),
-                                 jobs.size());
+                    std::println(
+                        std::cerr,
+                        "PURGE doomed_after_cascade={} parse_jobs={}",
+                        doomed.size(),
+                        jobs.size());
                 }
                 catch (...)
                 {
                 }
             }
+            // 死者社会关系种子收集（doomed 的边站点/定义文件塞 seeds 引
+            // 发解析）已删——跨文件影响由分析层全站点重做兜住。seeds 此
+            // 后只收配置/内容变更驱动的种子（观察者退出、包含差），其观
+            // 察者闭包经第二遍补解析（解析范围封死规则的合法范围）。
             std::vector<cg::db::FileId> seeds;
-            {
-                std::vector<cg::db::SymId> ids{doomed.begin(), doomed.end()};
-                for (const cg::db::FileId f :
-                     cg::db::edge_site_files_touching(store_, ids))
-                {
-                    seeds.push_back(f);
-                }
-                for (const cg::db::FileId f :
-                     cg::db::defining_files(store_, ids))
-                {
-                    seeds.push_back(f);
-                }
-            }
             std::unordered_map<cg::db::FileId, std::vector<std::string>>
                 old_includes;
             for (const cg::db::IncludeLink& link : include_links)
@@ -6205,7 +6405,8 @@ export namespace cg::graph
                 std::unordered_map<cg::db::FileId, std::size_t> lost_targets;
                 {
                     std::vector<cg::db::FileId> lost_includers{
-                        erased.begin(), erased.end()};
+                        erased.begin(),
+                        erased.end()};
                     for (std::size_t i = 0; i < jobs.size(); ++i)
                     {
                         if (!results[i].failure.empty() && jobs[i].fid != 0)
@@ -6332,13 +6533,11 @@ export namespace cg::graph
                             // 尚不在重写集、缓存通道在开。任何一条不过都
                             // 回退既有全闭包重解析（正确性优先）。
                             const bool mergeable =
-                                include_merge_on
-                                && headcache_ != nullptr
+                                include_merge_on && headcache_ != nullptr
                                 && !content_dirty.contains(f)
                                 && !erased.contains(f)
                                 && !lost_targets.contains(f)
-                                && !reached.contains(f)
-                                && pit != path_of.end();
+                                && !reached.contains(f) && pit != path_of.end();
                             if (mergeable)
                             {
                                 bump_feed_.insert(f);
@@ -6393,137 +6592,120 @@ export namespace cg::graph
                 }
             }
 
+            // fresh 提取并集（按文件分组；fb 分解下为成员槽 fb_fresh_union_）
+            // ——覆盖末日对账域（本批真正重解析过的文件集）的数据面。
+            std::unordered_map<cg::db::FileId, std::unordered_set<std::string>>
+                fresh_union;
+            if (!fb_active_)
             {
-                std::unordered_map<
-                    cg::db::FileId,
-                    std::unordered_set<std::string>>
-                    fresh_union;
-                if (!fb_active_)
+                for (std::size_t i = 0; i < jobs.size(); ++i)
                 {
-                    for (std::size_t i = 0; i < jobs.size(); ++i)
+                    if (!results[i].failure.empty())
                     {
-                        if (!results[i].failure.empty())
+                        continue;
+                    }
+                    for (const cg::extract::SymbolRec& s :
+                         results[i].ex.symbols)
+                    {
+                        const cg::db::FileId f = read_fid_of(s.file);
+                        if (f != 0)
                         {
-                            continue;
+                            fresh_union[f].insert(s.unique_key);
                         }
-                        for (const cg::extract::SymbolRec& s :
-                             results[i].ex.symbols)
-                        {
-                            const cg::db::FileId f = read_fid_of(s.file);
-                            if (f != 0)
-                            {
-                                fresh_union[f].insert(s.unique_key);
-                            }
-                        }
-                    }
-                }
-                // 波式分解：fresh 并集已 intern 化（分解期身份回查同为只读
-                // 单点 read_fid_of）——经 intern 号判定同一成员关系。
-                const auto fresh_has =
-                    [&](cg::db::FileId f, const std::string& key)
-                {
-                    if (!fb_active_)
-                    {
-                        const auto it = fresh_union.find(f);
-                        return it != fresh_union.end()
-                               && it->second.contains(key);
-                    }
-                    const auto it = fb_fresh_union_.find(f);
-                    if (it == fb_fresh_union_.end())
-                    {
-                        return false;
-                    }
-                    const auto kit = fb_key_intern_.find(std::string_view{key});
-                    return kit != fb_key_intern_.end()
-                           && it->second.contains(kit->second);
-                };
-                std::unordered_set<cg::db::FileId> covered{
-                    reached.begin(),
-                    reached.end()};
-                for (const cg::db::FileId f : seeds)
-                {
-                    covered.insert(f);
-                }
-                const bool trace_covering =
-                    cg::util::cstd::get_env("CCG_DEBUG_PURGE").has_value();
-                std::size_t covering_iters = 0;
-                for (;;)
-                {
-                    ++covering_iters;
-                    std::vector<cg::db::SymId> grown;
-                    for (const cg::db::FileId f : covered)
-                    {
-                        for (const cg::db::FileSymbolKey& k :
-                             cg::db::file_symbol_keys(store_, f))
-                        {
-                            if (fresh_has(f, store_.str_of(k.key)))
-                            {
-                                continue;
-                            }
-                            if (doomed.insert(k.id).second)
-                            {
-                                grown.push_back(k.id);
-                            }
-                        }
-                    }
-                    detail::cascade_doomed_children(
-                        store_,
-                        doomed,
-                        std::vector<cg::db::SymId>{
-                            doomed.begin(),
-                            doomed.end()},
-                        &grown);
-                    if (grown.empty())
-                    {
-                        break;
-                    }
-                    for (const cg::db::FileId f :
-                         cg::db::edge_site_files_touching(store_, grown))
-                    {
-                        if (covered.insert(f).second)
-                        {
-                            seeds.push_back(f);
-                            reached.insert(f);
-                        }
-                    }
-                    for (const cg::db::FileId f :
-                         cg::db::defining_files(store_, grown))
-                    {
-                        if (covered.insert(f).second)
-                        {
-                            seeds.push_back(f);
-                            reached.insert(f);
-                        }
-                    }
-                }
-                if (trace_covering)
-                {
-                    try
-                    {
-                        std::println(
-                            std::cerr,
-                            "PURGE covering_doom iters={} covered={} "
-                            "doomed={}",
-                            covering_iters,
-                            covered.size(),
-                            doomed.size());
-                    }
-                    catch (...)
-                    {
                     }
                 }
             }
+            // 波式分解：fresh 并集已 intern 化（分解期身份回查同为只读
+            // 单点 read_fid_of）——经 intern 号判定同一成员关系。
+            const auto fresh_has = [&](cg::db::FileId f, const std::string& key)
+            {
+                if (!fb_active_)
+                {
+                    const auto it = fresh_union.find(f);
+                    return it != fresh_union.end() && it->second.contains(key);
+                }
+                const auto it = fb_fresh_union_.find(f);
+                if (it == fb_fresh_union_.end())
+                {
+                    return false;
+                }
+                const auto kit = fb_key_intern_.find(std::string_view{key});
+                return kit != fb_key_intern_.end()
+                       && it->second.contains(kit->second);
+            };
+            // 对账域收死：覆盖末日只对本批 fresh 提取并集覆盖的文件判
+            // 键失配。未重解析文件的键缺席 fresh 并集是伪前提——它们
+            // 没有重新提取，不代表死亡（旧机制靠第二遍全库重解析把误
+            // 判死者捞回，曾把 66 颗种子滚成 56392 个死者、卷入 761 个
+            // 文件）。跨文件扩散（死者社会关系经边站点/定义文件引新文
+            // 件入域）整体删除——跨文件影响由分析层全站点重做兜住；同
+            // 文件级联（级联子：父键死子键失配）保留。
+            std::size_t domain_files = 0;
+            {
+                std::vector<cg::db::SymId> stale;
+                const auto reconcile_file = [&](cg::db::FileId f)
+                {
+                    for (const cg::db::FileSymbolKey& k :
+                         cg::db::file_symbol_keys(store_, f))
+                    {
+                        if (fresh_has(f, store_.str_of(k.key)))
+                        {
+                            continue;
+                        }
+                        if (doomed.insert(k.id).second)
+                        {
+                            stale.push_back(k.id);
+                        }
+                    }
+                };
+                if (!fb_active_)
+                {
+                    domain_files = fresh_union.size();
+                    for (const auto& [f, keys] : fresh_union)
+                    {
+                        (void)keys;
+                        reconcile_file(f);
+                    }
+                }
+                else
+                {
+                    domain_files = fb_fresh_union_.size();
+                    for (const auto& [f, keys] : fb_fresh_union_)
+                    {
+                        (void)keys;
+                        reconcile_file(f);
+                    }
+                }
+                detail::cascade_doomed_children(
+                    store_,
+                    doomed,
+                    std::move(stale));
+            }
+            if (cg::util::cstd::get_env("CCG_DEBUG_PURGE").has_value())
+            {
+                try
+                {
+                    std::println(
+                        std::cerr,
+                        "PURGE covering_doom domain={} doomed={}",
+                        domain_files,
+                        doomed.size());
+                }
+                catch (...)
+                {
+                }
+            }
 
-            // 终态复核闸的数据面：wave-1 全部成功 TU 的新提取键集（本批已
+            // 终态复核闸的数据面：首遍全部成功 TU 的新提取键集（本批已
             // 解析者的事实）——fb 分解下符号已搬进全局槽，keep 集在账本
-            //（intern 号 → 字符串）。
-            std::unordered_set<std::string> wave1_fresh_keys;
+            // （intern 号 → 字符串）。
+            std::unordered_set<std::string> successful_tu_fresh_keys;
             if (fb_active_)
             {
                 for (const auto& [key, idx] : fb_key_intern_)
                 {
                     (void)idx;
-                    wave1_fresh_keys.insert(key);
+                    successful_tu_fresh_keys.insert(key);
                 }
                 // fb 槽集是去重并集，直接全收（多收只让复核偏保守否决，
                 // 绝不放行假命中——见下方 survives 的两分支）。
@@ -6537,7 +6719,51 @@ export namespace cg::graph
                         for (const cg::extract::SymbolRec& s :
                              results[i].ex.symbols)
                         {
-                            wave1_fresh_keys.insert(s.unique_key);
+                            successful_tu_fresh_keys.insert(s.unique_key);
+                        }
+                    }
+                }
+            }
+            // 失败/跳过条目的历史键复活集：重试失败（results 非空 failure）
+            // 与 failure_skip 的条目本批没有新提取面，但其旧票按增量契约
+            // 默认有效——名字可能还在（修复依赖后键会回来）。终态判定只
+            // 看 successful_tu_fresh_keys
+            // 会把这些条目上批发射过的键判成缺席死亡
+            // （"父被伪死"），锚（Extends/Specializes/父锚）随即绕过票数
+            // 直删名字还在的行——与票数通道"失败条目旧票有效"同批自相
+            // 矛盾。保守方向：失败者上批投过票的键视为 survives，行留票
+            // 数渐进通道裁决（条目真退役/全败时票被整撤，归零照删）。
+            std::unordered_set<std::string> failed_entry_revived_keys;
+            {
+                std::vector<std::pair<cg::db::FileId, std::string_view>>
+                    revive_entries;
+                for (std::size_t i = 0; i < jobs.size(); ++i)
+                {
+                    if (!results[i].failure.empty() && jobs[i].fid != 0)
+                    {
+                        revive_entries.emplace_back(
+                            jobs[i].fid,
+                            jobs[i].digest);
+                    }
+                }
+                for (std::size_t i = 0; i < plans.size(); ++i)
+                {
+                    const MainPlan& p = plans[i];
+                    if (dedup.at(std::pair{p.cmd->file, p.digest}) == i
+                        && p.fid != 0 && p.failure_skip != nullptr)
+                    {
+                        revive_entries.emplace_back(p.fid, p.digest);
+                    }
+                }
+                for (const auto& [fid, digest] : revive_entries)
+                {
+                    for (const cg::db::SymId sid :
+                         store_.contributions_of_entry(fid, digest))
+                    {
+                        const auto row = store_.symbol_row(sid);
+                        if (row.has_value())
+                        {
+                            failed_entry_revived_keys.insert(row->unique_key);
                         }
                     }
                 }
@@ -6553,16 +6779,15 @@ export namespace cg::graph
             // c17/c19 两次全库爆发的触发成员（跨 TU 同名拷贝的构造/函数）
             // 都属③——复核直接否决假触发；incr 的 class-delete 等价测试
             // 的实例符号属②——精确比对放行真提升。
-            // 重写集取 reached ∪ seeds：悬垂边/覆盖末日种子只进 seeds、
-            // 其观察者闭包在探测之后的 expand_closure 才拉满——但「种子
-            // 文件的观察者即将全部重解析」在判定时点已经注定，终态语义
-            // 不变（c17 实证：TranslateKey 所在文件经悬垂边种子进 seeds
-            // 而不在 reached，漏判曾让假触发放行）。
+            // 重写集取 reached ∪ seeds：第二遍（配置变更域）种子只进
+            // seeds、其观察者闭包在探测之后的 expand_closure 才拉满——
+            // 但「种子文件的观察者即将全部重解析」在判定时点已经注定，
+            // 终态语义不变。名字桶全塞删除后此域只剩配置变更种子，域外
+            // 未编辑文件的键也不再进入 doomed（覆盖末日对账域收死）。
             std::unordered_set<cg::db::FileId> edited_fids = content_dirty;
             for (std::size_t i = 0; i < plans.size(); ++i)
             {
-                const auto key =
-                    std::pair{plans[i].cmd->file, plans[i].digest};
+                const auto key = std::pair{plans[i].cmd->file, plans[i].digest};
                 if (dedup.at(key) == i && plans[i].parse && !plans[i].missing
                     && plans[i].fid != 0)
                 {
@@ -6571,10 +6796,9 @@ export namespace cg::graph
             }
             std::unordered_set<cg::db::FileId> rewrite_will = reached;
             rewrite_will.insert(seeds.begin(), seeds.end());
-            const auto terminal_survives =
-                [&](cg::db::SymId    id,
-                    cg::db::FileId   fid,
-                    std::uint32_t    flags) -> bool
+            const auto terminal_survives = [&](cg::db::SymId  id,
+                                               cg::db::FileId fid,
+                                               std::uint32_t  flags) -> bool
             {
                 const bool edited =
                     edited_fids.contains(fid) || erased.contains(fid);
@@ -6588,7 +6812,10 @@ export namespace cg::graph
                      cg::db::file_symbol_keys(store_, fid))
                 {
                     if (k.id == id
-                        && wave1_fresh_keys.contains(store_.str_of(k.key)))
+                        && (successful_tu_fresh_keys.contains(
+                                store_.str_of(k.key))
+                            || failed_entry_revived_keys.contains(
+                                store_.str_of(k.key))))
                     {
                         return true;
                     }
@@ -6596,9 +6823,141 @@ export namespace cg::graph
                 return false;
             };
 
+            // doomed 是判死域不是删除域：部分覆盖头键在 rewrite=reached
+            // 行清除面之外的伪死者仍计入 purge_lifts 的 pre/post 候选面
+            // （结构上删不到它们的行，见上方终态第三档论证）——警报按保守
+            // 面解读：多算警报、不多删行，最坏代价是一次多余的全站点
+            // 分析重算（保守方向）。
             const bool lifted_ambiguity = sym_index_.purge_lifts_name_ambiguity(
-                doomed, terminal_survives);
+                doomed,
+                terminal_survives);
 
+            // 名字桶真触发（复核闸放行）→ 分析层升级（层级正交化）：解
+            // 析范围=包含闭包∪配置变更，分析层判定无权把文件塞进解析范
+            // 围——旧的 existing_files 全塞种子链已删。警报的消费是置分
+            // 析层升级开关：commit 段 dispatch 走全站点决议重做+派发边
+            // 整类清空重写（既有 escalation 机制）。
+            const bool name_lift_escalation = lifted_ambiguity;
+            // 死实参实例行的显式删除集（层级正交化的行清除半边）：以批内
+            // 确死符号为模板实参的实例行（如 StaleStrategy 死后挂在未编
+            // 辑模板定义文件上的 StrategyBase<StaleStrategy> 基类实例）挂
+            // 在其定义文件上——定义文件未编辑不在行清除面（重写集
+            // purge），旧机制靠全塞重解析把它们带进 purge 面，该链已删。
+            // 锚点用死符号的 Extends 出边目标（CRTP 基类子句的精确库内
+            // 事实）：实参类型不存在 ⟹ 任何 TU（含批外观察者）的新提取
+            // 都不再产出该实例键，静态真死、不依赖观察者完备。终态第二
+            // 档对未编辑文件实例行的键集缺席判定会误杀注册点在批外 TU
+            // 的活实例（dup-entry 实测），宏条件键同理（fanin 实测），
+            // 均不采用。
+            //
+            // 锚面扩宽（行生老死记账制的三锚删除件）：同“键拼写内嵌死名 ⟹ 静态
+            // 真死”判据的两个新锚，逐形态实证后引入，与既有 Extends 锚
+            // 同前提（只认批内编辑/抹除文件上终态确死的键）：
+            // - Specializes 反向锚：确死主模板 P 的 specializes 入边
+            //   src=实例行——实例行的键内嵌主模板拼写（特化保留拼写），
+            //   而发射实例的 TU 必含模板定义（不可见编不出实例化点），
+            //   P 名死 ⟹ 无 TU 能再产出任何 P<...> 键。
+            // - 父符号锚：确死父符号（parent_id 库内事实，同文件级联已
+            //   有、跨文件原先只进判死域不进删除面）的全部子行——子键
+            //   的 scope 内嵌父名，发射子（嵌套或类外定义）的 TU 必见父
+            //   完整定义、必发射父，父名死 ⟹ 子键无人能再产出。
+            // 引用方向（uses 入边 src、type_alias 目标等）不产生删行：
+            // 引用行的键不含被引用名，行只是引用死符号——删边留行（级联
+            // 清边由 FK 承载）。锚=速判通道，票数归零是渐进通道，两者共
+            // 存互补。
+            std::vector<cg::db::SymId> dead_symbol_rows;
+            {
+                for (const cg::db::SymId id : doomed)
+                {
+                    const auto row = store_.symbol_row(id);
+                    if (!row.has_value())
+                    {
+                        continue;
+                    }
+                    const bool edited = edited_fids.contains(row->file_id)
+                                        || erased.contains(row->file_id);
+                    if (!edited
+                        || terminal_survives(id, row->file_id, row->flags))
+                    {
+                        continue; // 只认批内编辑/抹除文件上终态确死的键
+                    }
+                    for (const cg::db::EdgeRow& e : store_.edges_of_raw(
+                             id,
+                             true,
+                             cg::db::EdgeType::Extends))
+                    {
+                        if (doomed.contains(e.dst))
+                        {
+                            dead_symbol_rows.push_back(e.dst);
+                        }
+                    }
+                    // Specializes 反向锚：P 的实例行（I.specializes→P）。
+                    // doomed.contains 门槛与 Extends 锚同构：实例行须在
+                    // 判死域（对账域内键缺席）——批外实例行（判死域够不
+                    // 到）可能还有失败/未重解析条目的活票（源码里名字还
+                    // 在，修复依赖后键会回来），交给票数渐进通道。
+                    if (row->flags & cg::db::sym_flags::is_template)
+                    {
+                        for (const cg::db::EdgeRow& e : store_.edges_of_raw(
+                                 id,
+                                 false,
+                                 cg::db::EdgeType::Specializes))
+                        {
+                            if (doomed.contains(e.src))
+                            {
+                                dead_symbol_rows.push_back(e.src);
+                            }
+                        }
+                    }
+                    // 父符号锚：确死父的全部子行（跨文件级联子原先只进
+                    // 判死域不进删除面，本锚补删除半边；同文件子已被
+                    // purge 键失配/归零覆盖，重复收集由 erase_symbols 幂
+                    // 等吸收；孙行随 parent_id FK 级联消失）。子键的
+                    // scope 内嵌父名、发射子的 TU 必见父完整定义，父名
+                    // 死 ⟹ 子键无人能再产出——判据与实参锚同构。
+                    const auto one = std::array{id};
+                    for (const cg::db::SymId child :
+                         cg::db::child_symbols(store_, one))
+                    {
+                        dead_symbol_rows.push_back(child);
+                    }
+                }
+                if (opt_.dispatch)
+                {
+                    // 三锚并集去重（Extends 实参/特化实例/子成员的收集
+                    // 面天然重叠；dispatch 的键名单随之去重）。
+                    std::ranges::sort(dead_symbol_rows);
+                    dead_symbol_rows.erase(
+                        std::unique(
+                            dead_symbol_rows.begin(),
+                            dead_symbol_rows.end()),
+                        dead_symbol_rows.end());
+                    for (const cg::db::SymId id : dead_symbol_rows)
+                    {
+                        const auto row = store_.symbol_row(id);
+                        if (row.has_value())
+                        {
+                            incr_doomed_keys_.push_back(row->unique_key);
+                            incr_doomed_names_.push_back(row->name);
+                        }
+                    }
+                }
+            }
+            if (const auto v = cg::util::cstd::get_env("CCG_DEBUG_PURGE");
+                v.has_value() && !dead_symbol_rows.empty())
+            {
+                try
+                {
+                    std::println(
+                        std::cerr,
+                        "PURGE dead_row_erase count={} (Extends bases of "
+                        "batch-dead symbols)",
+                        dead_symbol_rows.size());
+                }
+                catch (...)
+                {
+                }
+            }
             if (const auto v = cg::util::cstd::get_env("CCG_DEBUG_PURGE");
                 v.has_value())
             {
@@ -6606,8 +6965,9 @@ export namespace cg::graph
                 {
                     std::println(
                         std::cerr,
-                        "PURGE lifted_ambiguity={} existing_files={} "
-                        "seeds_before_expand={} reached_before_expand={}",
+                        "PURGE lifted_ambiguity={} -> analysis escalation "
+                        "(full-site dispatch resolve) existing_files={} "
+                        "seeds={} reached={}",
                         lifted_ambiguity,
                         existing_files.size(),
                         seeds.size(),
@@ -6617,25 +6977,24 @@ export namespace cg::graph
                 {
                 }
             }
-            if (lifted_ambiguity && !existing_files.empty())
-            {
-                for (const cg::db::FileRow& fr : existing_files)
-                {
-                    seeds.push_back(fr.id);
-                    reached.insert(fr.id);
-                }
-            }
 
+            // 配置变更域的第二遍解析（解析范围封死规则的合法扩张）：seeds
+            // 此刻只含
+            // 编译库/包含图/内容变更驱动的种子（抹除/失败/盘缺/摘要退役
+            // 的前向闭包、包含差目标）——名字桶全塞与死者社会关系种子已
+            // 删，分析层判定无权出现在这里。种子的观察者闭包拉满后统一
+            // 翻位补解析。
             expand_closure(seeds);
             if (const auto v = cg::util::cstd::get_env("CCG_DEBUG_PURGE");
                 v.has_value())
             {
                 try
                 {
-                    std::println(std::cerr,
-                                 "PURGE after_expand seeds={} reached={}",
-                                 seeds.size(),
-                                 reached.size());
+                    std::println(
+                        std::cerr,
+                        "PURGE after_expand seeds={} reached={}",
+                        seeds.size(),
+                        reached.size());
                 }
                 catch (...)
                 {
@@ -6799,6 +7158,8 @@ export namespace cg::graph
                  .all_failed_fids = all_failed_fids,
                  .doomed = doomed,
                  .reached = reached,
+                 .dead_symbol_rows = dead_symbol_rows,
+                 .name_lift_escalation = name_lift_escalation,
                  .fp_writes = fp_writes,
                  .hash_writes = hash_writes,
                  .roots_digest = roots_digest,
@@ -6813,9 +7174,12 @@ export namespace cg::graph
                 if (headcache_)
                 {
                     std::vector<cg::db::FileId> invalidate{
-                        content_dirty.begin(), content_dirty.end()};
+                        content_dirty.begin(),
+                        content_dirty.end()};
                     invalidate.insert(
-                        invalidate.end(), erased.begin(), erased.end());
+                        invalidate.end(),
+                        erased.begin(),
+                        erased.end());
                     const auto resolve =
                         [&](const std::string& p) -> cg::db::FileId
                     {
@@ -7137,8 +7501,9 @@ export namespace cg::graph
                 st.failed_entries;
             std::unordered_set<cg::db::FileId>& all_failed_fids =
                 st.all_failed_fids;
-            std::unordered_set<cg::db::SymId>&         doomed = st.doomed;
-            const std::unordered_set<cg::db::FileId>&  reached = st.reached;
+            std::unordered_set<cg::db::SymId>&        doomed = st.doomed;
+            const std::unordered_set<cg::db::FileId>& reached = st.reached;
+            const bool name_lift_escalation = st.name_lift_escalation;
             const std::vector<cg::db::FingerprintRow>& fp_writes = st.fp_writes;
             const std::unordered_map<cg::db::FileId, std::string>& hash_writes =
                 st.hash_writes;
@@ -7529,16 +7894,19 @@ export namespace cg::graph
                 const cg::clang::CompileCommand* cmd = nullptr;
                 cg::db::FileId                   fid = 0;
                 std::string                      hash;
-                cg::extract::TuExtract           ex;
-                cg::analysis::TuAnalysis         analysis;
+                std::string digest; // 条目命令摘要（贡献票的条目身份）
+                cg::extract::TuExtract   ex;
+                cg::analysis::TuAnalysis analysis;
             };
             std::vector<RunTu> batch;
             // 统一消费视图：波式=账本 TU（搬运序=jobs 序）；否则=批 TU
             // （现状）。四类循环（包含/分析载荷/边域/清扫差）共用。
             struct TuView
             {
-                const cg::clang::CompileCommand*            cmd = nullptr;
-                cg::db::FileId                              fid = 0;
+                const cg::clang::CompileCommand* cmd = nullptr;
+                cg::db::FileId                   fid = 0;
+                // 条目命令摘要视图（贡献票的条目身份；指向账本/批 TU 的串）。
+                std::string_view                            digest;
                 const cg::analysis::TuAnalysis*             analysis = nullptr;
                 const std::vector<cg::extract::IncludeRec>* includes = nullptr;
                 const std::vector<cg::extract::ImportRec>*  imports = nullptr;
@@ -7562,6 +7930,7 @@ export namespace cg::graph
                             .cmd = jobs[i].cmd,
                             .fid = jobs[i].fid,
                             .hash = jobs[i].hash,
+                            .digest = jobs[i].digest,
                             .ex = std::move(results[i].ex),
                             .analysis = std::move(results[i].analysis)});
                 }
@@ -7572,6 +7941,7 @@ export namespace cg::graph
                         TuView{
                             .cmd = tu.cmd,
                             .fid = tu.fid,
+                            .digest = tu.digest,
                             .analysis = &tu.analysis,
                             .includes = &tu.ex.includes,
                             .imports = &tu.ex.imports});
@@ -7598,11 +7968,38 @@ export namespace cg::graph
                         TuView{
                             .cmd = lt.cmd,
                             .fid = lt.fid,
+                            .digest = lt.digest,
                             .analysis = &lt.analysis,
                             .includes = &lt.includes,
                             .imports = &lt.imports});
                 }
             }
+
+            // ===== 贡献记账（schema v18 行生老病死记账制）=====
+            // 本批每个成功条目一张选票集：符号发射面（定义级名字）∪ 边
+            // 解析命中的目标面（引用级名字——前置声明+指针/引用使用的浅
+            // 引用经 uses 边的延迟解析命中也投活票）。条目重解析后与历史
+            // 贡献做差：不再贡献的行撤票、仍贡献的续票；未重解析条目的票
+            // 按增量契约默认有效。票数归零的行在 dispatch 装载前删除。
+            struct EntryVotes
+            {
+                const cg::clang::CompileCommand*  cmd = nullptr;
+                std::string_view                  digest;
+                std::unordered_set<cg::db::SymId> votes;
+            };
+            std::vector<EntryVotes> entry_votes;
+            entry_votes.reserve(tu_views.size());
+            for (const TuView& tv : tu_views)
+            {
+                entry_votes.push_back(
+                    EntryVotes{.cmd = tv.cmd, .digest = tv.digest});
+            }
+            const auto votes_of_tu =
+                [&](std::size_t t) -> std::unordered_set<cg::db::SymId>&
+            { return entry_votes.at(t).votes; };
+            // 归零仲裁候选：本批全部撤票动作触及的符号（行从创建起至少
+            // 有一票，“从有票变零票”必经一次撤票，故归零集是其子集）。
+            std::unordered_set<cg::db::SymId> retracted_votes;
 
             std::unordered_set<cg::db::FileId> rewrite = reached;
 
@@ -7700,14 +8097,13 @@ export namespace cg::graph
                     // 入、瞬间失败（快败）——重试永远无法治愈。连续两次快
                     // 败（含 peek 续租事务的同类失败）即中止自旋、抛可行动
                     // 错误，绝不把 --wait 上界（默认 30 分钟）耗成静默挂死。
-                    int fast_busy_streak = 0;
-                    const auto count_fast_busy = [&](
-                        std::chrono::milliseconds spent)
+                    int        fast_busy_streak = 0;
+                    const auto count_fast_busy =
+                        [&](std::chrono::milliseconds spent)
                     {
-                        fast_busy_streak =
-                            spent < std::chrono::seconds{5}
-                                ? fast_busy_streak + 1
-                                : 0;
+                        fast_busy_streak = spent < std::chrono::seconds{5}
+                                               ? fast_busy_streak + 1
+                                               : 0;
                         return fast_busy_streak >= 2;
                     };
                     for (;;)
@@ -8128,6 +8524,12 @@ export namespace cg::graph
                 key_id.reserve(fb_active_ ? fb_syms_.size() : slots.size());
                 std::unordered_map<cg::db::FileId, std::vector<cg::db::StrId>>
                     fresh_keys;
+                // 本批符号写入触及的文件（含 PCH 装载域：影子 PCH 的伞头
+                // 闭包不产生 include 边，符号是它仍属解析闭包的唯一在库
+                // 证据）。可达性清扫把它并入种子——删除刚写入符号的文件
+                // 行等于级联清掉本批成果，随后的贡献票发射即引用死符号
+                // id 而外键失败。
+                std::unordered_set<cg::db::FileId> symbol_sink_files;
                 if (!fb_active_)
                 {
                     for (const SymSlot& slot : slots)
@@ -8136,7 +8538,8 @@ export namespace cg::graph
                         const cg::extract::SymbolRec& s =
                             batch[slot.last_tu].ex.symbols[slot.last_sym];
                         const cg::db::FileId sfile = file_id_of(s.file);
-                        const bool           fn_like = function_like(s.kind);
+                        symbol_sink_files.insert(sfile);
+                        const bool fn_like = function_like(s.kind);
                         // 同一符号的签名哈希在 upsert 与索引条目两处使用，只算
                         // 一次（util 单点实现，逐位不变）。
                         const std::optional<std::int64_t> sig =
@@ -8204,7 +8607,8 @@ export namespace cg::graph
                         lease_beat();
                         const cg::extract::SymbolRec& s = slot.rec;
                         const cg::db::FileId sfile = file_id_of(s.file);
-                        const bool           fn_like = function_like(s.kind);
+                        symbol_sink_files.insert(sfile);
+                        const bool fn_like = function_like(s.kind);
                         const std::optional<std::int64_t> sig =
                             fn_like ? std::optional<
                                           std::int64_t>{cg::util::sig_hash_of(
@@ -8262,6 +8666,40 @@ export namespace cg::graph
                     }
                 }
                 const auto t_a1 = std::chrono::steady_clock::now();
+
+                // 符号面投票：本批每个条目发射的定义级名字各投一票
+                // （key_id 已在阶段 A 建满，发射面与 upsert 面一致）。
+                for (std::size_t t = 0; t < entry_votes.size(); ++t)
+                {
+                    lease_beat();
+                    std::unordered_set<cg::db::SymId>& v = votes_of_tu(t);
+                    if (!fb_active_)
+                    {
+                        for (const cg::extract::SymbolRec& s :
+                             batch[t].ex.symbols)
+                        {
+                            if (const auto it = key_id.find(s.unique_key);
+                                it != key_id.end())
+                            {
+                                v.insert(it->second);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // 波式分解：本 TU 的发射键集在账本（intern 号）。
+                        for (const std::uint32_t kid : fb_ledger_[t].keep_keys)
+                        {
+                            const std::string& key = *fb_key_list_[kid];
+                            if (const auto it =
+                                    key_id.find(std::string_view{key});
+                                it != key_id.end())
+                            {
+                                v.insert(it->second);
+                            }
+                        }
+                    }
+                }
 
                 for (const TuView& tu : tu_views)
                 {
@@ -8344,6 +8782,13 @@ export namespace cg::graph
                         ++kept_emitted_files;
                         continue;
                     }
+                    // 全败条目终态死亡：整文件撤票（该文件的条目此后不再
+                    // 存在），受影响符号进归零仲裁候选。
+                    for (const cg::db::SymId sid :
+                         store_.retract_file_contributions(fid))
+                    {
+                        retracted_votes.insert(sid);
+                    }
                     capture_analysis_purge_(
                         fid,
                         std::span<const cg::db::StrId>{});
@@ -8357,6 +8802,16 @@ export namespace cg::graph
                         "this-run payload - purge skipped",
                         kept_emitted_files,
                         kept_emitted_files == 1 ? "" : "s");
+                }
+
+                // 死实参实例行显式删除（dispatch 装载之前）：决议表按存
+                // 量行构建，幽灵行在场会污染候选计数（实测多发候选边）；
+                // 此处删行让全站点/增量决议都与干净库一致。引用方随外键
+                // 级联清理（边/线索/站点/子成员 CASCADE，callee/method/
+                // static_type 置空）。
+                if (!st.dead_symbol_rows.empty())
+                {
+                    store_.erase_symbols(st.dead_symbol_rows);
                 }
 
                 // schema v10 阶段 A 增量：本批 TU 的类型线索与调用点。符号已
@@ -8381,8 +8836,9 @@ export namespace cg::graph
                     // 库查分支天然只返回当下存活的行。
                     return cg::db::symbol_id_by_key(store_, key);
                 };
-                for (const TuView& tu : tu_views)
+                for (std::size_t tv_i = 0; tv_i < tu_views.size(); ++tv_i)
                 {
+                    const TuView& tu = tu_views[tv_i];
                     lease_beat();
                     if (!fb_active_)
                     {
@@ -8399,7 +8855,7 @@ export namespace cg::graph
                             const bool lambda_in_roots = detail::path_in_roots(
                                 l.file,
                                 collect_opt_.roots);
-                            store_.upsert_symbol(
+                            const cg::db::SymId lam_id = store_.upsert_symbol(
                                 {.unique_key = l.key,
                                  .kind = cg::db::SymbolKind::Function,
                                  .name = l.name,
@@ -8417,6 +8873,7 @@ export namespace cg::graph
                                  .flags = cg::db::sym_flags::external_body,
                                  .param_types = std::nullopt,
                                  .template_params = std::nullopt});
+                            votes_of_tu(tv_i).insert(lam_id);
                         }
                         for (const cg::analysis::TypeHintRec& hint :
                              tu.analysis->hints)
@@ -8508,6 +8965,7 @@ export namespace cg::graph
                                  .arg_call_keys = arg_keys_json,
                                  .arg_targets = targets_json,
                                  .receiver_types = static_json,
+                                 .receiver_static = static_json,
                                  .callee_resolved = false,
                                  .resolved = false,
                                  .confidence = 3,
@@ -8592,7 +9050,7 @@ export namespace cg::graph
                         const FlushLedgerTu& anchor = fb_ledger_[ls.tu];
                         const bool           lambda_in_roots =
                             detail::path_in_roots(l.file, collect_opt_.roots);
-                        store_.upsert_symbol(
+                        const cg::db::SymId lam_id = store_.upsert_symbol(
                             {.unique_key = l.key,
                              .kind = cg::db::SymbolKind::Function,
                              .name = l.name,
@@ -8610,6 +9068,7 @@ export namespace cg::graph
                              .flags = cg::db::sym_flags::external_body,
                              .param_types = std::nullopt,
                              .template_params = std::nullopt});
+                        votes_of_tu(ls.tu).insert(lam_id);
                     }
                     for (const cg::analysis::TypeHintRec& hint : fb_hints_)
                     {
@@ -8694,6 +9153,7 @@ export namespace cg::graph
                              .arg_call_keys = arg_keys_json,
                              .arg_targets = targets_json,
                              .receiver_types = static_json,
+                             .receiver_static = static_json,
                              .callee_resolved = false,
                              .resolved = false,
                              .confidence = 3,
@@ -8894,6 +9354,12 @@ export namespace cg::graph
                         const cg::db::FileId fid =
                             p.fid != 0 ? p.fid : file_id_of(p.cmd->file);
                         missing_fids.insert(fid);
+                        // 盘缺条目与全败同族：整文件撤票+归零仲裁候选。
+                        for (const cg::db::SymId sid :
+                             store_.retract_file_contributions(fid))
+                        {
+                            retracted_votes.insert(sid);
+                        }
                         capture_analysis_purge_(
                             fid,
                             std::span<const cg::db::StrId>{});
@@ -9051,16 +9517,23 @@ export namespace cg::graph
                             ++feed_ci[si];
                             const cg::db::FileId site =
                                 file_id_of(es.site_file);
-                            if (!site_writable(site))
+                            // 站点在未重写文件的边：边行仍在库内
+                            // （occurrences 未动），不重发（防翻倍），但
+                            // 名字证据真实——目标解析照跑、票照续（差集
+                            // 撤票的新票集并入存活边目标面；非可写站点
+                            // 的跳过曾把这类活票当批撤走）。
+                            const bool writable = site_writable(site);
+                            std::unordered_map<
+                                std::string_view,
+                                cg::db::SymId>::const_iterator src{};
+                            if (writable)
                             {
-                                continue;
-                            }
-                            const auto src =
-                                key_id.find(std::string_view{es.src_key});
-                            if (src == key_id.end())
-                            {
-                                sum.unresolved += c.emissions;
-                                continue;
+                                src = key_id.find(std::string_view{es.src_key});
+                                if (src == key_id.end())
+                                {
+                                    sum.unresolved += c.emissions;
+                                    continue;
+                                }
                             }
                             std::optional<cg::db::SymId> dst;
                             double                       confidence = 1.0;
@@ -9087,24 +9560,38 @@ export namespace cg::graph
                             }
                             if (!dst.has_value())
                             {
-                                sum.unresolved += c.emissions;
-                                if (opt_.progress)
+                                if (writable)
                                 {
-                                    const std::string callee =
-                                        es.dst_is_key ? es.dst_key
-                                                      : es.dst_meta.name;
-                                    if (es.dst_is_key
-                                        || sym_index_.knows_name(
-                                            es.dst_meta.name))
+                                    sum.unresolved += c.emissions;
+                                    if (opt_.progress)
                                     {
-                                        unresolved_names_[callee] +=
-                                            c.emissions;
-                                    }
-                                    else
-                                    {
-                                        unknown_names_[callee] += c.emissions;
+                                        const std::string callee =
+                                            es.dst_is_key ? es.dst_key
+                                                          : es.dst_meta.name;
+                                        if (es.dst_is_key
+                                            || sym_index_.knows_name(
+                                                es.dst_meta.name))
+                                        {
+                                            unresolved_names_[callee] +=
+                                                c.emissions;
+                                        }
+                                        else
+                                        {
+                                            unknown_names_[callee] +=
+                                                c.emissions;
+                                        }
                                     }
                                 }
+                                continue;
+                            }
+                            // 名字面投票：边解析命中的目标符号对本条目
+                            // 投一票（浅引用——前置声明+指针/引用使用
+                            // ——经 uses 边的延迟解析命中即活票）。非可
+                            // 写站点不 feed 边（边行已在库内），解析命
+                            // 中仍续票。
+                            votes_of_tu(t).insert(*dst);
+                            if (!writable)
+                            {
                                 continue;
                             }
                             feed_edge(
@@ -9135,15 +9622,22 @@ export namespace cg::graph
                         for (const cg::extract::EdgeRec& e : batch[t].ex.edges)
                         {
                             const cg::db::FileId site = file_id_of(e.site_file);
-                            if (!site_writable(site))
+                            // fb 分支同款：站点在未重写文件的边不重发（边
+                            // 行仍在库内），但目标解析照跑、票照续——跳过
+                            // 解析曾让差集撤票把头文件站点的浅引用活票当
+                            // 批撤走（引用者条目的任何无关重解析都会触发）。
+                            const bool writable = site_writable(site);
+                            std::unordered_map<
+                                std::string_view,
+                                cg::db::SymId>::const_iterator src{};
+                            if (writable)
                             {
-                                continue;
-                            }
-                            const auto src = key_id.find(e.src_key);
-                            if (src == key_id.end())
-                            {
-                                ++sum.unresolved;
-                                continue;
+                                src = key_id.find(e.src_key);
+                                if (src == key_id.end())
+                                {
+                                    ++sum.unresolved;
+                                    continue;
+                                }
                             }
                             std::optional<cg::db::SymId> dst;
                             double                       confidence = 1.0;
@@ -9179,23 +9673,33 @@ export namespace cg::graph
                             }
                             if (!dst.has_value())
                             {
-                                ++sum.unresolved;
-                                if (opt_.progress)
+                                if (writable)
                                 {
-                                    const std::string callee =
-                                        e.dst.is_key ? e.dst.key
-                                                     : e.dst.meta.name;
-                                    if (e.dst.is_key
-                                        || sym_index_.knows_name(
-                                            e.dst.meta.name))
+                                    ++sum.unresolved;
+                                    if (opt_.progress)
                                     {
-                                        ++unresolved_names_[callee];
-                                    }
-                                    else
-                                    {
-                                        ++unknown_names_[callee];
+                                        const std::string callee =
+                                            e.dst.is_key ? e.dst.key
+                                                         : e.dst.meta.name;
+                                        if (e.dst.is_key
+                                            || sym_index_.knows_name(
+                                                e.dst.meta.name))
+                                        {
+                                            ++unresolved_names_[callee];
+                                        }
+                                        else
+                                        {
+                                            ++unknown_names_[callee];
+                                        }
                                     }
                                 }
+                                continue;
+                            }
+                            // 名字面投票（fb 分支同款语义：解析命中即活票，
+                            // 非可写站点只投票不 feed 边）。
+                            votes_of_tu(t).insert(*dst);
+                            if (!writable)
+                            {
                                 continue;
                             }
                             const EdgeKey slot_key{
@@ -9250,11 +9754,10 @@ export namespace cg::graph
                 // 核：存活即放行，真被 purge 删除的行点查同样为 false、
                 // 照旧拦截——原防线语义完整保留；本检查位于全部 purge 落
                 // 定之后，时序安全。miss 边每条一次点查，批量级可忽略。
-                const auto id_alive = [&](
-                    cg::db::SymId id)
+                const auto id_alive = [&](cg::db::SymId id)
                 {
                     return known_symbol_ids.contains(id)
-                        || store_.symbol_exists(id);
+                           || store_.symbol_exists(id);
                 };
                 for (const EdgeSlot& edge : edge_slots)
                 {
@@ -9485,6 +9988,16 @@ export namespace cg::graph
                                        == keep->second.end())
                             {
                                 store_.erase_fingerprint(fid, fp.cmd_digest);
+                                // 条目退役：命令摘要不再存在的条目整撤其
+                                // 贡献票（与指纹同寿命），受影响符号进归
+                                // 零仲裁候选。
+                                for (const cg::db::SymId sid :
+                                     store_.retract_entry_contributions(
+                                         fid,
+                                         fp.cmd_digest))
+                                {
+                                    retracted_votes.insert(sid);
+                                }
                             }
                         }
                     }
@@ -9629,6 +10142,37 @@ export namespace cg::graph
                 }();
                 if (sweep_needed)
                 {
+                    // PCH 装载域的声明输入种子（先于快照收集，使按需复活
+                    // 的行也进图）：影子 PCH 的装载不重放伞头的包含预处
+                    // 理，伞头与其包装头在 includes 表上零边——它们是消费
+                    // TU 的解析输入（强制包含 / /Yu 声明），不进种子就会被
+                    // 误判不可达。已知边界：种子只保一级声明输入与符号
+                    // 写入面，伞头闭包里自身无符号发射的二级头（影子装载
+                    // 下零 include 边）仍会被清扫——该头无符号无边，行删
+                    // 除对查询面零影响；出现依赖文件行存在性的消费方时
+                    // 再扩种子面。
+                    std::vector<cg::db::FileId> pch_seed_files;
+                    for (const TuView& tu : tu_views)
+                    {
+                        if (!tu.cmd->pch_use)
+                        {
+                            continue;
+                        }
+                        for (const std::string& forced :
+                             tu.cmd->forced_includes)
+                        {
+                            pch_seed_files.push_back(file_id_of(forced));
+                        }
+                        if (!tu.cmd->pch_header.empty())
+                        {
+                            const std::string abs_header = cg::util::norm_path(
+                                (std::filesystem::path{tu.cmd->directory}
+                                 / tu.cmd->pch_header)
+                                    .lexically_normal()
+                                    .generic_string());
+                            pch_seed_files.push_back(file_id_of(abs_header));
+                        }
+                    }
                     std::vector<std::pair<cg::db::FileId, std::string>>
                         cur_files;
                     for (const cg::db::FileRow& fr : cg::db::all_files(store_))
@@ -9643,12 +10187,27 @@ export namespace cg::graph
                         cur_links.emplace_back(link.includer, link.target);
                     }
                     std::vector<cg::db::FileId> cur_roots;
-                    cur_roots.reserve(plans.size());
+                    cur_roots.reserve(
+                        plans.size() + symbol_sink_files.size()
+                        + pch_seed_files.size());
                     for (const MainPlan& p : plans)
                     {
                         cur_roots.push_back(
                             p.fid != 0 ? p.fid : file_id_of(p.cmd->file));
                     }
+                    cur_roots.insert(
+                        cur_roots.end(),
+                        pch_seed_files.begin(),
+                        pch_seed_files.end());
+                    // 符号写入面并入种子：本批往某文件写了符号，该文件
+                    // 就是活的解析产出域（PCH 装载域里符号是伞头闭包仍在
+                    // 解析输入中的唯一在库证据）——删除它的行等于级联清
+                    // 掉本批刚写的符号，随后的贡献票发射引用死符号 id 而
+                    // 外键失败。
+                    cur_roots.insert(
+                        cur_roots.end(),
+                        symbol_sink_files.begin(),
+                        symbol_sink_files.end());
                     for (const cg::db::FileId fid : detail::unreachable_files(
                              cur_files,
                              cur_links,
@@ -9668,8 +10227,61 @@ export namespace cg::graph
                         capture_analysis_purge_(
                             fid,
                             std::span<const cg::db::StrId>{});
+                        // 抹除整文件撤票先于行删除（CASCADE 只清票不收集
+                        // 受影响集，显式撤票把挂别处、票全来自本文件的行
+                        // 带进归零仲裁）。
+                        for (const cg::db::SymId sid :
+                             store_.retract_file_contributions(fid))
+                        {
+                            retracted_votes.insert(sid);
+                        }
                         store_.erase_file(fid);
+                        // 行删除后同步失效路径→id 解析面：缓存若继续命中
+                        // 已删 id，后续按该路径发射的外键列就是死引用；
+                        // 失效后同一路径再次被需要时按复活语义重新
+                        // upsert（file_id_of 的 miss 分支）。
+                        for (auto it = file_ids.begin(); it != file_ids.end();)
+                        {
+                            it = it->second == fid ? file_ids.erase(it) : ++it;
+                        }
+                        for (auto it = row_by_path.begin();
+                             it != row_by_path.end();)
+                        {
+                            it = it->second.id == fid ? row_by_path.erase(it)
+                                                      : ++it;
+                        }
+                        for (auto it = fold_row.begin(); it != fold_row.end();)
+                        {
+                            it = it->second.id == fid ? fold_row.erase(it)
+                                                      : ++it;
+                        }
+                        new_files.erase(fid);
                         ++sum.purged_files;
+                        if (cg::util::cstd::get_env("CCG_DEBUG_PURGE")
+                                .has_value())
+                        {
+                            // 调试面：逐文件打印清扫删除的路径（外键
+                            // 故障定位时钉死"删了谁"的第一手证据）。
+                            for (const auto& [dbg_id, dbg_path] : cur_files)
+                            {
+                                if (dbg_id == fid)
+                                {
+                                    try
+                                    {
+                                        std::println(
+                                            std::cerr,
+                                            "PURGE sweep_unreachable id={} "
+                                            "{}",
+                                            fid,
+                                            dbg_path);
+                                    }
+                                    catch (...)
+                                    {
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
                 else
@@ -9679,6 +10291,126 @@ export namespace cg::graph
                 t_sweep_us_ += detail::phase_us(
                     t_sweep0,
                     std::chrono::steady_clock::now());
+
+                // ===== 贡献差集撤票/续票 + 归零删行（schema v18）=====
+                // 位置纪律：边发射（名字面投票）与抹除清扫都已完成、
+                // dispatch/传播装载尚未开始——票账此刻是本批终态；行删除
+                // 遵守"装载前删行"的既有教训（决议表按存量行构建，幽灵
+                // 行在场会污染候选计数——与 Extends 锚删除同一防线）。
+                {
+                    // 记账三段计时（旧票读/差集撤票/新票落库；归零仲裁并入
+                    // 差集段）：端到端包络与 store/commit 四分段都圈不出这
+                    // 块的独立成本，六键（分析段）也不含它——三段累计器
+                    // 落 meta 供增量批与全量批对照（性能纪律的观测面）。
+                    const auto  t_cr0 = std::chrono::steady_clock::now();
+                    auto        t_cd0 = t_cr0;
+                    auto        t_ci0 = t_cr0;
+                    std::size_t contrib_entry_i = 0;
+                    for (EntryVotes& ev : entry_votes)
+                    {
+                        lease_beat();
+                        // 测试注入（生产零开销：无环境变量即什么都不做）：
+                        // 撤票差集循环中途硬崩——崩溃一致性测试的精确现
+                        // 场（事务外杀进程 = 部分撤票永不落盘，重启后票账
+                        // 必须与崩溃前完全一致）。
+                        if (contrib_entry_i == 1
+                            && cg::util::cstd::get_env(
+                                   "CCG_TEST_CRASH_IN_CONTRIB")
+                                   .has_value())
+                        {
+                            std::abort();
+                        }
+                        ++contrib_entry_i;
+                        // 条目身份的 files 行一律按主文件路径经 file_id_of
+                        // 解析（陈旧快照核对的复活映射与“新 TU fid=0”两
+                        // 种形态都被覆盖——绝不把死 id 或 0 写进外键）。
+                        const cg::db::FileId fid = file_id_of(ev.cmd->file);
+                        t_cd0 = std::chrono::steady_clock::now();
+                        const std::vector<cg::db::SymId> old_votes =
+                            store_.contributions_of_entry(fid, ev.digest);
+                        t_ci0 = std::chrono::steady_clock::now();
+                        t_contrib_read_us_ += detail::phase_us(t_cd0, t_ci0);
+                        for (const cg::db::SymId sid : old_votes)
+                        {
+                            if (!ev.votes.contains(sid))
+                            {
+                                store_.retract_contribution(
+                                    sid,
+                                    fid,
+                                    ev.digest);
+                                retracted_votes.insert(sid);
+                            }
+                        }
+                        std::vector<cg::db::SymId> fresh_span(
+                            ev.votes.begin(),
+                            ev.votes.end());
+                        t_cd0 = std::chrono::steady_clock::now();
+                        t_contrib_diff_us_ += detail::phase_us(t_ci0, t_cd0);
+                        store_.contribute_symbols(fid, ev.digest, fresh_span);
+                        t_ci0 = std::chrono::steady_clock::now();
+                        t_contrib_insert_us_ += detail::phase_us(t_cd0, t_ci0);
+                    }
+                    // heal 折叠（解析前的独立小事务）删 loser 文件行时
+                    // CASCADE 清票但不走受影响集收集——并入归零仲裁候选，
+                    // 否则票数虚低的窗口内其它撤票触及同符号会提前归零
+                    // 删行（heal_vote_affected_ 在 heal 调用点填）。
+                    retracted_votes.insert(
+                        heal_vote_affected_.begin(),
+                        heal_vote_affected_.end());
+                    std::vector<cg::db::SymId> candidates(
+                        retracted_votes.begin(),
+                        retracted_votes.end());
+                    std::ranges::sort(candidates);
+                    const std::vector<cg::db::SymId> zeroed =
+                        store_.zero_contribution_symbols(candidates);
+                    t_contrib_diff_us_ += detail::phase_us(
+                        t_ci0,
+                        std::chrono::steady_clock::now());
+                    if (!zeroed.empty())
+                    {
+                        if (opt_.dispatch)
+                        {
+                            for (const cg::db::SymId id : zeroed)
+                            {
+                                const auto row = store_.symbol_row(id);
+                                if (row.has_value())
+                                {
+                                    incr_doomed_keys_.push_back(
+                                        row->unique_key);
+                                    incr_doomed_names_.push_back(row->name);
+                                }
+                            }
+                        }
+                        store_.erase_symbols(zeroed);
+                        if (cg::util::cstd::get_env("CCG_DEBUG_PURGE")
+                                .has_value())
+                        {
+                            try
+                            {
+                                std::println(
+                                    std::cerr,
+                                    "PURGE contrib_zero_erase count={} "
+                                    "(zero-vote rows)",
+                                    zeroed.size());
+                            }
+                            catch (...)
+                            {
+                            }
+                        }
+                    }
+                    store_.set_meta(
+                        "contrib_read_us",
+                        std::to_string(
+                            static_cast<std::int64_t>(t_contrib_read_us_)));
+                    store_.set_meta(
+                        "contrib_diff_us",
+                        std::to_string(
+                            static_cast<std::int64_t>(t_contrib_diff_us_)));
+                    store_.set_meta(
+                        "contrib_insert_us",
+                        std::to_string(
+                            static_cast<std::int64_t>(t_contrib_insert_us_)));
+                }
 
                 // schema v10 阶段 B：全局传播固定点 + dispatch。放在 extends/
                 // overrides 边与孤儿清扫之后、同一事务提交之前——家族闭包
@@ -9803,6 +10535,12 @@ export namespace cg::graph
                     persist_lines("dispatch_prev_callees", incr_prev_callees_);
                     persist_lines("dispatch_doomed_keys", incr_doomed_keys_);
                     persist_lines("dispatch_doomed_names", incr_doomed_names_);
+                    // 名字桶警报的升级腿同样跨批传递：收敛批的
+                    // dispatch_commit 读到即升级并消费清除。
+                    if (name_lift_escalation)
+                    {
+                        store_.set_meta("dispatch_name_escalation", "1");
+                    }
                 }
                 else if (opt_.dispatch)
                 {
@@ -9818,7 +10556,8 @@ export namespace cg::graph
                          .prev_slots = &incr_prev_slots_,
                          .prev_callees = &incr_prev_callees_,
                          .doomed_keys = &incr_doomed_keys_,
-                         .doomed_names = &incr_doomed_names_});
+                         .doomed_names = &incr_doomed_names_,
+                         .name_escalation = name_lift_escalation});
                     sum.dispatch_stale_files = 0;
                 }
 
@@ -9861,13 +10600,17 @@ export namespace cg::graph
                         std::cerr,
                         "  store batch: {} TUs (A {:.0f}us, purge "
                         "{:.0f}us, B {:.0f}us, commit {:.0f}us, sweep "
-                        "{:.0f}us{})",
+                        "{:.0f}us, contrib read {:.0f}us diff {:.0f}us "
+                        "insert {:.0f}us{})",
                         batch.size(),
                         t_store_a_us_,
                         t_purge_us_,
                         t_store_b_us_,
                         t_commit_us_,
                         t_sweep_us_,
+                        t_contrib_read_us_,
+                        t_contrib_diff_us_,
+                        t_contrib_insert_us_,
                         sum.reachability_sweeps_skipped > 0
                             ? std::format(
                                   " [fast-path skipped {}/1 sweep]",
@@ -10296,21 +11039,18 @@ export namespace cg::graph
                         // 字节不在任何内容哈希内——宁可 miss）。变体键 =
                         // 本 TU 的 parse_digest（argv 已剥主文件 token，
                         // 同旗标 TU 共享）。
-                        std::optional<headcache::HeadCache::Bridge>
-                            hc_bridge;
-                        if (headcache_
-                            && !cg::clang::is_module_tu(*tu.cmd)
+                        std::optional<headcache::HeadCache::Bridge> hc_bridge;
+                        if (headcache_ && !cg::clang::is_module_tu(*tu.cmd)
                             && tu.cmd->pch.identity.empty())
                         {
                             const auto hit =
                                 hc_main_hash_of_.find(tu.cmd->file);
                             if (hit != hc_main_hash_of_.end())
                             {
-                                hc_bridge.emplace(
-                                    headcache_->bridge_for(
-                                        tu.digest,
-                                        tu.cmd->file,
-                                        hit->second));
+                                hc_bridge.emplace(headcache_->bridge_for(
+                                    tu.digest,
+                                    tu.cmd->file,
+                                    hit->second));
                             }
                         }
                         const bool visited = cg::util::guard::run_guarded(
@@ -10596,6 +11336,7 @@ export namespace cg::graph
             std::size_t job = 0; // 分解时的 job 下标（与 jobs 序同序追加）
             const cg::clang::CompileCommand* cmd = nullptr;
             cg::db::FileId                   fid = 0;
+            std::string digest; // 条目命令摘要（贡献票的条目身份）
             cg::analysis::TuAnalysis
                 analysis; // 整体搬移（lambda/站点/线索/桥）
             std::vector<cg::extract::IncludeRec> includes; // 包含差与回写原料
@@ -10752,6 +11493,16 @@ export namespace cg::graph
         double t_commit_us_ = 0;
         /** @brief 可达性清扫段墙钟累计（微秒；快路径跳过时近似为零）。 */
         double t_sweep_us_ = 0;
+        /** @brief 贡献记账三段墙钟累计（微秒；旧票读/差集撤票+归零仲
+         *         裁/新票落库——跨 storeB 尾与 commit 头的独立成本观测
+         *         面，值随 meta 落库）。 */
+        double t_contrib_read_us_ = 0;
+        double t_contrib_diff_us_ = 0;
+        double t_contrib_insert_us_ = 0;
+        /** @brief heal 折叠删除 loser 文件时被 CASCADE 清票的符号集
+         *         （归零仲裁候选的补集通道；先读后删，与显式撤票同纪
+         *         律——删除交给 FK，受影响集交给记账块）。 */
+        std::vector<cg::db::SymId> heal_vote_affected_;
     };
 
     /**
@@ -10761,8 +11512,14 @@ export namespace cg::graph
      * @internal 调用方（`ccg update --drain`）已按租约协议持有声明——延迟
      * 收敛就是又一个 update 批次，claim/心跳协议原样复用；长计算开始前的
      * 续约由调用方的 peek_pending 心跳完成（与 update 路径引擎批一致，本
-     * 函数内部无协调心跳）。符号/文件解析走库查（等价于批内内存映射的
-     * miss 兜底路径）：dispatch 边的 caller/target 键与站点文件路径都来自
+     * 函数内部无协调心跳）。窗口量化（先前性能核查已确认窗口量级，维持 no-op
+     * 心跳 不动）：drain 循环每个批间点都以 lease_ms 续约，引擎批的协调租约下
+     * 限 max(update_lease_ms, 2*max(index_commit_ms, 默认 300s)) 默认 300
+     * 秒级起，本函数整批 8.5-13.5 秒远在窗口内，批内再挂心跳属重复防御
+     * （设计复核同结论）；若未来收敛批时长逼近租约量级，再把
+     * dispatch_commit 的 beat 接到 claim
+     * 心跳上。符号/文件解析走库查（等价于批内内存映射的 miss
+     * 兜底路径）：dispatch 边的 caller/target 键与站点文件路径都来自
      * 库内已提交行。空库（无 call_sites）时与普通批一样自然产出空结果并
      * 清掉 stale 标注。dispatch=false 的库不适用（编辑批也不会延迟）。
      */

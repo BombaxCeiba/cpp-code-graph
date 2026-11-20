@@ -22,6 +22,10 @@
  * 定义在此可见，以合并模块记录的模板特化（完整机理见 db.tables.h）。
  */
 module;
+#include <cassert>
+#include <cstdint>
+#include <new>
+
 #include "../db/db.tables.h"
 #include "symbits.kernels.h"
 
@@ -79,11 +83,11 @@ export namespace cg::analysis
         std::int64_t site_id = 0;
         std::string  caller_key;
         /** @brief 调用者所属记录（`this->field` 接收者的槽所有者）。 */
-        std::string                           caller_owner_key;
-        bool                                  is_virtual = false;
-        bool                                  qualified = false;
-        bool                                  indirect = false;
-        std::string                           receiver_name;
+        std::string caller_owner_key;
+        bool        is_virtual = false;
+        bool        qualified = false;
+        bool        indirect = false;
+        std::string receiver_name;
         /**
          * @brief 接收者形态位（双态，与 CallSiteRec 同义）：name 非空 =
          *        经 `this->field` 取出；name 空 + 位 true = 接收者表达式
@@ -453,8 +457,7 @@ export namespace cg::analysis
             {
                 const auto it = by_id_.find(id);
                 return it != by_id_.end()
-                       && (it->second->flags
-                           & cg::db::sym_flags::is_template)
+                       && (it->second->flags & cg::db::sym_flags::is_template)
                               != 0;
             }
 
@@ -727,6 +730,61 @@ export namespace cg::analysis
         }
 
         /**
+         * @brief SymBits 位图存储的分配器：64 字节对齐的 word 数组。
+         *
+         * @internal 向量档内核的主循环以对齐版指令（vmovdqa/vmovdqa64 一族）
+         *           整块读写 SymBits 存储，基址必须真对齐：64 字节覆盖
+         *           AVX-512 的 512 位整块（AVX2 的 256 位由 64 整除自动
+         *           满足），非对齐地址走对齐版指令是硬件异常。实现走
+         *           C++17 带对齐的 operator new/delete（std::align_val_t
+         *           重载，与未对齐版本严格配对），MSVC 与 clang64 libc++
+         *           双工具链同源码可用。allocate 内的对齐断言是存储契约
+         *           的守卫：将来改动存储/分配路径破坏对齐时调试构建
+         *           第一时间失败，而不是等向量内核在运行期崩。
+         */
+        template <typename T>
+        struct AlignedWordAllocator
+        {
+            using value_type = T;
+
+            constexpr AlignedWordAllocator() noexcept = default;
+            template <typename U>
+            constexpr AlignedWordAllocator(
+                const AlignedWordAllocator<U>&) noexcept
+            {
+            }
+
+            [[nodiscard]]
+            T* allocate(std::size_t n)
+            {
+                if (n > static_cast<std::size_t>(-1) / sizeof(T))
+                {
+                    throw std::bad_array_new_length{};
+                }
+                T* p = static_cast<T*>(
+                    ::operator new(n * sizeof(T), std::align_val_t{64}));
+                assert(reinterpret_cast<std::uintptr_t>(p) % 64 == 0);
+                return p;
+            }
+
+            void deallocate(T* p, std::size_t) noexcept
+            {
+                ::operator delete(p, std::align_val_t{64});
+            }
+
+            template <typename U>
+            bool operator==(const AlignedWordAllocator<U>&) const noexcept
+            {
+                return true;
+            }
+        };
+
+        /** @brief SymBits 的存储形态：64 字节对齐分配的 word 数组（对齐
+         *         契约与断言守卫见 AlignedWordAllocator）。 */
+        using AlignedWords =
+            std::vector<std::uint64_t, AlignedWordAllocator<std::uint64_t>>;
+
+        /**
          * @brief 符号 id 域上的稠密位图（word 数组，整数位运算）。
          *
          * @internal 位域是符号 id（全库唯一、上界有限：按参考语料规模 76,285
@@ -738,7 +796,9 @@ export namespace cg::analysis
          */
         struct SymBits
         {
-            std::vector<std::uint64_t> words;
+            /** @brief 位图存储（64 字节对齐分配，对齐版向量内核的整块
+             *         读写前提；契约见 AlignedWordAllocator）。 */
+            AlignedWords words;
 
             /** @brief 置位（惰性增长到位所在 word）。 */
             void set(std::int64_t id)
@@ -847,10 +907,11 @@ export namespace cg::analysis
              *           丢弃的类型可能已由其它路径补齐时仍标记（宁可多报不
              *           完整、不漏报），collect
              * 直收的实参类型（site.arg_types） 无槽载体，只能靠实参→形参
-             * 传播的截断点本身覆盖、无法经槽传染； fallback 清单：独立 bool，绝不写进
-             * reason（final 阶段 会被 multiple_reason 整串覆盖），经
-             * PropagatedHint 与 PropagatedSite::slot_type_truncated 透出，由
-             * dispatch 主路径追加 ";slot_type_truncated" 后缀（非空才加分号）。
+             * 传播的截断点本身覆盖、无法经槽传染； fallback 清单：独立
+             * bool，绝不写进 reason（final 阶段 会被 multiple_reason
+             * 整串覆盖），经 PropagatedHint 与
+             * PropagatedSite::slot_type_truncated 透出，由 dispatch 主路径追加
+             * ";slot_type_truncated" 后缀（非空才加分号）。
              */
             bool truncated_here = false;
             /**
@@ -959,8 +1020,7 @@ export namespace cg::analysis
                 // 类型构成里有扇投来源（;param_flow_family）是披露面信息，
                 // 与多类型措辞并存（出参族词根经下方 default 分支天然保
                 // 留，此处对齐）。
-                return original.find("param_flow_family")
-                               != std::string::npos
+                return original.find("param_flow_family") != std::string::npos
                            ? "param_flow_multiple;param_flow_family"
                            : "param_flow_multiple";
             case HintSource::FieldFlow:
@@ -1080,9 +1140,9 @@ export namespace cg::analysis
              *           的槽键域一致（同键多符号的边端直查会假 miss 漏成
              *           员）。边端键悬空（符号已删）跳过——宁漏勿错。
              */
-            std::optional<
-                std::pair<std::unordered_map<std::int64_t, std::vector<std::int64_t>>,
-                          std::unordered_map<std::int64_t, std::vector<std::int64_t>>>>
+            std::optional<std::pair<
+                std::unordered_map<std::int64_t, std::vector<std::int64_t>>,
+                std::unordered_map<std::int64_t, std::vector<std::int64_t>>>>
                 overrides_adj;
             /** @brief 方法规范 id -> 覆盖族成员规范 id（含自身；记忆化）。 */
             std::unordered_map<std::int64_t, std::vector<std::int64_t>>
@@ -1141,9 +1201,9 @@ export namespace cg::analysis
              */
             struct FamilyClip
             {
-                bool     init = false; // 惰性构建标记
-                bool     clip = false; // false = 不裁（无静态面/解析失败）
-                SymBits  allowed{};
+                bool    init = false; // 惰性构建标记
+                bool    clip = false; // false = 不裁（无静态面/解析失败）
+                SymBits allowed{};
             };
             std::vector<FamilyClip> slot_family_clip;
             /** @brief 族边裁剪过滤的复用缓冲（热路径免逐边分配）。 */
@@ -1247,7 +1307,8 @@ export namespace cg::analysis
             std::vector<std::vector<std::uint32_t>> l1_deps;
             /** @brief 槽 -> 以它为实参源的站点（实参→形参扇出）。 */
             std::vector<std::vector<std::uint32_t>> a_src_sites;
-            /** @brief 形参槽 -> 喂它的站点（出参写回扇出；增量时兼复位再供料）。 */
+            /** @brief 形参槽 ->
+             * 喂它的站点（出参写回扇出；增量时兼复位再供料）。 */
             std::vector<std::vector<std::uint32_t>> b_param_sites;
             /** @brief 返回槽 -> 消费它的槽（返回值→调用点扇出）。 */
             std::vector<std::vector<std::uint32_t>> c_consumers;
@@ -1472,8 +1533,7 @@ export namespace cg::analysis
                     {
                         const auto s = canon_of_id.find(e.src);
                         const auto d = canon_of_id.find(e.dst);
-                        if (s == canon_of_id.end()
-                            || d == canon_of_id.end())
+                        if (s == canon_of_id.end() || d == canon_of_id.end())
                         {
                             continue; // 边端符号已删（悬空键）——宁漏勿错
                         }
@@ -1555,7 +1615,7 @@ export namespace cg::analysis
                 {
                     return &cached->second;
                 }
-                std::vector<std::uint32_t> member_slots;
+                std::vector<std::uint32_t>       member_slots;
                 const std::vector<std::int64_t>& family =
                     *virtual_family_members(canon);
                 for (const std::int64_t member : family)
@@ -1601,7 +1661,7 @@ export namespace cg::analysis
                 {
                     return &cached->second;
                 }
-                std::vector<std::uint32_t> member_slots;
+                std::vector<std::uint32_t>       member_slots;
                 const std::vector<std::int64_t>& family =
                     *virtual_family_members(canon);
                 for (const std::int64_t member : family)
@@ -1651,9 +1711,7 @@ export namespace cg::analysis
             };
 
             [[nodiscard]]
-            FamilyFace family_face_of(
-                std::uint32_t dst,
-                std::int32_t type_id)
+            FamilyFace family_face_of(std::uint32_t dst, std::int32_t type_id)
             {
                 FamilyClip& c = slot_family_clip[dst];
                 if (!c.init)
@@ -1695,8 +1753,8 @@ export namespace cg::analysis
                         }
                     }
                 }
-                const auto sid = canon_of_key(type_of_id[static_cast<
-                    std::size_t>(type_id)]);
+                const auto sid =
+                    canon_of_key(type_of_id[static_cast<std::size_t>(type_id)]);
                 if (!sid.has_value())
                 {
                     return FamilyFace::kUnresolvable;
@@ -1728,7 +1786,7 @@ export namespace cg::analysis
              *           解析时照旧零投递。
              */
             void family_clip_batch(
-                std::uint32_t dst,
+                std::uint32_t                 dst,
                 std::span<const std::int32_t> batch,
                 bool                          guard)
             {
@@ -2148,7 +2206,7 @@ export namespace cg::analysis
                         // 原样入槽、face 声明面裁剪照常生效，iid 锁的收敛
                         // 收益（qi 展开与 As 调用形态的射程）暂缓。
                         constexpr bool QI_EXPANSION_FUSED = true;
-                        bool qi_expand = !QI_EXPANSION_FUSED;
+                        bool           qi_expand = !QI_EXPANSION_FUSED;
                         if (((row.source
                                   == static_cast<int>(HintSource::OutParamFlow)
                               && row.fallback_reason == "out_param_this")
@@ -2266,7 +2324,11 @@ export namespace cg::analysis
                         site.file = fit->second;
                     }
                     site.line = row.line;
-                    site.static_types = parse_string_array(row.receiver_types);
+                    // 静态判证面只认 parse 专写的声明列：receiver_types 是
+                    // dispatch 写回的静态∪动态并集（披露面），读它会把上轮
+                    // 动态类型混进静态根集，接收者可达收窄/封口判定整族失强
+                    // （同名库二次全量重算边数膨胀的根因）。
+                    site.static_types = parse_string_array(row.receiver_static);
                     site.arg_types = parse_string_array_2d(row.arg_types);
                     site.arg_vars = parse_string_array(row.arg_vars);
                     site.arg_call_keys = parse_string_array(row.arg_call_keys);
@@ -2315,8 +2377,8 @@ export namespace cg::analysis
                 // 槽下标。 别名注册与槽 source 解耦：param_index 只有 ParamFlow
                 // 行携带（写回 行恒 -1），OutParamFlow 行置信更低时会覆盖槽的
                 // source 标签，但形 参身份由序号证明，#p{i} 寻址不受影响（取址
-                // 实参依赖此别名触达写回槽）。 形参序号 -> "#p{n}" 的 var 域 id（与
-                // param_of 的键值同步注册）：
+                // 实参依赖此别名触达写回槽）。 形参序号 -> "#p{n}" 的 var 域
+                // id（与 param_of 的键值同步注册）：
                 // 站点实参解析按序号直查，替代逐实参格式化串构造。
                 for (std::size_t i = 0; i < slots.size(); ++i)
                 {
@@ -3156,8 +3218,7 @@ export namespace cg::analysis
                         {
                             continue;
                         }
-                        const auto pv =
-                            param_var_of.find(static_cast<int>(i));
+                        const auto pv = param_var_of.find(static_cast<int>(i));
                         const auto target =
                             pv != param_var_of.end()
                                 ? param_of.find(
@@ -3166,10 +3227,11 @@ export namespace cg::analysis
                         if (target != param_of.end()
                             && slots[target->second].has_outparam_flow)
                         {
-                            site_wb[j].push_back(WbEdge{
-                                static_cast<std::uint32_t>(target->second),
-                                static_cast<std::uint32_t>(*dst),
-                                false});
+                            site_wb[j].push_back(
+                                WbEdge{
+                                    static_cast<std::uint32_t>(target->second),
+                                    static_cast<std::uint32_t>(*dst),
+                                    false});
                             b_param_sites[target->second].push_back(
                                 static_cast<std::uint32_t>(j));
                             continue;
@@ -3179,12 +3241,15 @@ export namespace cg::analysis
                             continue; // 非虚目标唯一无需族；全库无 #p{i} 槽
                         }
                         for (const std::uint32_t src :
-                             *virtual_family_param_slots(callee_canon, pv->second))
+                             *virtual_family_param_slots(
+                                 callee_canon,
+                                 pv->second))
                         {
                             site_wb[j].push_back(
-                                WbEdge{src,
-                                       static_cast<std::uint32_t>(*dst),
-                                       true});
+                                WbEdge{
+                                    src,
+                                    static_cast<std::uint32_t>(*dst),
+                                    true});
                             b_param_sites[src].push_back(
                                 static_cast<std::uint32_t>(j));
                             ++family_wb_edges;
@@ -4075,23 +4140,27 @@ export namespace cg::analysis
                 {
                     for (const std::uint32_t d : l1_deps[s])
                     {
-                        (cur == Phase::kArgParam && d > pos ? arg_param_due[d]
-                                                      : arg_param_next[d]) = 1;
+                        (cur == Phase::kArgParam && d > pos
+                             ? arg_param_due[d]
+                             : arg_param_next[d]) = 1;
                     }
                     for (const std::uint32_t j : a_src_sites[s])
                     {
-                        (cur == Phase::kParamFanout && j > pos ? param_fanout_due[j] : param_fanout_next[j]) =
-                            1;
+                        (cur == Phase::kParamFanout && j > pos
+                             ? param_fanout_due[j]
+                             : param_fanout_next[j]) = 1;
                     }
                     for (const std::uint32_t j : b_param_sites[s])
                     {
-                        (cur == Phase::kWriteback && j > pos ? writeback_due[j] : writeback_next[j]) =
-                            1;
+                        (cur == Phase::kWriteback && j > pos
+                             ? writeback_due[j]
+                             : writeback_next[j]) = 1;
                     }
                     for (const std::uint32_t d : c_consumers[s])
                     {
-                        (cur == Phase::kReturnFlow && d > pos ? return_flow_due[d] : return_flow_next[d]) =
-                            1;
+                        (cur == Phase::kReturnFlow && d > pos
+                             ? return_flow_due[d]
+                             : return_flow_next[d]) = 1;
                     }
                 };
                 for (int round = 0; round < MAX_ROUNDS; ++round)
@@ -4173,7 +4242,8 @@ export namespace cg::analysis
                         std::chrono::duration_cast<std::chrono::microseconds>(
                             std::chrono::steady_clock::now() - t_arg_param_0)
                             .count();
-                    const auto t_param_fanout_0 = std::chrono::steady_clock::now();
+                    const auto t_param_fanout_0 =
+                        std::chrono::steady_clock::now();
                     for (std::size_t j = 0; j < sites.size(); ++j)
                     {
                         param_fanout_due[j] |= param_fanout_next[j];
@@ -4249,8 +4319,7 @@ export namespace cg::analysis
                                 // 时整体不裁（对称守卫，防闭包缺边饿死真
                                 // 决议）。全批不可解析的目标零投递（通道
                                 // 在、证据不在——不置 fed 标记）。
-                                for (const std::uint32_t dst :
-                                     f.family_targets)
+                                for (const std::uint32_t dst : f.family_targets)
                                 {
                                     family_clip_batch(dst, batch, true);
                                     if (family_clip_scratch.empty())
@@ -4258,7 +4327,7 @@ export namespace cg::analysis
                                         continue;
                                     }
                                     slot_family_pf_fed[dst] = 1;
-                                    HintSlot& dst_slot = slots[dst];
+                                    HintSlot&  dst_slot = slots[dst];
                                     const bool taint_before =
                                         dst_slot.truncated_here;
                                     dst_slot.truncated_here |=

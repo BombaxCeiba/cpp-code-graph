@@ -81,6 +81,15 @@ jobs:
           "CCG_RELEASE_VERSION=$v" >> $env:GITHUB_ENV
           "release version: $v"
 
+      # CMake drift watch: the windows-2025-vs2026 image ships CMake
+      # 4.4.3 on PATH today (verified 2026-11, image 20260925.250.1), so
+      # this configure takes the <4.5 legacy std-module path. When the
+      # image rolls to CMake >= 4.5 it auto-switches to the synth-target
+      # + shadow modules.json path (cmake/CcgC2801Workaround.cmake) that
+      # CI has never exercised: the first such run must be checked
+      # manually for the "ccg c2801-wa:" status line and for zero
+      # "Disagreement of the location of the 'std' module" errors in the
+      # configure log.
       - name: Configure (msvc-dev preset)
         shell: cmd
         run: |

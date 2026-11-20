@@ -124,7 +124,8 @@ export namespace cg::util::platform
     /**
      * @brief 调用进程的进程 id。
      *
-     * 用作 `ccg update` 认领持有者令牌的人类可读一半（租约协议：令牌只指名持有者）：
+     * 用作 `ccg update`
+     * 认领持有者令牌的人类可读一半（租约协议：令牌只指名持有者）：
      * 只指名持有认领的是谁，从不是存活检查（租约时间戳才是权威——已死
      * 持有者的认领会过期并被窃取）。
      */
@@ -536,6 +537,74 @@ export namespace cg::util::platform
 #endif
         std::error_code ec;
         std::filesystem::remove(p, ec);
+    }
+
+    /**
+     * @brief 文件元数据（修改时间计数值与字节数；ok=false 表示读不到
+     *        或目标是目录）。
+     *
+     * @internal mtime_ticks 的纪元随平台实现（Windows 为 FILETIME 的
+     * 100ns 计数），只做同平台缓存指纹自比较，不做跨平台换算。
+     */
+    struct FileMeta
+    {
+        bool         ok{};
+        std::int64_t mtime_ticks{};
+        std::int64_t size_bytes{};
+    };
+
+    /**
+     * @brief 读文件元数据（失败 ok=false）；Windows 上走扩展长度路径。
+     *
+     * @internal 与写侧（remove_file 等）同规则：模块缓存目录叠加构建树
+     * 后可能超 MAX_PATH，此时 MSVC STL 的属性查询虽吃 `\\?\` 前缀、
+     * libc++ 侧却落 CRT stat 不认前缀——统一改 GetFileAttributesExW，
+     * 双工具链对超长路径行为一致（pcm 写成功而尺寸读回失败的误报即出
+     * 在此）。
+     */
+    [[nodiscard]]
+    inline auto file_meta(const std::filesystem::path& p) -> FileMeta
+    {
+#if defined(_WIN32)
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        if (GetFileAttributesExW(
+                detail::extended_win_path(p).c_str(),
+                GetFileExInfoStandard,
+                &data)
+            == 0)
+        {
+            return {};
+        }
+        if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        {
+            return {};
+        }
+        ULARGE_INTEGER ticks{};
+        ticks.LowPart = data.ftLastWriteTime.dwLowDateTime;
+        ticks.HighPart = data.ftLastWriteTime.dwHighDateTime;
+        return FileMeta{
+            .ok = true,
+            .mtime_ticks = static_cast<std::int64_t>(ticks.QuadPart),
+            .size_bytes = (static_cast<std::int64_t>(data.nFileSizeHigh) << 32)
+                          | static_cast<std::int64_t>(data.nFileSizeLow)};
+#else
+        std::error_code ec;
+        const auto      mtime = std::filesystem::last_write_time(p, ec);
+        if (ec)
+        {
+            return {};
+        }
+        const auto size = std::filesystem::file_size(p, ec);
+        if (ec)
+        {
+            return {};
+        }
+        return FileMeta{
+            .ok = true,
+            .mtime_ticks =
+                static_cast<std::int64_t>(mtime.time_since_epoch().count()),
+            .size_bytes = static_cast<std::int64_t>(size)};
+#endif
     }
 
     /**

@@ -2622,15 +2622,15 @@ namespace
     // 事故发生在波式路径，同一组翻转在关波与 CCG_WAVE_SIZE=16 两臂
     // 各跑一遍，让修复 A 的账本（fb_ledger_）与关波（jobs 统计）
     // 两个对账分支都进回归。
-    void failure_recovery_rounds(R& r, bool wave)
+    void failure_recovery_rounds(R& r, bool fb)
     {
         namespace cc = cg::clang;
         const cg::test::EnvScope wave_env{"CCG_WAVE_SIZE"};
-        if (wave)
+        if (fb)
         {
             wave_env.set("16");
         }
-        const std::string arm = wave ? "wave" : "non-wave";
+        const std::string arm = fb ? "fb" : "classic";
         const auto        stamp =
             std::chrono::steady_clock::now().time_since_epoch().count();
         const cg::test::ScratchDir scratch{
@@ -2772,15 +2772,15 @@ namespace
     // 文件入种子集）重解析并成功——提交段必须以发射事实跳过对它的全败
     // 清除，否则刚发射的符号与指向它们的类型线索同事务内被删，提交以
     // 外键失败整轮回滚（或符号静默丢失）。同样关波/波式两臂各跑一遍。
-    void stale_lift_recovery_rounds(R& r, bool wave)
+    void name_lift_parse_scope_closed_rounds(R& r, bool fb)
     {
         namespace cc = cg::clang;
         const cg::test::EnvScope wave_env{"CCG_WAVE_SIZE"};
-        if (wave)
+        if (fb)
         {
             wave_env.set("16");
         }
-        const std::string arm = wave ? "wave" : "non-wave";
+        const std::string arm = fb ? "fb" : "classic";
         const std::string arm_tag = "[" + arm + "] ";
         const auto        stamp =
             std::chrono::steady_clock::now().time_since_epoch().count();
@@ -2882,12 +2882,13 @@ namespace
             r,
             !flip_present(),
             arm_tag + "the all-failed purge clears flip's symbols");
-        // 轮 3（事故形状）：a 以与失败记录完全相同的摘要 A=2 再次出现、
-        // 注入摘除（世界对 a 未变 -> failure_skip）；y.cpp 改写摘掉其
-        // 孪生（y 重解析 -> doomed 含 y::twin -> 名字 twin 歧义提升 ->
-        // 全部存量文件入种子集 -> a 被提升重解析并成功）。此时计划段
-        // 的 all_failed_fids 已冻结且含 a：修复 A 的对账拦截是提交段唯
-        // 一防线。提交事务整体不得因外键回滚，符号必须存活。
+        // 轮 3（层级正交化后的形态）：a 以与失败记录完全相同的摘要 A=2
+        // 再次出现、注入摘除（世界对 a 未变 -> failure_skip）；y.cpp 改
+        // 写摘掉其孪生（y 重解析 -> doomed 含 y::twin -> 名字 twin 歧义
+        // 提升 -> 分析层升级开关置位）。解析范围=包含闭包∪配置变更，
+        // 名字桶警报无权把 a 塞进解析范围——a 保持 failure_skip，其符
+        // 号保持清除、失败行保留，重试由摘要变化驱动。提交事务整体不
+        // 得因外键回滚。
         scratch.put(base / "y.cpp", "int other() { return 3; }\n");
         std::vector<cc::CompileCommand> lifted = failing;
         lifted[0].preordained_failure.clear();
@@ -2904,18 +2905,18 @@ namespace
             r,
             committed,
             arm_tag
-                + "the lifted re-parse of the failure_skip entry "
-                  "commits without a foreign-key rollback");
+                + "the post-lift commit survives without a foreign-key "
+                  "rollback");
         cg::test::check(
             r,
-            flip_present(),
+            !flip_present(),
             arm_tag
-                + "symbols re-emitted by the lifted parse survive the "
-                  "stale all_failed_fids purge");
+                + "the name-bucket lift no longer re-parses the "
+                  "failure_skip entry");
         cg::test::check(
             r,
-            db::all_failures(store).empty(),
-            arm_tag + "the successful lifted parse retires the failure row");
+            !db::all_failures(store).empty(),
+            arm_tag + "the failure row survives until the digest changes");
         //   再换摘要注入失败——合法全败清除必须照常工作（防线不
         // 得过度保护）。
         std::vector<cc::CompileCommand> failing2 = with_tag(0, "-DA=3");
@@ -2928,15 +2929,15 @@ namespace
             arm_tag + "a genuinely all-failed round still purges symbols");
     }
 
-    void stale_lift_recovery_keeps_emitted_symbols(R& r)
+    void name_lift_parse_scope_closed(R& r)
     {
-        stale_lift_recovery_rounds(r, false);
-        stale_lift_recovery_rounds(r, true);
+        name_lift_parse_scope_closed_rounds(r, false);
+        name_lift_parse_scope_closed_rounds(r, true);
     }
 
-    const cg::test::Registrar reg_stale_lift_recovery{
-        "graph.stale-lift-recovery-keeps-emitted-symbols",
-        &stale_lift_recovery_keeps_emitted_symbols};
+    const cg::test::Registrar reg_name_lift_scope{
+        "graph.name-lift-parse-scope-closed",
+        &name_lift_parse_scope_closed};
 
     // 良性白名单扩容的判定层单测：逐家族的拼写命中（正例文本取自真实
     // 编译器错误形态）、清单外反例（含硬否决的重载决议失败主

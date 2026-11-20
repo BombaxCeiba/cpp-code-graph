@@ -74,21 +74,35 @@ C2801 **仅实证于 14.51**：cl 在**消费者 TU 的跨 IFC 合并**阶段把
 任何专为 C2801 而设的结构，C2801 由下节配置期 workaround（详见
 cmake/C2801ApplyPatch.cmake）统一承担。
 
-## C2801 配置期 workaround（仅 std.ixx 编译的 `<filesystem>` 遮蔽）
+## C2801 配置期 workaround（std BMI 宿主的 `<filesystem>` 遮蔽）
 
 **机制**。C2801 的决定性宿主**有且只有 std BMI**（四格交叉实验：
-治 std BMI 即治愈，治别处无效）。ccg 的 MSVC 构建本就
-自编工具集的 `modules/std.ixx`（`cmake/CcgUtils.cmake` 的
-`cg_std_modules` OBJECT 库），因此补丁只需打在这一个编译上：
+治 std BMI 即治愈，治别处无效）。std.ixx 的生产者按 CMake 版本分两条
+路径（`cmake/CcgUtils.cmake` 顶部的版本分支）：
+
+- **CMake ≥ 4.5**：`import std` 非实验化，CMake 给每个有模块扫描源的
+  目标无条件挂 `@cmake_cxx_std` 合成目标（项目侧无开关可拒绝；自建
+  std 供给与之并存即 Disagreement 双供应硬错误）。此时补丁经一份
+  conforming 格式的影子 modules.json（`CMAKE_CXX_STDLIB_MODULES_JSON`
+  覆盖点，`cmake/CcgC2801Workaround.cmake` 的 `ccg_c2801_wire_synth_std`）
+  以 `local-arguments.include-directories` 进入合成目标里
+  std.ixx/std.compat.ixx 的编译命令。该目录经合成目标的接口传播也会
+  出现在消费者 TU 的命令上——补丁头与原头语义零变化（见下），std BMI
+  与消费者处于同一种头形态，反而消除 ODR 风险。
+- **CMake < 4.5**：项目自编工具集的 `modules/std.ixx`
+  （`cg_std_modules` OBJECT 库；实验性合成库实测丢 STL charconv 内联
+  静态量），补丁目录以 `BEFORE PRIVATE` 前置到该目标——全树只有
+  std.ixx（及同目标里的空锚点 TU）看到遮蔽头，VS 系统文件、ccg 源码、
+  其它任何 TU 均不动。
+
+两条路径共用同一个补丁器：
 
 - configure 期，`cmake/C2801ApplyPatch.cmake`（独立 `cmake -P` 脚本）
   把工具集 `include/filesystem` 拷入构建树 `c2801-wa/include/` 并施加
   v_a 变换：类内隐藏友元定义 → 类内模板友元声明 + 类外函数模板定义
   （语义零变化：代入模板实参后签名/函数体/ADL/重载决议全同）。
-- `cmake/CcgC2801Workaround.cmake` 仅在补丁**通过验证**时，把该目录以
-  `BEFORE PRIVATE` 前置到 `cg_std_modules`——全树只有 std.ixx（及同
-  目标里的空锚点 TU）看到遮蔽头。产出的 std BMI 即治愈形态；VS 系统
-  文件、ccg 源码、其它任何 TU 均不动。
+- `cmake/CcgC2801Workaround.cmake` 仅在补丁**通过验证**时接线，任何
+  失败/退场形态都回落原头。
 
 **防"补丁产出错误文件"的安全规则**（跨工具集版本 STL 漂移防护）：
 

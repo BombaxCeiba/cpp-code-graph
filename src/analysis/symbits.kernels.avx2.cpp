@@ -5,11 +5,14 @@
  *
  * @internal MSVC 无按函数 target 属性，向量指令只能以 TU 为单位启用
  *           （构建脚本对本文件单独施加 AVX2 开关）。主体循环每次
- *           4 个 word（256 位）：不对齐装载/存储（loadu/storeu）保证
- *           任意对齐的堆缓冲都正确；不足 4 word 的尾部退回标量循环。
+ *           4 个 word（256 位）：对齐装载/存储（load/store，dst 与 src
+ *           基址由 SymBits 的 AlignedWordAllocator 保证 64 字节对齐，
+ *           256 位块对齐由 64 整除自动满足）；不足 4 word 的尾部退回
+ *           标量循环（尾部地址不保证块对齐，标量无对齐要求）。
  *           语义与标量档逐位相同（按位或的交换/结合律与分块无关），
  *           等价测试对两档输出做逐字比对。调用前置条件见
- *           symbits.kernels.h 的 or_words_avx2 说明。
+ *           symbits.kernels.h 的 or_words_avx2 说明（基址 64 字节
+ *           对齐契约）。
  */
 #include <immintrin.h>
 
@@ -27,10 +30,10 @@ namespace cg::analysis::propagate_detail
         for (; i + 4 <= count; i += 4)
         {
             const __m256i lhs =
-                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(dst + i));
+                _mm256_load_si256(reinterpret_cast<const __m256i*>(dst + i));
             const __m256i rhs =
-                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
-            _mm256_storeu_si256(
+                _mm256_load_si256(reinterpret_cast<const __m256i*>(src + i));
+            _mm256_store_si256(
                 reinterpret_cast<__m256i*>(dst + i),
                 _mm256_or_si256(lhs, rhs));
         }

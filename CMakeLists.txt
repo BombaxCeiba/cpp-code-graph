@@ -2,10 +2,13 @@ cmake_minimum_required(VERSION 3.28)
 
 # import std 闸门：实验性 UUID 随 CMake 版本条件化，且必须设在
 # project() 之前（本机探针实测）。
-# MSVC 注记：project() 之前编译器未知，
+# CMake 4.5 起 import std 非实验化：UUID 变成无效但无害的空设
+# （cmake/CcgUtils.cmake 顶部的版本分支说明 4.5 的挂接行为），
+# 真正控制各路径的注释与代码都在那边。
+# CMake < 4.5 的 MSVC 注记：project() 之前编译器未知，
 # UUID 无法在此按编译器分支——它在 MSVC preset 上保持惰性，
 # 因为 cl 下没有任何东西设置 CXX_MODULE_STD（cmake/CcgUtils.cmake
-# 改为供给工具集自带的 std.ixx，且 sqlpp23 的模块目标从不用
+# 自建 std.ixx OBJECT 库供给，且 sqlpp23 的模块目标从不用
 # import std——两者都经目标 MSVC 工具链上的探针验证）。
 if(CMAKE_VERSION VERSION_GREATER_EQUAL 4.3)
     set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "f35a9ac6-8463-4d38-8eec-5d6008153e7d")

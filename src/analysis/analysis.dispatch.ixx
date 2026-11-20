@@ -62,8 +62,10 @@ export namespace cg::analysis
          *           判据失效的最坏后果是过滤不启用，回到既有整族披
          *           露。
          */
-        inline constexpr std::array<std::string_view, 3>
-            ROOT_LIFECYCLE_METHODS{"AddRef", "Release", "QueryInterface"};
+        inline constexpr std::array<std::string_view, 3> ROOT_LIFECYCLE_METHODS{
+            "AddRef",
+            "Release",
+            "QueryInterface"};
 
         /** @brief 方法所在记录（parent_id）的 unique_key；无父为空。 */
         [[nodiscard]]
@@ -176,8 +178,7 @@ export namespace cg::analysis
                 // ancestor_distances（对偶的上行折算）消费；final 判定
                 // （has_descendant）保持纯 extends 语义不变（特化不是继
                 // 承派生，final 语义不得放宽）。
-                for (const cg::db::EdgeRow& e :
-                     cg::db::edges_of_type(
+                for (const cg::db::EdgeRow& e : cg::db::edges_of_type(
                          store,
                          cg::db::EdgeType::Specializes))
                 {
@@ -269,8 +270,7 @@ export namespace cg::analysis
                     std::vector<std::int64_t> next;
                     for (const std::int64_t cur : frontier)
                     {
-                        for (const auto* table :
-                             {&extends_up_, &spec_fwd_})
+                        for (const auto* table : {&extends_up_, &spec_fwd_})
                         {
                             const auto it = table->find(cur);
                             if (it == table->end())
@@ -323,8 +323,7 @@ export namespace cg::analysis
                     std::vector<std::int64_t> next;
                     for (const std::int64_t cur : frontier)
                     {
-                        for (const auto* table :
-                             {&extends_down_, &spec_down_})
+                        for (const auto* table : {&extends_down_, &spec_down_})
                         {
                             const auto it = table->find(cur);
                             if (it == table->end())
@@ -554,7 +553,7 @@ export namespace cg::analysis
         // 投影一次扫描）；三段多候选（多 TU 各挂一行等形态）不猜（宁漏）。
         std::optional<
             std::unordered_map<std::string, std::vector<std::int64_t>>>
-                     trimmed_key_ids;
+                   trimmed_key_ids;
         const auto id_of_static_key =
             [&](const std::string& key) -> std::optional<std::int64_t>
         {
@@ -668,15 +667,15 @@ export namespace cg::analysis
         };
         std::unordered_map<std::int64_t, ExternalReach> external_of;
         {
+            // WHERE 投影直取 R(I) 边界行：行集与
+            // all_type_hints 全表读后内存过滤 source==External 且
+            // var_name==external_slot 的旧行集逐行相等，免整表物化。
             const std::vector<cg::db::TypeHintRow> hint_rows =
-                store.all_type_hints();
+                store.type_hints_of_source(
+                    static_cast<std::int64_t>(HintSource::External),
+                    external_slot);
             for (const cg::db::TypeHintRow& row : hint_rows)
             {
-                if (row.source != static_cast<int>(HintSource::External)
-                    || row.var_name != external_slot)
-                {
-                    continue;
-                }
                 ExternalReach& reach = external_of[row.owner_id];
                 reach.reason = row.fallback_reason;
                 for (const std::string& key : parse_string_array(row.type_set))
@@ -814,7 +813,7 @@ export namespace cg::analysis
             [&](const FamilyInfo&                family,
                 const std::vector<std::int64_t>& types,
                 std::vector<std::int64_t>&       absent_ids_out)
-                -> std::map<std::int64_t, int>
+            -> std::map<std::int64_t, int>
         {
             std::map<std::int64_t, int> found; // member id -> distance
             for (const std::int64_t dyn : types)
@@ -874,7 +873,7 @@ export namespace cg::analysis
         // 盖全部实例化派生，剔除会收窄排除面（豁免变宽是危险方向）。
         // 按原始键序列 memo：同接收者声明面的多站点共享一次闭包展开。
         std::unordered_map<std::string, std::shared_ptr<const Subtree>>
-                                                     xeno_scope_of;
+                   xeno_scope_of;
         const auto xeno_exclusion_scope =
             [&](const std::vector<std::string>& static_types) -> const Subtree*
         {
@@ -891,7 +890,7 @@ export namespace cg::analysis
             }
             std::shared_ptr<const Subtree> scope; // null = 不可立界
             std::vector<std::int64_t>      roots;
-            bool ok = !static_types.empty();
+            bool                           ok = !static_types.empty();
             for (const std::string& t : static_types)
             {
                 const auto sid = id_of_static_key(t);
@@ -907,8 +906,7 @@ export namespace cg::analysis
                 Subtree sub = hierarchy.descendant_subtree(roots);
                 if (!sub.overflow)
                 {
-                    scope =
-                        std::make_shared<const Subtree>(std::move(sub));
+                    scope = std::make_shared<const Subtree>(std::move(sub));
                 }
             }
             const Subtree* raw = scope.get();
@@ -945,7 +943,7 @@ export namespace cg::analysis
             {
                 return cached->second;
             }
-            bool                      gap = false;
+            bool                             gap = false;
             std::unordered_set<std::int64_t> seen{owner};
             std::vector<std::int64_t>        frontier{owner};
             for (int hop = 0;
@@ -999,13 +997,12 @@ export namespace cg::analysis
         // 链保证同签名覆盖关系）的行本应在闭包里。子树溢出时证明面不
         // 完备，同样阻断（宁漏勿错）。按方法 memo；同名方法行索引首
         // 个触发守卫的站点一次构建。
-        std::optional<std::unordered_map<
-            std::string,
-            std::vector<std::int64_t>>>
-                              method_rows_by_name;
+        std::optional<
+            std::unordered_map<std::string, std::vector<std::int64_t>>>
+                                               method_rows_by_name;
         std::unordered_map<std::int64_t, bool> closure_gap_of;
-        const auto family_closure_gap =
-            [&](std::int64_t method, const FamilyInfo& fam) -> bool
+        const auto family_closure_gap = [&](std::int64_t      method,
+                                            const FamilyInfo& fam) -> bool
         {
             const auto [gap_it, gap_fresh] = closure_gap_of.try_emplace(method);
             if (!gap_fresh)
@@ -1027,8 +1024,7 @@ export namespace cg::analysis
                     {
                         if (row.kind == cg::db::SymbolKind::Method)
                         {
-                            (*method_rows_by_name)[row.name].push_back(
-                                row.id);
+                            (*method_rows_by_name)[row.name].push_back(row.id);
                         }
                     }
                 }
@@ -1078,18 +1074,15 @@ export namespace cg::analysis
                         continue;
                     }
                     const bool peer_virtual =
-                        (prow->second->flags
-                         & cg::db::sym_flags::is_virtual)
-                            != 0;
+                        (prow->second->flags & cg::db::sym_flags::is_virtual)
+                        != 0;
                     bool host_template = false;
-                    if (const auto hrow =
-                            by_id.find(*prow->second->parent_id);
+                    if (const auto hrow = by_id.find(*prow->second->parent_id);
                         hrow != by_id.end())
                     {
-                        host_template =
-                            (hrow->second->flags
-                             & cg::db::sym_flags::is_template)
-                                != 0;
+                        host_template = (hrow->second->flags
+                                         & cg::db::sym_flags::is_template)
+                                        != 0;
                     }
                     if (!peer_virtual && !host_template)
                     {
@@ -1185,7 +1178,7 @@ export namespace cg::analysis
             // 不触发；static_types 已有值时不覆盖（有真接收者证据）。模
             // 板记录不靠拼写或 canonical 判定，直接消费采集期落库的
             // sym_flags::is_template 位。
-            bool implicit_this_root = false;
+            bool                        implicit_this_root = false;
             std::optional<std::int64_t> implicit_this_template_id;
             if (!roots_ok && site.static_types.empty()
                 && site.receiver_name.empty() && !site.receiver_is_this
@@ -1199,7 +1192,7 @@ export namespace cg::analysis
                     {
                         if ((row->second->flags
                              & cg::db::sym_flags::is_template)
-                                == 0)
+                            == 0)
                         {
                             static_roots.push_back(*sid);
                             roots_ok = true;
@@ -1323,7 +1316,7 @@ export namespace cg::analysis
                 // 同距离多覆盖（多继承菱形）或任一根在家族内无覆盖
                 // （absent）一律不猜：发 Low 展示候选并保持 0.0 家族
                 // 标记边（宁漏勿猜）。
-                std::vector<std::int64_t>        static_absent_ids;
+                std::vector<std::int64_t>         static_absent_ids;
                 const std::map<std::int64_t, int> static_nearest =
                     nearest_overrides(family, static_roots, static_absent_ids);
                 const bool static_unique =
@@ -1386,10 +1379,10 @@ export namespace cg::analysis
                 }
                 else
                 {
-                    // 第二优先：DTA 静态声明子树收窄：候选面 = 家族 ∩ (各静态类型
-                    // extends 后代子树的并集)，排除 method 自身；空集
-                    // 守卫回退全家族；子树溢出（>256 节点或 16 层未收
-                    // 敛）同样回退全家族并标 subtree_overflow。收窄只
+                    // 第二优先：DTA 静态声明子树收窄：候选面 = 家族 ∩
+                    // (各静态类型 extends 后代子树的并集)，排除 method
+                    // 自身；空集 守卫回退全家族；子树溢出（>256 节点或 16
+                    // 层未收 敛）同样回退全家族并标 subtree_overflow。收窄只
                     // 改展示面：候选置信 Low(0.4)、fallback_reason 标
                     // static_narrowed，不发推断边——0.4 档不构成派发
                     // 证据，0.0 家族标记边保持不变。
@@ -1482,8 +1475,7 @@ export namespace cg::analysis
                     for (const std::int64_t member : non_pure_family)
                     {
                         const auto owner = owner_of_member(family, member);
-                        if (!owner.has_value()
-                            || subtree.ids.contains(*owner))
+                        if (!owner.has_value() || subtree.ids.contains(*owner))
                         {
                             continue;
                         }
@@ -1497,10 +1489,8 @@ export namespace cg::analysis
                     {
                         static_resolved = true;
                         candidates.push_back(
-                            {.target_key =
-                                 by_id.at(hits.front())->unique_key,
-                             .target_qualified =
-                                 by_id.at(hits.front())->name,
+                            {.target_key = by_id.at(hits.front())->unique_key,
+                             .target_qualified = by_id.at(hits.front())->name,
                              .confidence = Confidence::High,
                              .reason = "implicit_this_template_unique"});
                         edge_targets = candidates;
@@ -1508,14 +1498,12 @@ export namespace cg::analysis
                     }
                     // 缺口在案：唯一性不可证——降 0.4 披露，绝不直连。
                     candidates.push_back(
-                        {.target_key =
-                             by_id.at(hits.front())->unique_key,
+                        {.target_key = by_id.at(hits.front())->unique_key,
                          .target_qualified = by_id.at(hits.front())->name,
                          .confidence = Confidence::Low,
                          .reason = "no_dynamic_type_evidence"});
-                    fallback_reason =
-                        "no_dynamic_type_evidence;"
-                        "implicit_this_template_fold_gap";
+                    fallback_reason = "no_dynamic_type_evidence;"
+                                      "implicit_this_template_fold_gap";
                 }
                 else if (!hits.empty())
                 {
@@ -1532,9 +1520,8 @@ export namespace cg::analysis
                              .confidence = Confidence::Low,
                              .reason = "no_dynamic_type_evidence"});
                     }
-                    fallback_reason =
-                        "no_dynamic_type_evidence;"
-                        "implicit_this_template_narrowed";
+                    fallback_reason = "no_dynamic_type_evidence;"
+                                      "implicit_this_template_narrowed";
                 }
             }
             // ── 宿主抽象直连：method 纯虚 × 全库唯一非纯 override ──
@@ -1572,8 +1559,8 @@ export namespace cg::analysis
             const bool receiver_indirect_form =
                 site.receiver_name.starts_with("#elem:")
                 || (site.receiver_name.empty() && site.receiver_is_this);
-            if (!static_resolved && !receiver_external
-                && method.has_value() && non_pure_family.size() == 1)
+            if (!static_resolved && !receiver_external && method.has_value()
+                && non_pure_family.size() == 1)
             {
                 const auto mrow = by_id.find(*method);
                 if (mrow != by_id.end()
@@ -1791,7 +1778,7 @@ export namespace cg::analysis
             const FamilyInfo& family = family_of_method(*method);
             // 缺席细分两桶：key 解析失败（数据质量可疑，恒阻断，不参与
             // 任何豁免）与家族零交集（键已解析，逐类型透出供异族分类）。
-            std::size_t key_miss = 0;
+            std::size_t               key_miss = 0;
             std::vector<std::int64_t> dynamic_ids;
             dynamic_ids.reserve(site.dynamic_types.size());
             for (const std::string& key : site.dynamic_types)
@@ -1804,7 +1791,7 @@ export namespace cg::analysis
                 }
                 dynamic_ids.push_back(*dyn);
             }
-            std::vector<std::int64_t> absent_ids; // 家族零交集的缺席类型
+            std::vector<std::int64_t> absent_ids;       // 家族零交集的缺席类型
             const std::map<std::int64_t, int> nearest = // member id -> distance
                 nearest_overrides(family, dynamic_ids, absent_ids);
             const std::size_t absent = key_miss + absent_ids.size();
@@ -1837,11 +1824,10 @@ export namespace cg::analysis
             bool nearest_converged_filtered = false;
             if (!absent_ids.empty() && key_miss == 0 && nearest.size() == 1)
             {
-                const bool family_unique =
-                    family.non_pure_members.size() == 1;
+                const bool family_unique = family.non_pure_members.size() == 1;
                 if (family_unique || !site.slot_type_truncated)
                 {
-                    std::size_t legit_absent = absent_ids.size();
+                    std::size_t    legit_absent = absent_ids.size();
                     const Subtree* excl =
                         xeno_exclusion_scope(site.static_types);
                     if (excl != nullptr)
@@ -1859,11 +1845,10 @@ export namespace cg::analysis
                     {
                         const std::int64_t target = nearest.begin()->first;
                         const auto         trow = by_id.find(target);
-                        bool member_sealed =
-                            trow != by_id.end()
-                            && (trow->second->flags
-                                & cg::db::sym_flags::is_final)
-                                   != 0;
+                        bool member_sealed = trow != by_id.end()
+                                             && (trow->second->flags
+                                                 & cg::db::sym_flags::is_final)
+                                                    != 0;
                         if (!member_sealed)
                         {
                             const auto owner = owner_of_member(family, target);
@@ -1932,7 +1917,7 @@ export namespace cg::analysis
                        != ROOT_LIFECYCLE_METHODS.end())
             {
                 std::vector<std::int64_t> recv_roots;
-                bool roots_ok = !site.static_types.empty();
+                bool                      roots_ok = !site.static_types.empty();
                 for (const std::string& key : site.static_types)
                 {
                     const auto sid = id_of_static_key(key);
@@ -1943,8 +1928,7 @@ export namespace cg::analysis
                     }
                     const auto row = by_id.find(*sid);
                     if (row != by_id.end()
-                        && (row->second->flags
-                            & cg::db::sym_flags::is_template)
+                        && (row->second->flags & cg::db::sym_flags::is_template)
                                != 0)
                     {
                         continue; // 模板壳主模板键：无语义面，不参与证明
@@ -1966,13 +1950,13 @@ export namespace cg::analysis
                                 member.has_value()
                                     ? owner_of_member(family, *member)
                                     : std::optional<std::int64_t>{};
-                            if (owner.has_value()
-                                && scope.ids.contains(*owner))
+                            if (owner.has_value() && scope.ids.contains(*owner))
                             {
                                 scoped.push_back(c);
                             }
                         }
-                        if (!scoped.empty() && scoped.size() < candidates.size())
+                        if (!scoped.empty()
+                            && scoped.size() < candidates.size())
                         {
                             for (DispatchCandidate& c : scoped)
                             {
@@ -2005,12 +1989,11 @@ export namespace cg::analysis
             // （final 直连或诚实披露）。
             bool static_face_priority = false;
             if (!site.dynamic_types.empty()
-                && site.reason.find("out_param_family")
-                       != std::string::npos
+                && site.reason.find("out_param_family") != std::string::npos
                 && !site.static_types.empty())
             {
                 std::vector<std::int64_t> priority_roots;
-                bool priority_ok = true;
+                bool                      priority_ok = true;
                 for (const std::string& key : site.static_types)
                 {
                     const auto sid = id_of_static_key(key);
@@ -2021,8 +2004,7 @@ export namespace cg::analysis
                     }
                     const auto row = by_id.find(*sid);
                     if (row != by_id.end()
-                        && (row->second->flags
-                            & cg::db::sym_flags::is_template)
+                        && (row->second->flags & cg::db::sym_flags::is_template)
                                != 0)
                     {
                         continue; // 模板壳主模板键：无语义证明面

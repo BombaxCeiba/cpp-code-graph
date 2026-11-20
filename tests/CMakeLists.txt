@@ -74,7 +74,8 @@ target_compile_definitions(cg_test_clang PRIVATE
 target_compile_definitions(cg_test_extract PRIVATE
     CCG_SAMPLE1_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/sample1"
     CCG_SAMPLE3_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/sample3"
-    CCG_USES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/uses")
+    CCG_USES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/uses"
+    CCG_CONSTEXPR_SPEC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/constexpr-spec")
 target_compile_definitions(cg_test_graph PRIVATE
     CCG_SAMPLE1_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/sample1"
     CCG_SAMPLE2_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/sample2"
@@ -82,9 +83,12 @@ target_compile_definitions(cg_test_graph PRIVATE
     CCG_ILINK_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ilinkage")
 target_compile_definitions(cg_test_cli PRIVATE
     CCG_SAMPLE1_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/sample1")
-# sample2 同时供增量等价性测试套件使用。
+# sample2 同时供增量等价性测试套件使用；dispatch 夹具供特化摘要
+# 翻转的端到端等价用例（spec-digest-flip 语料）使用。
 target_compile_definitions(cg_test_incr PRIVATE
-    CCG_SAMPLE2_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/sample2")
+    CCG_SAMPLE2_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/sample2"
+    CCG_DISPATCH_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dispatch"
+    CCG_BIN_DIR="$<TARGET_FILE_DIR:ccg>")
 target_compile_definitions(cg_test_analysis PRIVATE
     CCG_DISPATCH_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dispatch")
 # cl 模式适配器的研究日志 golden 与 rsp 夹具（仅数据）。

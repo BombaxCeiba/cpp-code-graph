@@ -292,7 +292,7 @@ expect_out("\"error\"" "trace json unresolved endpoint")
 # ---------------------------------------------------------------- 统计 -----
 ccg_run(stats -o "${work}" --config main)
 expect_rc(0 "stats")
-expect_out("schema 16" "stats")
+expect_out("schema 18" "stats")
 expect_out("symbols" "stats")
 
 ccg_run(stats --json -o "${work}" --config main)

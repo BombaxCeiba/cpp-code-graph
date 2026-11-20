@@ -1164,12 +1164,91 @@ export namespace cg::clang
     {
 
         /**
+         * @brief argv 里的目标三元组（--target=<t> 连写与 -target/--target
+         * 分写形态，与装载层 argv 值解析同款逐 token 扫描）。
+         *
+         * @internal 后写覆盖（驱动器语义：靠后的 -target 生效）。分写
+         * 守卫：下一 token 以 '-' 开头视为旗标而非值（三元组永不以 '-'
+         * 开头），裸开关绝不吞它。精确 token 匹配使 -target-cpu 之类的
+         * 同前缀旗标不误配。
+         */
+        [[nodiscard]]
+        auto argv_target_triple(const std::vector<std::string>& argv)
+            -> std::string
+        {
+            std::string found;
+            for (std::size_t i = 0; i < argv.size(); ++i)
+            {
+                const std::string& t = argv[i];
+                if ((t == "-target" || t == "--target") && i + 1 < argv.size()
+                    && !argv[i + 1].starts_with('-'))
+                {
+                    found = argv[++i];
+                }
+                else if (
+                    t.starts_with("--target=") || t.starts_with("-target="))
+                {
+                    found = t.substr(t.find('=') + 1);
+                }
+            }
+            return found;
+        }
+
+        /**
+         * @brief 实例化跳过（TU_Prefix 形态）对该 argv 是否生效。
+         *
+         * @internal 环境变量值与 argv 都由调用方递入（纯函数，可单测）：
+         * - CCG_SKIP_INSTANTIATIONS 精确值 "1" 才开（默认关=解析行为
+         *   逐字节不变；与 CCG_HEADCACHE 同一显式开形态）。
+         * - cl 方言条目（argv 含 --driver-mode=cl，装载/翻译层保证 cl
+         *   家族条目带该旗标）永久禁用：原生 cl 条目装载期补
+         *   /Zc:twoPhase-、clang-cl 在 MSVC target 低于 C++20 时驱动
+         *   默认开延迟模板解析——延迟语料下 TU_Prefix 形态不 parse
+         *   模板 pattern 体（LateParsed 实例化被转移且不再解析），模板
+         *   体内符号与依赖调用边全丢，开关对该方言无效。
+         * - 显式 -fdelayed-template-parsing（GNU 方言拼写）机制同上，
+         *   一并禁用。
+         * - 目标三元组为 *-windows-msvc 的 GNU 拼写条目一并禁用：驱动器
+         *   对该目标在低于 C++20 时自动注入 -fdelayed-template-parsing
+         *   （注入发生在 cc1 命令行装配期，argv 层不可见）。判据与标准
+         *   版本无关——凡 msvc 三元组即禁用（免解析 -std 版本序，误禁
+         *   方向安全：保真优先）；mingw 的 *-windows-gnu 三元组无此注入，
+         *   不受影响。
+         */
+        [[nodiscard]]
+        auto instantiation_skip_allowed(
+            const std::optional<std::string>& env_value,
+            const std::vector<std::string>&   argv) -> bool
+        {
+            if (env_value != std::optional<std::string>{"1"})
+            {
+                return false;
+            }
+            const std::string          triple = argv_target_triple(argv);
+            constexpr std::string_view msvc_suffix{"-windows-msvc"};
+            const bool                 msvc_target =
+                triple.size() >= msvc_suffix.size()
+                && cg::util::ascii_iequals(
+                    std::string_view{triple}.substr(
+                        triple.size() - msvc_suffix.size()),
+                    msvc_suffix);
+            return !msvc_target
+                   && std::ranges::none_of(
+                       argv,
+                       [](const std::string& t)
+                       {
+                           return t == "--driver-mode=cl"
+                                  || t == "-fdelayed-template-parsing";
+                       });
+        }
+
+        /**
          * @brief 诊断驱动的内存源码改写：cl 方言的宽松特化家族。
          *
          * 形态：MSVC 接受、clang 报 "template specialization requires
          * 'template<>'" 的类外成员特化定义（如 `__declspec(selectany)
-         * Widget Singleton<T>::mutex_;`）。clang 该诊断自带 FixItHint（在声明头插入
-         * "template<> "，插入点与文本全由编译器给出）。
+         * Widget Singleton<T>::mutex_;`）。clang 该诊断自带
+         * FixItHint（在声明头插入 "template<> "，插入点与文本全由编译器给出）。
          *
          * 触发条件三合一，缺一零动作：仅 cl 方言（argv 含 --driver-mode=cl，
          * GNU 方言零改动）；首轮解析的诊断里含该拼写且该诊断带 FixIt
@@ -1289,7 +1368,15 @@ export namespace cg::clang
             }
             try
             {
-                Tu retried = index.parse(file, replay, covers, detailed);
+                // 与首轮同一 replay 上独立求值同一纯判定（方言门内一致）。
+                Tu retried = index.parse(
+                    file,
+                    replay,
+                    covers,
+                    detailed,
+                    instantiation_skip_allowed(
+                        cg::util::cstd::get_env("CCG_SKIP_INSTANTIATIONS"),
+                        replay));
                 out.tu = std::move(retried);
                 out.errors = out.tu.diagnostics(DiagSeverity::Error, diag_cap);
             }
@@ -1652,7 +1739,15 @@ export namespace cg::clang
             }
             try
             {
-                Tu retried = index.parse(file, replay, overlay, detailed);
+                // 与首轮同一 replay 上独立求值同一纯判定（方言门内一致）。
+                Tu retried = index.parse(
+                    file,
+                    replay,
+                    overlay,
+                    detailed,
+                    instantiation_skip_allowed(
+                        cg::util::cstd::get_env("CCG_SKIP_INSTANTIATIONS"),
+                        replay));
                 out.tu = std::move(retried);
                 out.errors = out.tu.diagnostics(DiagSeverity::Error, diag_cap);
             }
@@ -1769,12 +1864,23 @@ export namespace cg::clang
         // 此时盲扫主文件——字面量内确有坏点才消毒重试一次，否则原样
         // 重抛（其余硬失败口径不变）。诊断驱动的残余消毒（TU 建立、诊断
         // 点名被含头）见 detail::rewrite_illegal_encoding。
+        // 实例化跳过形态按本 replay 判定一次：首轮与编码消毒重试共用；
+        // 下方两个 detail 改写器的重试在同一 replay 上独立求值同一
+        // 纯函数，形态必然一致。
+        const bool skip_instantiations = detail::instantiation_skip_allowed(
+            cg::util::cstd::get_env("CCG_SKIP_INSTANTIATIONS"),
+            replay);
         std::exception_ptr first_failure;
         const auto         engine_parse = [&]() -> bool
         {
             try
             {
-                out.tu = index.parse(file, replay, overlay, !degraded);
+                out.tu = index.parse(
+                    file,
+                    replay,
+                    overlay,
+                    !degraded,
+                    skip_instantiations);
                 return true;
             }
             catch (const ParseError&)

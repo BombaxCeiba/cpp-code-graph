@@ -118,12 +118,24 @@ namespace cg::db
             EVI_SELECT_ALL,      // select * from external_invokes，确定序
             EDGES_FROM_AGG, // select dst,type,sum,min,max,max where src group
                             // by
-            EDGES_TO_AGG, // select src,type,sum,min,max,max where dst group by
-            EDGES_OF_OUT, // select * from edges where src = ? and type = ?
-            EDGES_OF_IN,  // select * from edges where dst = ? and type = ?
-            DEL_SYM_FILE_KEY, // delete from symbols where (file_id,
-                              // unique_key_id) = ?
-            COUNT,            // 语句计数哨兵
+            EDGES_TO_AGG,  // select src,type,sum,min,max,max where dst group by
+            EDGES_OF_OUT,  // select * from edges where src = ? and type = ?
+            EDGES_OF_IN,   // select * from edges where dst = ? and type = ?
+            DEL_SYM_BY_ID, // delete from symbols where sym_id = ?
+            CONTRIB_INSERT,    // insert symbol_contributions，冲突 do nothing
+            CONTRIB_OF_ENTRY,  // select sym_id from symbol_contributions where
+                               // (file_id, cmd_digest) = ? order by sym_id
+            CONTRIB_OF_FILE,   // select sym_id from symbol_contributions where
+                               // file_id = ? order by sym_id
+            CONTRIB_DEL_ONE,   // delete from symbol_contributions where
+                               // (sym_id, file_id, cmd_digest) = ?
+            CONTRIB_DEL_ENTRY, // delete from symbol_contributions where
+                               // (file_id, cmd_digest) = ?
+            CONTRIB_DEL_FILE,  // delete from symbol_contributions where file_id
+                               // = ?
+            CONTRIB_EXISTS, // select 1 from symbol_contributions where sym_id
+                            // = ? limit 1
+            COUNT,          // 语句计数哨兵
         };
 
         /**
@@ -213,6 +225,7 @@ namespace cg::db
             const tab::PassthroughWrappers ptw{};
             const tab::ExternalParamArgs   epa{};
             const tab::ExternalInvokes     evi{};
+            const tab::SymbolContributions sc{};
 
             return std::make_tuple(
                 db.prepare(
@@ -493,6 +506,7 @@ namespace cg::db
                             cs.argCallKeys = parameter(cs.argCallKeys),
                             cs.argTargets = parameter(cs.argTargets),
                             cs.receiverTypes = parameter(cs.receiverTypes),
+                            cs.receiverStatic = parameter(cs.receiverStatic),
                             cs.calleeResolved = parameter(cs.calleeResolved),
                             cs.resolved = parameter(cs.resolved),
                             cs.confidence = parameter(cs.confidence),
@@ -685,9 +699,48 @@ namespace cg::db
                         .where(
                             e.dstId == parameter(e.dstId)
                             and e.typeId == parameter(e.typeId))),
-                db.prepare(delete_from(s).where(
-                    s.fileId == parameter(s.fileId)
-                    and s.uniqueKeyId == parameter(s.uniqueKeyId))));
+                db.prepare(delete_from(s).where(s.symId == parameter(s.symId))),
+
+                // 贡献登记（schema v18 行生老病死记账制）：投票幂等、
+                // 撤票按全键、条目/文件整撤配套旧票读取（差集撤票的
+                // 输入面）、归零仲裁的 EXISTS 探测走 PK 前缀。
+                db.prepare(
+                    sqlpp::sqlite3::insert_into(sc)
+                        .set(
+                            sc.symId = parameter(sc.symId),
+                            sc.fileId = parameter(sc.fileId),
+                            sc.cmdDigest = parameter(sc.cmdDigest))
+                        .on_conflict(sc.symId, sc.fileId, sc.cmdDigest)
+                        .do_nothing()),
+                db.prepare(
+                    sqlpp::select(sc.symId)
+                        .from(sc)
+                        .where(
+                            sc.fileId == parameter(sc.fileId)
+                            and sc.cmdDigest == parameter(sc.cmdDigest))
+                        .order_by(sc.symId.asc())),
+                db.prepare(
+                    sqlpp::select(sc.symId)
+                        .from(sc)
+                        .where(sc.fileId == parameter(sc.fileId))
+                        .order_by(sc.symId.asc())),
+                db.prepare(
+                    sqlpp::delete_from(sc).where(
+                        sc.symId == parameter(sc.symId)
+                        and sc.fileId == parameter(sc.fileId)
+                        and sc.cmdDigest == parameter(sc.cmdDigest))),
+                db.prepare(
+                    sqlpp::delete_from(sc).where(
+                        sc.fileId == parameter(sc.fileId)
+                        and sc.cmdDigest == parameter(sc.cmdDigest))),
+                db.prepare(
+                    sqlpp::delete_from(sc).where(
+                        sc.fileId == parameter(sc.fileId))),
+                db.prepare(
+                    sqlpp::select(sc.symId)
+                        .from(sc)
+                        .where(sc.symId == parameter(sc.symId))
+                        .limit(1)));
         }
 
         using Statements = decltype(make_statements(
@@ -909,21 +962,99 @@ namespace cg::db
         void erase_failure(FileId file, std::string_view cmd_digest);
 
         /**
-         * @brief 移除该文件的站点属主边、它的 includes，以及它定义的、
-         *        unique_key 不在 `fresh_unique_key_ids` 之中的符号（它们的
-         *        出入边级联）。在与后续重抽取相同的事务内运行。
+         * @brief 移除该文件的站点属主边、includes/imports 与派生数据行
+         *        （线索/调用点）——它们随本批 upsert 重写。
          *
-         * @internal
-         * 对该文件的符号做一次批量分类而非逐行
-         * select；不在新批次里的键即注定被删的。
-         * 删除顺序纪律（并发安全论证的一环）：本方法就是"先删引用方"的
-         * 单点——edges（按 site_file_id）、includes、imports、type_hints、
-         * call_sites、symbols 依次显式清除；erase_file 删 files 行永远排在
-         * 本方法之后，外键 CASCADE 只作残余兜底而非被依赖的路径。
+         * @internal schema v18 起不再删除该文件上的符号行：键失配只是
+         *           “本批新提取不再发射它”的事实，行生死由贡献票数仲裁
+         *           （symbol_contributions 归零时在 dispatch 装载前删除）。
+         *           参数 fresh_unique_key_ids 保留在签名里（调用方契约面
+         *           不变），实现不再消费。删除顺序纪律（并发安全论证的
+         *           一环）不变：本方法仍是“先删引用方”的单点，erase_file
+         *           删 files 行永远排在本方法之后。
          */
         void purge_file(
             FileId                 file,
             std::span<const StrId> fresh_unique_key_ids);
+
+        /**
+         * @brief 按行 id 删除符号（终态确证真死的键行；引用方随外键
+         *        级联消失——edges/call_sites/type_hints CASCADE、
+         *        callee/method/static_type SET NULL、子成员 CASCADE）。
+         *
+         * @internal 行清除面（重写集逐文件 purge）够不到挂在未编辑
+         *           文件上的死键（模板实例位：注册点在被删的使用处、
+         *           实体挂在模板定义文件）——本入口是其显式删除半边；
+         *           行不存在时是幂等空操作。
+         */
+        void erase_symbols(std::span<const SymId> ids);
+
+        /**
+         * @name 贡献登记（schema v18，行生老病死记账制）。
+         *
+         * @internal 一票 = (sym_id, file_id, cmd_digest) 一行，条目身份与
+         *           fingerprints/failures 同款。调用时序纪律：全部投票与
+         *           撤票都发生在提交段同一事务内（崩溃一致性由事务回滚
+         *           保证）；归零仲裁（zero_contribution_symbols）必须最
+         *           后跑，其结果在 dispatch 装载前经 erase_symbols 删除。
+         */
+        ///@{
+        /**
+         * @brief 投票（幂等）：本条目对 `ids` 里每个符号各投一票。
+         *
+         * @param digest 条目命令摘要（调用方持有 freshness 扫描算得的那
+         *               份，与 fingerprints/failures 的键逐字节一致）。
+         */
+        void contribute_symbols(
+            FileId                 file,
+            std::string_view       digest,
+            std::span<const SymId> ids);
+
+        /**
+         * @brief 条目旧票读取（差集撤票的输入）：该 (file, digest) 当前
+         *        投过票的全部符号，sym_id 升序。
+         */
+        [[nodiscard]]
+        auto contributions_of_entry(FileId file, std::string_view digest)
+            -> std::vector<SymId>;
+
+        /** @brief 撤一票（全键；行不存在时是幂等空操作）。 */
+        void retract_contribution(
+            SymId            sym,
+            FileId           file,
+            std::string_view digest);
+
+        /**
+         * @brief 整条目撤票（条目退役），返回受影响的符号集（归零仲裁
+         *        候选）。
+         */
+        auto retract_entry_contributions(FileId file, std::string_view digest)
+            -> std::vector<SymId>;
+
+        /**
+         * @brief 整文件撤票（全败清除/盘缺/抹除），返回受影响的符号集。
+         */
+        auto retract_file_contributions(FileId file) -> std::vector<SymId>;
+
+        /**
+         * @brief 条目旧票读取的整文件形态（只读不删；heal 折叠等"删除
+         *        交给外键、受影响集交给调用方"的场景）。
+         */
+        [[nodiscard]]
+        auto contributions_of_file(FileId file) -> std::vector<SymId>;
+
+        /**
+         * @brief 归零仲裁：candidates 里已无任何剩余票的符号（PK 前缀
+         *        EXISTS 探测），保持输入序。
+         *
+         * @internal 调用方保证 candidates 恰是本批全部撤票动作触及的
+         *           符号——行从创建起至少有一票（发射即投票），“从有票
+         *           变零票”必经一次撤票，因此归零集是撤票集的子集。
+         */
+        [[nodiscard]]
+        auto zero_contribution_symbols(std::span<const SymId> candidates)
+            -> std::vector<SymId>;
+        ///@}
 
         /**
          * @brief 写入一条类型线索（schema v10 派生数据；冲突静默去重）。
@@ -963,6 +1094,19 @@ namespace cg::db
          */
         [[nodiscard]]
         auto type_hints_of_owner(SymId owner) -> std::vector<TypeHintRow>;
+        /**
+         * @brief 指定来源+槽名的类型线索读取（WHERE 投影，全表读的过滤形）。
+         *
+         * @internal 供 dispatch 的 external_of 装载直取 R(I) 边界行：与
+         *           all_type_hints 后内存过滤 source/var_name 的旧行集逐行
+         *           相等（同列、同一 order_by，WHERE 只删行不改序不换列）。
+         *           (source, varName) 无专用索引时引擎仍走表扫，但免整表
+         *           物化与逐行反序列化。
+         */
+        [[nodiscard]]
+        auto type_hints_of_source(
+            std::int64_t     source,
+            std::string_view var_name) -> std::vector<TypeHintRow>;
 
         /**
          * @brief 写入一条调用点并返回 site_id；同一唯一键重复写返回既有 id
@@ -1370,8 +1514,7 @@ namespace cg::db
          */
         auto head_cache_store(
             const std::vector<cg::db::HeadCacheRow>& entries,
-            const std::vector<cg::db::FileId>&       invalidate)
-            -> std::size_t;
+            const std::vector<cg::db::FileId>&       invalidate) -> std::size_t;
 
         /** @brief 载入全部指令摘要行（键 file_id）。 */
         [[nodiscard]]
@@ -2477,6 +2620,33 @@ namespace cg::db
         return out;
     }
 
+    auto GraphStore::type_hints_of_source(
+        std::int64_t     source,
+        std::string_view var_name) -> std::vector<TypeHintRow>
+    {
+        const tab::TypeHints     th{};
+        std::vector<TypeHintRow> out;
+        auto                     rows = impl_->run(
+            sqlpp::select(sqlpp::all_of(th))
+                .from(th)
+                .where(
+                    th.source == source && th.varName == std::string{var_name})
+                .order_by(
+                    th.ownerId.asc(),
+                    th.varName.asc(),
+                    th.fileId.asc(),
+                    th.line.asc(),
+                    th.col.asc(),
+                    th.source.asc()));
+        for (const auto& row : rows)
+        {
+            TypeHintRow r = to_type_hint_row(row);
+            r.id = static_cast<std::int64_t>(row.hintId);
+            out.push_back(std::move(r));
+        }
+        return out;
+    }
+
     auto GraphStore::upsert_call_site(const CallSiteWrite& w) -> std::int64_t
     {
         auto& ins = std::get<SITE_INSERT>(*impl_->st_);
@@ -2505,6 +2675,7 @@ namespace cg::db
         ins.parameters.argCallKeys = to_string_param(w.arg_call_keys);
         ins.parameters.argTargets = to_string_param(w.arg_targets);
         ins.parameters.receiverTypes = to_string_param(w.receiver_types);
+        ins.parameters.receiverStatic = to_string_param(w.receiver_static);
         ins.parameters.calleeResolved = w.callee_resolved ? 1 : 0;
         ins.parameters.resolved = w.resolved ? 1 : 0;
         ins.parameters.confidence = w.confidence;
@@ -2595,6 +2766,7 @@ namespace cg::db
                 cs.argVars,
                 cs.argCallKeys,
                 cs.receiverTypes,
+                cs.receiverStatic,
                 cs.calleeResolved,
                 cs.resolved,
                 cs.confidence,
@@ -3607,20 +3779,16 @@ namespace cg::db
             {
                 const auto* payload = static_cast<const unsigned char*>(
                     sqlite3_column_blob(sel, 4));
-                const int payload_len = sqlite3_column_bytes(sel, 4);
+                const int    payload_len = sqlite3_column_bytes(sel, 4);
                 HeadCacheRow row;
                 row.file_id = sqlite3_column_int64(sel, 0);
                 row.main_id = sqlite3_column_int64(sel, 1);
                 row.variant_digest.assign(
-                    reinterpret_cast<const char*>(
-                        sqlite3_column_text(sel, 2)),
-                    static_cast<std::size_t>(
-                        sqlite3_column_bytes(sel, 2)));
+                    reinterpret_cast<const char*>(sqlite3_column_text(sel, 2)),
+                    static_cast<std::size_t>(sqlite3_column_bytes(sel, 2)));
                 row.closure_digest.assign(
-                    reinterpret_cast<const char*>(
-                        sqlite3_column_text(sel, 3)),
-                    static_cast<std::size_t>(
-                        sqlite3_column_bytes(sel, 3)));
+                    reinterpret_cast<const char*>(sqlite3_column_text(sel, 3)),
+                    static_cast<std::size_t>(sqlite3_column_bytes(sel, 3)));
                 if (payload != nullptr && payload_len > 0)
                 {
                     row.payload.assign(
@@ -3724,20 +3892,14 @@ namespace cg::db
                 FileInstrDigestRow row;
                 row.file_id = sqlite3_column_int64(sel, 0);
                 row.d_narrow.assign(
-                    reinterpret_cast<const char*>(
-                        sqlite3_column_text(sel, 1)),
-                    static_cast<std::size_t>(
-                        sqlite3_column_bytes(sel, 1)));
+                    reinterpret_cast<const char*>(sqlite3_column_text(sel, 1)),
+                    static_cast<std::size_t>(sqlite3_column_bytes(sel, 1)));
                 row.d_all.assign(
-                    reinterpret_cast<const char*>(
-                        sqlite3_column_text(sel, 2)),
-                    static_cast<std::size_t>(
-                        sqlite3_column_bytes(sel, 2)));
+                    reinterpret_cast<const char*>(sqlite3_column_text(sel, 2)),
+                    static_cast<std::size_t>(sqlite3_column_bytes(sel, 2)));
                 row.d_include.assign(
-                    reinterpret_cast<const char*>(
-                        sqlite3_column_text(sel, 3)),
-                    static_cast<std::size_t>(
-                        sqlite3_column_bytes(sel, 3)));
+                    reinterpret_cast<const char*>(sqlite3_column_text(sel, 3)),
+                    static_cast<std::size_t>(sqlite3_column_bytes(sel, 3)));
                 row.n_narrow = sqlite3_column_int64(sel, 4);
                 row.n_all = sqlite3_column_int64(sel, 5);
                 row.n_include = sqlite3_column_int64(sel, 6);
@@ -3820,24 +3982,12 @@ namespace cg::db
         FileId                 file,
         std::span<const StrId> fresh_unique_key_ids)
     {
-        std::vector<StrId> keep{
-            fresh_unique_key_ids.begin(),
-            fresh_unique_key_ids.end()};
-        std::ranges::sort(keep);
-        std::vector<StrId> doomed;
-        {
-            auto& sel = std::get<KEYS_BY_FILE>(*impl_->st_);
-            sel.parameters.fileId = file;
-            auto rows = impl_->run(sel);
-            for (const auto& row : rows)
-            {
-                const auto key = static_cast<StrId>(row.uniqueKeyId);
-                if (!std::ranges::binary_search(keep, key))
-                {
-                    doomed.push_back(key);
-                }
-            }
-        }
+        // 参数保留（调用方契约面不变）但键集比对已退役：schema v18 起
+        // 该文件上的符号行生死改由贡献票数仲裁——键失配只说明“本批新
+        // 提取不再发射它”，行的删除发生在票数归零时（erase_symbols，
+        // dispatch 装载前）。此处只清“按文件替换”的派生行（站点边/
+        // 包含/导入/线索/调用点），它们随本批 upsert 重写。
+        (void)fresh_unique_key_ids;
 
         {
             auto& del = std::get<DEL_EDGES_SITE>(*impl_->st_);
@@ -3865,19 +4015,137 @@ namespace cg::db
             del.parameters.fileId = file;
             impl_->run(del);
         }
-        if (!doomed.empty())
+    }
+
+    void GraphStore::erase_symbols(std::span<const SymId> ids)
+    {
+        if (ids.empty())
         {
-            // 预编译单条 DELETE 循环执行：此前 doomed 逐键动态拼
-            // IN 列表、每文件一次重新编译；本函数在事务内、逐键删除与
-            // 单条 IN 删除语义等价（同文件同键的行至多一条）。
-            auto& del = std::get<DEL_SYM_FILE_KEY>(*impl_->st_);
-            for (const StrId key : doomed)
+            return;
+        }
+        auto& del = std::get<DEL_SYM_BY_ID>(*impl_->st_);
+        for (const SymId id : ids)
+        {
+            del.parameters.symId = id;
+            impl_->run(del);
+        }
+    }
+
+    void GraphStore::contribute_symbols(
+        FileId                 file,
+        std::string_view       digest,
+        std::span<const SymId> ids)
+    {
+        if (ids.empty())
+        {
+            return;
+        }
+        auto& ins = std::get<CONTRIB_INSERT>(*impl_->st_);
+        for (const SymId id : ids)
+        {
+            ins.parameters.symId = id;
+            ins.parameters.fileId = file;
+            ins.parameters.cmdDigest = digest;
+            impl_->run(ins);
+        }
+    }
+
+    auto GraphStore::contributions_of_entry(
+        FileId           file,
+        std::string_view digest) -> std::vector<SymId>
+    {
+        std::vector<SymId> out;
+        auto&              sel = std::get<CONTRIB_OF_ENTRY>(*impl_->st_);
+        sel.parameters.fileId = file;
+        sel.parameters.cmdDigest = digest;
+        auto rows = impl_->run(sel);
+        for (const auto& row : rows)
+        {
+            out.push_back(static_cast<SymId>(row.symId));
+        }
+        return out;
+    }
+
+    void GraphStore::retract_contribution(
+        SymId            sym,
+        FileId           file,
+        std::string_view digest)
+    {
+        auto& del = std::get<CONTRIB_DEL_ONE>(*impl_->st_);
+        del.parameters.symId = sym;
+        del.parameters.fileId = file;
+        del.parameters.cmdDigest = digest;
+        impl_->run(del);
+    }
+
+    auto GraphStore::retract_entry_contributions(
+        FileId           file,
+        std::string_view digest) -> std::vector<SymId>
+    {
+        // 先读后删：受影响符号集是归零仲裁的输入，必须在删除前物化。
+        std::vector<SymId> affected = contributions_of_entry(file, digest);
+        auto&              del = std::get<CONTRIB_DEL_ENTRY>(*impl_->st_);
+        del.parameters.fileId = file;
+        del.parameters.cmdDigest = digest;
+        impl_->run(del);
+        return affected;
+    }
+
+    auto GraphStore::contributions_of_file(FileId file) -> std::vector<SymId>
+    {
+        std::vector<SymId> out;
+        auto&              sel = std::get<CONTRIB_OF_FILE>(*impl_->st_);
+        sel.parameters.fileId = file;
+        auto rows = impl_->run(sel);
+        for (const auto& row : rows)
+        {
+            out.push_back(static_cast<SymId>(row.symId));
+        }
+        return out;
+    }
+
+    auto GraphStore::retract_file_contributions(FileId file)
+        -> std::vector<SymId>
+    {
+        // 先读后删（条目整撤同款纪律）：受影响符号集是归零仲裁的输入。
+        std::vector<SymId> affected;
+        {
+            auto& sel = std::get<CONTRIB_OF_FILE>(*impl_->st_);
+            sel.parameters.fileId = file;
+            auto rows = impl_->run(sel);
+            for (const auto& row : rows)
             {
-                del.parameters.fileId = file;
-                del.parameters.uniqueKeyId = key;
-                impl_->run(del);
+                affected.push_back(static_cast<SymId>(row.symId));
             }
         }
+        auto& del = std::get<CONTRIB_DEL_FILE>(*impl_->st_);
+        del.parameters.fileId = file;
+        impl_->run(del);
+        return affected;
+    }
+
+    auto GraphStore::zero_contribution_symbols(
+        std::span<const SymId> candidates) -> std::vector<SymId>
+    {
+        std::vector<SymId> out;
+        auto&              sel = std::get<CONTRIB_EXISTS>(*impl_->st_);
+        for (const SymId id : candidates)
+        {
+            sel.parameters.symId = id;
+            auto rows = impl_->run(sel);
+            bool has_vote = false;
+            // 循环跑到 DONE（LIMIT 1 最多一行；本店游标纪律）。
+            for (const auto& row : rows)
+            {
+                static_cast<void>(row);
+                has_vote = true;
+            }
+            if (!has_vote)
+            {
+                out.push_back(id);
+            }
+        }
+        return out;
     }
 
     void GraphStore::erase_file(FileId file)

@@ -39,7 +39,11 @@ namespace cg::analysis::propagate_detail
      *
      * @internal 契约：dst 与 src 不得部分重叠（dst == src 时按位或自身为
      *           恒等，安全）；src 只读；dst 的 [0, count) 区间必写、区间
-     *           外不动。三档实现必须满足同一契约并产生逐位相同的结果。
+     *           外不动；dst 与 src 的基址必须 64 字节对齐（SymBits 存储
+     *           经 AlignedWordAllocator 保证——向量档主循环以对齐版指令
+     *           整块读写，非对齐基址是硬件异常，任何新调用方须持有同一
+     *           对齐契约；标量档无对齐要求）。三档实现必须满足同一契约
+     *           并产生逐位相同的结果。
      */
     using OrWordsFn = void (*)(
         std::uint64_t*       dst,

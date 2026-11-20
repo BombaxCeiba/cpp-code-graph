@@ -30,8 +30,9 @@ export namespace cg::analysis
          * @brief 生成区目录前缀（cdb 子树，路径小写规范化形态）；空 = 不降级。
          *
          * @internal 预留：透传包装登记在该子树内跳过（防生成代码膨胀：
-         *           生成区符号海量而查询价值趋零，登记收益不抵膨胀）；由 cli 层从 profile 的
-         *           compile_commands 路径推导后传入，本环默认空 = 全登记。
+         *           生成区符号海量而查询价值趋零，登记收益不抵膨胀）；由 cli
+         * 层从 profile 的 compile_commands 路径推导后传入，本环默认空 =
+         * 全登记。
          */
         std::string generated_root;
     };
@@ -556,10 +557,10 @@ export namespace cg::analysis
             /**
              * @brief 声明期容器元素槽登记表：(owner_key, 容器名)。
              *
-             * @internal 容器元素槽闸门：写集/拷贝流/range-for 链接行只在容器先于
-             * 使用点完成声明期元素登记后才发（同函数/同 TU 内声明先于使用，
-             * C++ 语义保证；跨 TU 的字段声明不在本 TU 时 record key 为空、
-             * 登记失败、整链 no-op——宁漏勿误）。
+             * @internal 容器元素槽闸门：写集/拷贝流/range-for
+             * 链接行只在容器先于 使用点完成声明期元素登记后才发（同函数/同 TU
+             * 内声明先于使用， C++ 语义保证；跨 TU 的字段声明不在本 TU 时
+             * record key 为空、 登记失败、整链 no-op——宁漏勿误）。
              */
             std::unordered_set<std::string> elem_slots_;
 
@@ -652,6 +653,39 @@ export namespace cg::analysis
                     cur = kids.front();
                 }
                 return cur;
+            }
+
+            /**
+             * @brief 被调子式是否显式写了嵌套名限定符
+             *        （ns:: / Base:: / ::）。
+             *
+             * @internal 双判据并集，与被调 extent 词法化找 "::" 的 token
+             * 判据在标准样本集上逐位等价：引用名范围差覆盖成员限定
+             * （p->Base::f() / Base::f()）、全局限定（::fn）与命名空间
+             * 限定；被调子式 direct children 的 NamespaceRef 覆盖依赖
+             * 重载集（范围差对该形态失效）。TypeRef/TemplateRef 不计入
+             * 子游标判据：显式模板实参对任意类型实参都产出 TypeRef
+             * （take<PlainT>(x) 无限定却带 TypeRef），计入即误报；带
+             * 命名空间的模板实参（take<ns::T>(x)）由 NamespaceRef 命中，
+             * 与 token 判据同值。token 判据的两类既有漏报——宏展开错位
+             * 被 token 卫生闸拒绝、接收者带括号形态（(&d)->Base::f()）
+             * 的首个 '(' 提前截断——都被本判据从 AST 结构读出真值。
+             */
+            [[nodiscard]]
+            static auto qualified_callee(const CXCursor& callee) -> bool
+            {
+                if (cg::clang::reference_name_includes_qualifier(callee))
+                {
+                    return true;
+                }
+                for (const CXCursor& kid : direct_children(callee))
+                {
+                    if (cg::clang::kind(kid) == CXCursor_NamespaceRef)
+                    {
+                        return true;
+                    }
+                }
+                return false;
             }
 
             /** @brief 表达式是否类型引用子（转型目标/模板名，不是操作数）。 */
@@ -812,7 +846,7 @@ export namespace cg::analysis
             static auto is_smart_pointer_construction(const CXCursor& e) -> bool
             {
                 const std::string ty = cg::clang::type_spelling(e);
-                const auto has_word = [&ty](std::string_view word)
+                const auto        has_word = [&ty](std::string_view word)
                 {
                     const auto ident = [](char c)
                     {
@@ -821,7 +855,7 @@ export namespace cg::analysis
                     };
                     for (std::size_t pos = ty.find(word);
                          pos != std::string::npos;
-                         pos        = ty.find(word, pos + 1))
+                         pos = ty.find(word, pos + 1))
                     {
                         if ((pos == 0 || !ident(ty[pos - 1]))
                             && (pos + word.size() == ty.size()
@@ -883,46 +917,13 @@ export namespace cg::analysis
             }
 
             /**
-             * @brief token 序列是否构成顶层赋值（"=" 出现在圆括号深度零
-             *        处）。
-             *
-             * @internal 比较运算的 "=="/"<=" 等是独立 token，不会误匹配；
-             * 圆括号内嵌的赋值不属于所在语句的顶层运算符。
-             */
-            [[nodiscard]]
-            static auto tokens_form_assignment(
-                const std::vector<std::string>& toks) -> bool
-            {
-                int paren_depth = 0;
-                for (const std::string& tok : toks)
-                {
-                    if (tok == "(")
-                    {
-                        ++paren_depth;
-                    }
-                    else if (tok == ")")
-                    {
-                        if (paren_depth > 0)
-                        {
-                            --paren_depth;
-                        }
-                    }
-                    else if (tok == "=" && paren_depth == 0)
-                    {
-                        return true;
-                    }
-                }
-                return false;
-            }
-
-            /**
              * @brief 写回证明：`*<field> = <值>` 形态的赋值在方法体内存在。
              *
-             * @internal 赋值按 token 判定（'=' 且括号深度 0；'==' 不是 '='）；
-             * LHS 必须是解引用（UnaryOperator '*'），解引用目标优先按 FieldDecl
-             * USR 比对，引用解析失败时按字段名（规格口径）。索引槽
-             * `slot[i] = v`（LHS 是 ArraySubscript）与静态写回因此被拒——宁漏
-             * 勿误。
+             * @internal 赋值按 AST opcode 判定（CX_BO_Assign；'=='/'+=' 是
+             * 别的 opcode）；LHS 必须是解引用（UnaryOperator '*'），解引用
+             * 目标优先按 FieldDecl USR 比对，引用解析失败时按字段名（规
+             * 格口径）。索引槽 `slot[i] = v`（LHS 是 ArraySubscript）与静
+             * 态写回因此被拒——宁漏勿误。
              */
             [[nodiscard]]
             static auto writes_through_deref(
@@ -940,8 +941,7 @@ export namespace cg::analysis
                     stack.pop_back();
                     if (cg::clang::kind(c) == CXCursor_BinaryOperator)
                     {
-                        if (tokens_form_assignment(
-                                cg::clang::token_spellings(c)))
+                        if (cg::clang::binary_opcode(c) == CX_BO_Assign)
                         {
                             const std::vector<CXCursor> kids =
                                 direct_children(c);
@@ -1203,10 +1203,10 @@ export namespace cg::analysis
                 const Binding bind = bindings.front();
                 const auto    field_matches = [&](const FieldShape& f)
                 { return f.index == bind.index; };
-                // 存储字段唯一性：index 匹配的 dp 字段候选必须恰 1 个。双候选时首
-                // 个匹配选法无法证明构造绑定的就是它（构造绑 slot_
-                // 写 other_，机械过四条判据但绑定槽从未被写）——与 binds>1 对称
-                // 的宁漏勿误，整类 no-op。
+                // 存储字段唯一性：index 匹配的 dp 字段候选必须恰 1
+                // 个。双候选时首 个匹配选法无法证明构造绑定的就是它（构造绑
+                // slot_ 写 other_，机械过四条判据但绑定槽从未被写）——与 binds>1
+                // 对称 的宁漏勿误，整类 no-op。
                 if (std::ranges::count_if(fields, field_matches) != 1)
                 {
                     return std::nullopt; // 无字段，或多 dp 字段候选
@@ -1566,7 +1566,8 @@ export namespace cg::analysis
             }
 
             /**
-             * @brief 指针式类判据（容器元素槽的单一判据 + 存储面守卫，零名字参与）。
+             * @brief 指针式类判据（容器元素槽的单一判据 +
+             * 存储面守卫，零名字参与）。
              *
              * 定义：类模板 pattern 直属
              * operator->（CXXMethod/FunctionTemplate） 的结果 canonical
@@ -1653,8 +1654,7 @@ export namespace cg::analysis
             [[nodiscard]]
             static auto normalize_record_decl(const CXCursor& decl) -> CXCursor
             {
-                const CXCursor primary =
-                    cg::clang::specialized_template(decl);
+                const CXCursor primary = cg::clang::specialized_template(decl);
                 if (cg::clang::is_null(primary) || is_invalid_cursor(primary)
                     || !is_record_kind(cg::clang::kind(primary)))
                 {
@@ -1677,8 +1677,7 @@ export namespace cg::analysis
             auto shell_tp_field_slot(const CXCursor& pattern)
                 -> std::optional<ShellTpField>
             {
-                if (cg::clang::is_null(pattern)
-                    || is_invalid_cursor(pattern))
+                if (cg::clang::is_null(pattern) || is_invalid_cursor(pattern))
                 {
                     return std::nullopt;
                 }
@@ -1714,8 +1713,7 @@ export namespace cg::analysis
                             }
                             const auto core =
                                 cg::clang::canonical_pointee_spelling(ch, 1);
-                            if (!core
-                                || own_tp_index(*core, own_count) < 0)
+                            if (!core || own_tp_index(*core, own_count) < 0)
                             {
                                 return;
                             }
@@ -1748,18 +1746,18 @@ export namespace cg::analysis
                 const CXCursor& derived,
                 const CXCursor& base) -> bool
             {
-                const CXCursor want = normalize_record_decl(base);
-                std::vector<CXCursor>        frontier{derived};
-                std::unordered_set<std::string> seen{
-                    cg::clang::usr(derived)};
-                for (int depth = 0; depth < 6 && !frontier.empty()
-                                    && seen.size() <= 64;
+                const CXCursor        want = normalize_record_decl(base);
+                std::vector<CXCursor> frontier{derived};
+                std::unordered_set<std::string> seen{cg::clang::usr(derived)};
+                for (int depth = 0;
+                     depth < 6 && !frontier.empty() && seen.size() <= 64;
                      ++depth)
                 {
                     for (const CXCursor& cur : frontier)
                     {
                         if (cg::clang::equal_cursors(
-                                normalize_record_decl(cur), want))
+                                normalize_record_decl(cur),
+                                want))
                         {
                             return true;
                         }
@@ -1821,9 +1819,8 @@ export namespace cg::analysis
                     return; // 多源构造无唯一别名面
                 }
                 const CXCursor     src = unwrap_expr(strip_casts(args.front()));
-                const CXCursorKind sk  = cg::clang::kind(src);
-                if ((sk != CXCursor_DeclRefExpr
-                     && sk != CXCursor_MemberRefExpr)
+                const CXCursorKind sk = cg::clang::kind(src);
+                if ((sk != CXCursor_DeclRefExpr && sk != CXCursor_MemberRefExpr)
                     || !typed_pointer_shell(src))
                 {
                     return;
@@ -1841,13 +1838,12 @@ export namespace cg::analysis
                 }
                 TypeHintRec hint =
                     make_hint(owner, var, cg::clang::location(args.front()));
-                hint.source      = HintSource::LocalCopy;
-                hint.confidence  = Confidence::Medium;
-                hint.related_var = slot->owner_key.empty()
-                                       ? slot->var_name
-                                       : encode_field_slot(
-                                             slot->owner_key,
-                                             slot->var_name);
+                hint.source = HintSource::LocalCopy;
+                hint.confidence = Confidence::Medium;
+                hint.related_var =
+                    slot->owner_key.empty()
+                        ? slot->var_name
+                        : encode_field_slot(slot->owner_key, slot->var_name);
                 hint.fallback_reason = "shell_pointee_flow";
                 emit_hint(std::move(hint));
             }
@@ -2634,11 +2630,11 @@ export namespace cg::analysis
              *           与 v.Set(e) 写回臂同一落点、并集语义。
              */
             void outparam_addressof_writeback(
-                const CXCursor&               operand,
+                const CXCursor&                 operand,
                 const std::vector<std::string>& keys,
-                const std::string&            related_var,
-                const std::string&            related_key,
-                const Ctx&                    ctx)
+                const std::string&              related_var,
+                const std::string&              related_key,
+                const Ctx&                      ctx)
             {
                 if (outparam_bindings_.empty() || ctx.fn_key.empty())
                 {
@@ -2697,8 +2693,8 @@ export namespace cg::analysis
                 TypeHintRec hint =
                     make_hint(it->second.owner_key, it->second.var_name, loc);
                 hint.type_keys = keys;
-                hint.source      = HintSource::OutParamFlow;
-                hint.confidence  = Confidence::Medium;
+                hint.source = HintSource::OutParamFlow;
+                hint.confidence = Confidence::Medium;
                 hint.fallback_reason = "out_param_flow";
                 if (keys.empty())
                 {
@@ -2722,14 +2718,16 @@ export namespace cg::analysis
             {
                 // AST 判定赋值：LHS/RHS 是 BinaryOperator 的前两个表达式子，
                 // 不能用 token 下标（`this->p = ...` 的 "=" 不在第 1 位）。
-                // 同时确认顶层运算符确实是 "="——比较运算的 token 是 "=="/
-                // "<=" 等，嵌套在其他括号里的赋值不属于本语句。
+                // 运算符按 opcode 判（'=='/'<=' 是别的 opcode，圆括号内嵌
+                // 的赋值属于子表达式自己的 BinaryOperator）——opcode 是
+                // Sema 建树的权威判定，不经源码词法化，宏展开的 extent
+                // 错位碰不到它。
                 const std::vector<CXCursor> kids = direct_children(c);
                 if (kids.size() < 2)
                 {
                     return;
                 }
-                if (!tokens_form_assignment(cg::clang::token_spellings(c)))
+                if (cg::clang::binary_opcode(c) != CX_BO_Assign)
                 {
                     return;
                 }
@@ -3260,8 +3258,8 @@ export namespace cg::analysis
                 }
                 const CXCursorKind k = cg::clang::kind(ref);
                 // Constructor 放行（构造注入半边：构造调用进 call_sites 供全局
-                // 传播的出参回填消费）；实参 >=1 的收录门槛在 call_site 侧。析构与
-                // ConversionFunction 维持不收录。
+                // 传播的出参回填消费）；实参 >=1 的收录门槛在 call_site
+                // 侧。析构与 ConversionFunction 维持不收录。
                 if (k != CXCursor_CXXMethod && k != CXCursor_FunctionDecl
                     && k != CXCursor_FunctionTemplate
                     && k != CXCursor_Constructor)
@@ -3375,8 +3373,9 @@ export namespace cg::analysis
              *
              * @internal `set(make())` 的实参不能把 `make` 的声明返回类型当作
              * 动态证据（那是静态类型）；它只能经 `make` 的 `#ret` 槽在全局
-             * 固定点传播。这里记录“调用的是谁”，由 propagate 在整库符号表上解析。
-             * 传播。这里记录“调用的是谁”，由 propagate 在整库符号表上解析。
+             * 固定点传播。这里记录“调用的是谁”，由 propagate
+             * 在整库符号表上解析。 传播。这里记录“调用的是谁”，由 propagate
+             * 在整库符号表上解析。
              */
             [[nodiscard]]
             auto call_result_key(const CXCursor& e) -> std::string
@@ -3727,14 +3726,13 @@ export namespace cg::analysis
                     const ReceiverInfo base =
                         describe_receiver(kids.front(), depth + 1);
                     if (base.name.empty() || base.name == "this"
-                        || base.name.starts_with(
-                            container_elem_slot_prefix))
+                        || base.name.starts_with(container_elem_slot_prefix))
                     {
                         return info;
                     }
-                    info.name = std::string{container_elem_slot_prefix}
-                                + base.name;
-                    info.via_this  = base.via_this;
+                    info.name =
+                        std::string{container_elem_slot_prefix} + base.name;
+                    info.via_this = base.via_this;
                     info.owner_key = base.owner_key;
                     return info;
                 }
@@ -3837,8 +3835,7 @@ export namespace cg::analysis
                                     resolved = true;
                                 }
                             });
-                        if (elem_index && resolved
-                            && info.name != "this"
+                        if (elem_index && resolved && info.name != "this"
                             && !info.name.starts_with(
                                 container_elem_slot_prefix))
                         {
@@ -3849,8 +3846,8 @@ export namespace cg::analysis
                     }
                     // 断链 1/3：透传 getter 链式接收者（p.Get()->Virt()）——
                     // getter 返回 own 模板形参，值即壳实例槽的 pointee，接收者
-                    // 语义 = 壳实例（其槽类型集按构造穿透惯例即 pointee 集）。解到
-                    // 对象表达式递归解读。
+                    // 语义 = 壳实例（其槽类型集按构造穿透惯例即 pointee
+                    // 集）。解到 对象表达式递归解读。
                     if (depth < 4 && !cg::clang::is_null(ref)
                         && cg::clang::kind(ref) == CXCursor_CXXMethod)
                     {
@@ -3971,8 +3968,9 @@ export namespace cg::analysis
              * 形态）。
              *
              * @internal 出参包装类结构判据（is_outparam_wrapper_class，零名字）
-             * 识别类；ctor_param_pos 指出 T** 槽实参位。绑定表按 (fn_key, 壳变量名)
-             * 记 {出参槽, 写回方法名}；写回在 call_site 侧按同名接收者
+             * 识别类；ctor_param_pos 指出 T** 槽实参位。绑定表按 (fn_key,
+             * 壳变量名) 记 {出参槽, 写回方法名}；写回在 call_site
+             * 侧按同名接收者
              * + 写回方法名双校验触发。花括号初始化（InitListExpr 包装不折叠成
              * Constructor 引用的 CallExpr）与 bind() 方法绑定不在本形态——
              * fallback 清单，宁漏勿误。
@@ -4060,7 +4058,8 @@ export namespace cg::analysis
              * @brief 断链 5 判据：静态方法壳工厂调用的 pointee 实参；不适格空。
              *
              * @internal 五闸全 AST 形态（零名字）：①被调是静态 CXXMethod（构造
-             *           走构造穿透既有路径；free 函数工厂的所属类经语义父非记录出
+             *           走构造穿透既有路径；free
+             * 函数工厂的所属类经语义父非记录出
              *           局，非静态成员返回壳不具工厂语义拒）；②所属 pattern 类
              *           是指针式壳（is_pointer_shell_class 单一判据，非模板壳与
              *           无 operator-> 类出局）；③恰一个 T* 形参位
@@ -4073,8 +4072,8 @@ export namespace cg::analysis
              *           实例化记录而误拒；返回标量/异类记录天然出局）；⑤实参按
              *           位对齐：跳过首子函数引用与类型引用（与 ctor_arguments
              *           同一防御——首子函数引用的引用目标即本方法、usr 相同被
-             *           跳过）后取第 pos 个实参。穿透语义与构造穿透同款：T* 位实参
-             *           即 pointee 直接证据，级别随实参形态保级（new 保持
+             *           跳过）后取第 pos 个实参。穿透语义与构造穿透同款：T*
+             * 位实参 即 pointee 直接证据，级别随实参形态保级（new 保持
              *           DirectNew High）。
              */
             [[nodiscard]]
@@ -4125,8 +4124,8 @@ export namespace cg::analysis
              *           判据细节（恰一 T* 位/返回 own 壳）不过时，值槽落点仍是
              *           壳槽（pointee 语义），"按值返回记录"兜底与函数体返回值
              *           追源都可能把壳类型灌进壳槽，整档不发（宁漏勿猜，与
-             *           构造穿透版的壳阻断同款）；非模板壳、free 函数与界外静态方
-             *           法不属本闸（既有路径照走）。
+             *           构造穿透版的壳阻断同款）；非模板壳、free
+             * 函数与界外静态方 法不属本闸（既有路径照走）。
              */
             [[nodiscard]]
             auto is_shell_static_factory_shape(const CXCursor& ref) -> bool
@@ -4220,7 +4219,7 @@ export namespace cg::analysis
                 if (ck != CXCursor_FunctionTemplate
                     && (ck != CXCursor_FunctionDecl
                         || cg::clang::is_null(
-                              cg::clang::specialized_template(callee))))
+                            cg::clang::specialized_template(callee))))
                 {
                     return CXCursor{};
                 }
@@ -4258,8 +4257,7 @@ export namespace cg::analysis
                 {
                     return CXCursor{}; // 恰被调表达式（零值实参）+ 单类型实参
                 }
-                const CXCursor rec =
-                    cg::clang::referenced(type_refs.front());
+                const CXCursor rec = cg::clang::referenced(type_refs.front());
                 if (cg::clang::is_null(rec) || is_invalid_cursor(rec)
                     || !is_record_kind(cg::clang::kind(rec)))
                 {
@@ -4328,8 +4326,8 @@ export namespace cg::analysis
                 const CXCursor ret = cg::clang::result_type_declaration(ref);
                 if (cg::clang::is_null(ret) || is_invalid_cursor(ret)
                     || !cg::clang::equal_cursors(
-                           normalize_record_decl(ret),
-                           normalize_record_decl(iface_decl)))
+                        normalize_record_decl(ret),
+                        normalize_record_decl(iface_decl)))
                 {
                     return CXCursor{};
                 }
@@ -4339,10 +4337,8 @@ export namespace cg::analysis
                     {
                         continue;
                     }
-                    const CXCursor token =
-                        iid_token_template_record(kids[i]);
-                    if (cg::clang::is_null(token)
-                        || is_invalid_cursor(token))
+                    const CXCursor token = iid_token_template_record(kids[i]);
+                    if (cg::clang::is_null(token) || is_invalid_cursor(token))
                     {
                         continue;
                     }
@@ -4642,7 +4638,10 @@ export namespace cg::analysis
                                 && is_pointer_shell_cached(shell_cls))
                             {
                                 shell_copy_source_alias(
-                                    expr, any_ref, owner, var);
+                                    expr,
+                                    any_ref,
+                                    owner,
+                                    var);
                                 return;
                             }
                         }
@@ -4672,8 +4671,9 @@ export namespace cg::analysis
                         }
                         // 断链 1（值槽）：透传 getter 调用的值槽（auto r =
                         // p.Get() / return p.Get()）——返回值即壳实例槽的
-                        // pointee，别名 到接收者槽（函数内传播拷贝），不把 getter
-                        // 模式的 #ret（pattern 字段别名，恒空）当传播边。
+                        // pointee，别名 到接收者槽（函数内传播拷贝），不把
+                        // getter 模式的 #ret（pattern
+                        // 字段别名，恒空）当传播边。
                         if (cg::clang::kind(ref) == CXCursor_CXXMethod)
                         {
                             const CXCursor obj =
@@ -4959,8 +4959,10 @@ export namespace cg::analysis
                 // init_expr_of）。
                 if (const auto init = init_expr_of(c))
                 {
-                    // 拷贝构造/auto 拷贝（容器元素局部拷贝流）：源是容器变量时，
-                    // 局部元素槽继承源元素槽（函数内传播经 "#elem:" 引用拷贝）。
+                    // 拷贝构造/auto
+                    // 拷贝（容器元素局部拷贝流）：源是容器变量时，
+                    // 局部元素槽继承源元素槽（函数内传播经 "#elem:"
+                    // 引用拷贝）。
                     if (elem_slot_registered(ctx.fn_key, var))
                     {
                         CXCursor src_expr = *init;
@@ -5052,8 +5054,7 @@ export namespace cg::analysis
                     // 区分（UNIQUE 键含 source），互不覆写。
                     if (!static_key.empty() || !shell_pointee.empty())
                     {
-                        TypeHintRec decl =
-                            make_hint(ctx.fn_key, var, loc);
+                        TypeHintRec decl = make_hint(ctx.fn_key, var, loc);
                         if (!static_key.empty())
                         {
                             decl.static_types.push_back(static_key);
@@ -5281,7 +5282,8 @@ export namespace cg::analysis
              * @internal RHS 归一到槽别名或待递归表达式：花括号/裸壳构造暴露为
              * 壳构造调用——T* 位实参（shell_pointee_argument）是 pointee 直接证
              * 据，无 T* 位（壳 move/拷贝构造）时恰一实参即源壳（壳到壳搬运：
-             * 源槽类型集已是 pointee 语义，与构造穿透同惯例）；std::move/forward 剥壳；
+             * 源槽类型集已是 pointee
+             * 语义，与构造穿透同惯例）；std::move/forward 剥壳；
              * DeclRef/MemberRef 落槽别名（裸名由调用方 @fnv 编码携带写函数域，
              * @fld/@gvar 自带域）；其余（new 等）交 hint_from_expr 递归保级。
              * 返回 (别名或空串, 别名空时的 hint_from_expr 输入)。
@@ -5397,8 +5399,9 @@ export namespace cg::analysis
              * 初始化列表的成员字段写侧穿透（壳/普通分流）。
              *
              * @internal Holder(IFace* p) : f_{p} / f_{std::move(s)}——字段静态类
-             * 型命中指针式壳（typed_pointer_shell，与构造穿透同一判据）时，RHS 的
-             * pointee 证据落 FieldFlow 行（槽类型集语义 = pointee）；字段非壳走
+             * 型命中指针式壳（typed_pointer_shell，与构造穿透同一判据）时，RHS
+             * 的 pointee 证据落 FieldFlow 行（槽类型集语义 =
+             * pointee）；字段非壳走
              * 普通字段臂（ctor_plain_field_init，槽类型集语义 =
              * 值本身）。libclang 把初始化列表暴露为"引用字段的 MemberRef 游标 +
              * 同级后随初始化表达 式"（实测：引用/const
@@ -5557,8 +5560,7 @@ export namespace cg::analysis
                         return {};
                     }
                     return {
-                        record_key_of_decl(
-                            cg::clang::semantic_parent(lref)),
+                        record_key_of_decl(cg::clang::semantic_parent(lref)),
                         cg::clang::spelling(lhs)};
                 }
                 if (cg::clang::is_null(lref)
@@ -5660,7 +5662,9 @@ export namespace cg::analysis
              * 式壳判据时本臂跳过（壳穿透臂已覆盖同形态，避免重复行）；
              * 双闸任一不满足不发（宁漏勿猜）。
              */
-            void operator_assign_factory_store(const CXCursor& c, const Ctx& ctx)
+            void operator_assign_factory_store(
+                const CXCursor& c,
+                const Ctx&      ctx)
             {
                 if (ctx.fn_key.empty())
                 {
@@ -5730,9 +5734,8 @@ export namespace cg::analysis
                 }
                 TypeHintRec hint = make_hint(owner, var, loc);
                 hint.type_keys.assign(1, key);
-                hint.source = factory == "make_unique"
-                                  ? HintSource::MakeUnique
-                                  : HintSource::MakeShared;
+                hint.source = factory == "make_unique" ? HintSource::MakeUnique
+                                                       : HintSource::MakeShared;
                 hint.confidence = Confidence::Medium;
                 hint.fallback_reason = std::string{source_name(hint.source)};
                 emit_hint(std::move(hint));
@@ -6586,26 +6589,18 @@ export namespace cg::analysis
                 const CXCursorKind ref_kind = cg::clang::kind(ref);
                 rec.is_virtual = ref_kind == CXCursor_CXXMethod
                                  && cg::clang::is_virtual_method(ref);
-                // 限定调用：被调用表达式（第一个 '(' 之前）出现 "::"
-                // （p->Base::f() / Base::f()）。实参里的命名空间限定
-                // （p->f(ns::T{})）不得误判。
-                for (const std::string& tok : cg::clang::token_spellings(c))
-                {
-                    if (tok == "(")
-                    {
-                        break;
-                    }
-                    if (tok == "::")
-                    {
-                        rec.qualified = true;
-                        break;
-                    }
-                }
+                // 限定调用：被调子式的 AST 判据（qualified_callee）；实参里
+                // 的命名空间限定（p->f(qns::make())）判据只看被调子式，
+                // 天然排除。构造调用不走本判据（限定符挂在外层
+                // CXXFunctionalCastExpr，采集面不可达），见 constructor_call_
+                // site 的 token 判据。
+                const std::vector<CXCursor> kids = direct_children(c);
+                rec.qualified = !kids.empty()
+                                && qualified_callee(unwrap_expr(kids.front()));
                 rec.file = site_file;
                 rec.line = static_cast<int>(site.line);
                 rec.col = static_cast<int>(site.column);
 
-                const std::vector<CXCursor> kids = direct_children(c);
                 // 接收者：成员调用的第一子是 MemberRefExpr；describe_receiver
                 // 负责剥智能指针 operator-> 与 this->field。
                 if (!kids.empty())
@@ -6713,8 +6708,8 @@ export namespace cg::analysis
              *
              * @internal callee 用 Constructor 引用自身（method_ref_of 的
              * sig_hash 来自其形参拼写）；解析后 SymbolLookup 的 function_like
-             * 含 Constructor，全局实参->形参传播与出参回填（callee 写 *pp 的构造注入
-             * 形态）天然可用。
+             * 含 Constructor，全局实参->形参传播与出参回填（callee 写 *pp
+             * 的构造注入 形态）天然可用。
              */
             void constructor_call_site(
                 const CXCursor&                  c,
@@ -6795,6 +6790,12 @@ export namespace cg::analysis
                 rec.caller_key = ctx.fn_key;
                 rec.callee = method_ref_of(ref);
                 rec.is_virtual = false;
+                // 限定判定保持 token 判据（第一个 '(' 之前找 "::"）：构造
+                // 调用的限定符游标挂在外层 CXXFunctionalCastExpr 的
+                // children 上，内层 CXXConstructExpr 不可达（C API 无父
+                // 游标链），AST 判据在此面失效；token 判据是唯一覆盖
+                // （含 ::T(a) 全局限定——限定符为全局时不产任何子游标，
+                // AST 任何判据的盲区）。
                 for (const std::string& tok : cg::clang::token_spellings(c))
                 {
                     if (tok == "(")
@@ -6842,13 +6843,15 @@ export namespace cg::analysis
             }
 
             /**
-             * @brief 单个实参的采集层记录：类型集、槽名（含取址槽形态）、返回槽。
+             * @brief
+             * 单个实参的采集层记录：类型集、槽名（含取址槽形态）、返回槽。
              *
              * @internal 取址实参前置：实参是 X.M(...) 且 M 命中取址方法判据
-             * （is_addressof_method；成员链比对 Reject 的对抗形态不激活）时，arg_vars
-             * 记 接收者 X 的槽名（变量名或 @fld 字段描述符）——该实参的语义是 "X
-             * 槽的地址"，交 propagate 的回填触发（callee #p{i} 槽存在
-             * OutParamFlow 行才回填）。取址形态不记返回槽（取址方法的 #ret
+             * （is_addressof_method；成员链比对 Reject
+             * 的对抗形态不激活）时，arg_vars 记 接收者 X 的槽名（变量名或 @fld
+             * 字段描述符）——该实参的语义是 "X 槽的地址"，交 propagate
+             * 的回填触发（callee #p{i} 槽存在 OutParamFlow
+             * 行才回填）。取址形态不记返回槽（取址方法的 #ret
              * 不是值来源）也不记类型（取址结果无记录语义）。
              */
             void fill_arg_records(
@@ -6918,9 +6921,10 @@ export namespace cg::analysis
                         }
                     }
                 }
-                // 断链（handler-flow 解引用穿透）：解引用实参穿透记名——`*p`（p 指向 record 的
-                // 一级指针）作直接调用第 ordinal 实参，且 callee 第 ordinal 形
-                // 参是 record 引用/指针（值形参=切片，闸死）时，arg_vars 记操作
+                // 断链（handler-flow 解引用穿透）：解引用实参穿透记名——`*p`（p
+                // 指向 record 的 一级指针）作直接调用第 ordinal 实参，且 callee
+                // 第 ordinal 形 参是 record
+                // 引用/指针（值形参=切片，闸死）时，arg_vars 记操作
                 // 数槽名（变量裸名 / @fld 字段描述符）。lambda 捕获引用解析回外
                 // 层形参、按首版语义归调用点所在函数域；其余通道留空——该实参
                 // 的证据只能沿槽传播，不产生直接类型（与透传 getter 分支同型的
@@ -6953,10 +6957,12 @@ export namespace cg::analysis
             /**
              * @brief 出参壳写回（v.Set(e) -> 出参槽的 OutParamFlow 行）。
              *
-             * @internal 变量一致判据：接收者名必须命中本函数构造期登记的绑定表，
+             * @internal
+             * 变量一致判据：接收者名必须命中本函数构造期登记的绑定表，
              * 且被调用方法名等于出参包装判据的写回方法名；e 的证据沿用
              * expr_type_keys / ref_var_name / call_result_key
-             * 三件套（无直接类型 时留传播边，由传播（函数内/全局）从源槽取得）。
+             * 三件套（无直接类型
+             * 时留传播边，由传播（函数内/全局）从源槽取得）。
              */
             void outparam_writeback_call(
                 const CallSiteRec& rec,
@@ -7153,24 +7159,26 @@ export namespace cg::analysis
             auto outparam_value_evidence(const CXCursor& value)
                 -> OutValueEvidence
             {
-                OutValueEvidence evidence;
+                OutValueEvidence   evidence;
                 const CXCursor     core = unwrap_expr(strip_casts(value));
-                const CXCursorKind k    = cg::clang::kind(core);
+                const CXCursorKind k = cg::clang::kind(core);
                 if (k == CXCursor_CallExpr)
                 {
                     if (typed_pointer_shell(core))
                     {
-                        const CXCursor pattern = cg::clang::specialized_template(
-                            cg::clang::type_declaration(core));
+                        const CXCursor pattern =
+                            cg::clang::specialized_template(
+                                cg::clang::type_declaration(core));
                         const auto tp = shell_tp_field_slot(pattern);
                         if (!tp.has_value())
                         {
                             return evidence;
                         }
-                        const CXCursor arg = cg::clang::
-                            type_template_arg_declaration(core, tp->tp_index);
-                        if (cg::clang::is_null(arg)
-                            || is_invalid_cursor(arg)
+                        const CXCursor arg =
+                            cg::clang::type_template_arg_declaration(
+                                core,
+                                tp->tp_index);
+                        if (cg::clang::is_null(arg) || is_invalid_cursor(arg)
                             || !is_record_kind(cg::clang::kind(arg)))
                         {
                             return evidence;
@@ -7185,13 +7193,13 @@ export namespace cg::analysis
                         const ReceiverInfo ri = describe_receiver(obj);
                         if (!ri.name.empty() && ri.name != "this")
                         {
-                            const auto idx =
-                                passthrough_pointee_index(obj);
+                            const auto idx = passthrough_pointee_index(obj);
                             if (idx.has_value())
                             {
-                                const CXCursor arg = cg::clang::
-                                    type_template_arg_declaration(
-                                        obj, *idx);
+                                const CXCursor arg =
+                                    cg::clang::type_template_arg_declaration(
+                                        obj,
+                                        *idx);
                                 if (!cg::clang::is_null(arg)
                                     && !is_invalid_cursor(arg)
                                     && is_record_kind(cg::clang::kind(arg)))
@@ -7200,7 +7208,8 @@ export namespace cg::analysis
                                         ri.owner_key.empty()
                                             ? ri.name
                                             : encode_field_slot(
-                                                  ri.owner_key, ri.name);
+                                                  ri.owner_key,
+                                                  ri.name);
                                     evidence.record = arg;
                                 }
                             }
@@ -7210,7 +7219,7 @@ export namespace cg::analysis
                 }
                 if (k == CXCursor_CXXNewExpr)
                 {
-                    evidence.keys   = expr_type_keys(core);
+                    evidence.keys = expr_type_keys(core);
                     evidence.record = cg::clang::pointee_declaration(core);
                     return evidence;
                 }
@@ -7235,7 +7244,7 @@ export namespace cg::analysis
                         return evidence;
                     }
                     evidence.related_var = ref_var_name(core);
-                    evidence.record      = rec;
+                    evidence.record = rec;
                     return evidence;
                 }
                 return evidence;
@@ -7286,7 +7295,8 @@ export namespace cg::analysis
                 {
                     return; // 值与出参两位至少三子（被调表达式 + 两实参）
                 }
-                for (std::size_t k = 0; k < params.size() && k + 1 < kids.size();
+                for (std::size_t k = 0;
+                     k < params.size() && k + 1 < kids.size();
                      ++k)
                 {
                     const CXCursor out_rec =
@@ -7297,21 +7307,20 @@ export namespace cg::analysis
                     }
                     // 出参位实参的槽锚点：fill_arg_records 已按位登记（裸
                     // 变量名 / @fld 字段描述符 / 取址方法接收者）。
-                    if (k >= rec.arg_vars.size()
-                        || rec.arg_vars[k].empty())
+                    if (k >= rec.arg_vars.size() || rec.arg_vars[k].empty())
                     {
                         continue;
                     }
                     const std::string& anchor = rec.arg_vars[k];
                     std::string        target_owner = ctx.fn_key;
-                    std::string        target_var   = anchor;
+                    std::string        target_var = anchor;
                     if (anchor.starts_with(field_slot_prefix))
                     {
                         const auto field = decode_field_slot(anchor);
                         if (field.has_value())
                         {
                             target_owner = field->first;
-                            target_var   = field->second;
+                            target_var = field->second;
                         }
                     }
                     // 值实参扫描：另位实参的 pointee 记录派生自出参记录。
@@ -7323,9 +7332,8 @@ export namespace cg::analysis
                         {
                             continue;
                         }
-                        const OutValueEvidence ev =
-                            outparam_value_evidence(
-                                identity_wrapper_operand(kids[m + 1]));
+                        const OutValueEvidence ev = outparam_value_evidence(
+                            identity_wrapper_operand(kids[m + 1]));
                         if (cg::clang::is_null(ev.record)
                             || is_invalid_cursor(ev.record)
                             || !record_derives_from(ev.record, out_rec))
@@ -7342,8 +7350,8 @@ export namespace cg::analysis
                         TypeHintRec hint =
                             make_hint(target_owner, target_var, loc);
                         hint.type_keys = ev.keys;
-                        hint.source    = HintSource::OutParamFlow;
-                        hint.confidence  = Confidence::Medium;
+                        hint.source = HintSource::OutParamFlow;
+                        hint.confidence = Confidence::Medium;
                         hint.fallback_reason = "out_param_tool";
                         if (ev.keys.empty())
                         {
@@ -7363,9 +7371,8 @@ export namespace cg::analysis
              *           锚点）：零名字参与。
              */
             [[nodiscard]]
-            auto is_iid_token_of(
-                const CXCursor& arg,
-                const CXCursor& param) -> CXCursor
+            auto is_iid_token_of(const CXCursor& arg, const CXCursor& param)
+                -> CXCursor
             {
                 const CXCursor iface = iid_token_template_record(arg);
                 if (cg::clang::is_null(iface) || is_invalid_cursor(iface)
@@ -7424,11 +7431,13 @@ export namespace cg::analysis
                 }
                 // iid 令牌位扫描：命中即得接口记录。
                 CXCursor iface{};
-                for (std::size_t i = 0; i < params.size() && i + 1 < kids.size();
+                for (std::size_t i = 0;
+                     i < params.size() && i + 1 < kids.size();
                      ++i)
                 {
                     iface = is_iid_token_of(
-                        identity_wrapper_operand(kids[i + 1]), params[i]);
+                        identity_wrapper_operand(kids[i + 1]),
+                        params[i]);
                     if (!cg::clang::is_null(iface))
                     {
                         break;
@@ -7444,7 +7453,8 @@ export namespace cg::analysis
                     return; // 界外接口：槽证据无处落
                 }
                 // 出参方向位：双剥成功即可（void** 不限记录）。
-                for (std::size_t j = 0; j < params.size() && j + 1 < kids.size();
+                for (std::size_t j = 0;
+                     j < params.size() && j + 1 < kids.size();
                      ++j)
                 {
                     if (!cg::clang::canonical_pointee_spelling(params[j], 2)
@@ -7463,15 +7473,15 @@ export namespace cg::analysis
                     if (!rec.arg_vars[j].empty())
                     {
                         const std::string& anchor = rec.arg_vars[j];
-                        target_owner              = ctx.fn_key;
-                        target_var                = anchor;
+                        target_owner = ctx.fn_key;
+                        target_var = anchor;
                         if (anchor.starts_with(field_slot_prefix))
                         {
                             const auto field = decode_field_slot(anchor);
                             if (field.has_value())
                             {
                                 target_owner = field->first;
-                                target_var   = field->second;
+                                target_var = field->second;
                             }
                         }
                     }
@@ -7482,10 +7492,10 @@ export namespace cg::analysis
                         // 绝、arg_vars 为空）：零值实参成员调用、结果
                         // canonical 双剥可解、接收者可寻址时锚定接收者槽。
                         // 语义与 X.Put() 同源（接收者槽的地址传入出参位）。
-                        const CXCursor arg = j + 1 < kids.size()
-                                                 ? unwrap_expr(strip_casts(
-                                                       kids[j + 1]))
-                                                 : CXCursor{};
+                        const CXCursor arg =
+                            j + 1 < kids.size()
+                                ? unwrap_expr(strip_casts(kids[j + 1]))
+                                : CXCursor{};
                         if (cg::clang::kind(arg) != CXCursor_CallExpr)
                         {
                             continue;
@@ -7494,8 +7504,9 @@ export namespace cg::analysis
                         if (cg::clang::is_null(m)
                             || cg::clang::kind(m) != CXCursor_CXXMethod
                             || !cg::clang::canonical_result_pointee_spelling(
-                                   m, 2)
-                                   .has_value())
+                                    m,
+                                    2)
+                                    .has_value())
                         {
                             continue;
                         }
@@ -7555,15 +7566,14 @@ export namespace cg::analysis
                     // 待定位）。按"拿不准的形态宁可不开闸"纪律熔断：判定
                     // 判据保留（闸门逻辑零改动），两行不发射，qi 展开与
                     // As 调用形态（recv.As<IFace>(IidOf<IFace>())）的射程
-// 暂缓。根因定位后解除本熔断。
+                    // 暂缓。根因定位后解除本熔断。
                     TypeHintRec face = make_hint(target_owner, target_var, loc);
                     face.static_types = {iface_key};
                     // emit_hint(std::move(face));
-                    TypeHintRec hint =
-                        make_hint(target_owner, target_var, loc);
+                    TypeHintRec hint = make_hint(target_owner, target_var, loc);
                     hint.type_keys = {iface_key};
-                    hint.source    = HintSource::OutParamFlow;
-                    hint.confidence  = Confidence::Medium;
+                    hint.source = HintSource::OutParamFlow;
+                    hint.confidence = Confidence::Medium;
                     hint.fallback_reason = "qi_iid_lock";
                     // emit_hint(std::move(hint));
                 }
@@ -7742,7 +7752,8 @@ export namespace cg::analysis
             /**
              * @brief 容器拷贝赋值（`dst = src;`）：operator= 是运算符调用，
              *        被 is_operator_invocation 滤出用户调用面——本函数在该滤点
-             *        被调用，元素槽继承源元素槽（函数内传播经 "#elem:" 引用拷贝）。
+             *        被调用，元素槽继承源元素槽（函数内传播经 "#elem:"
+             * 引用拷贝）。
              *
              * @internal CXXOperatorCallExpr 的 libclang 形态是 CallExpr 直接子
              * [operator 引用, 接收者, 实参]；成员调用形态首子是 MemberRefExpr
@@ -7847,14 +7858,15 @@ export namespace cg::analysis
             }
 
             /**
-             * @brief 容器元素 range-for 链接行：CXCursor_CXXForRangeStmt 直接子恰
-             *        三个（range 声明 / range 初始化式 / body，fac-llvm 源码级
-             *        定案；kind 225 是独立语句种类，永不命中 ForStmt case——
+             * @brief 容器元素 range-for 链接行：CXCursor_CXXForRangeStmt
+             * 直接子恰 三个（range 声明 / range 初始化式 / body，fac-llvm
+             * 源码级 定案；kind 225 是独立语句种类，永不命中 ForStmt case——
              *        预研 v1 的核心教训）。
              *
              * @internal 链接行 var_name = 循环变量、related_var =
              * "#elem:`<容器引用>`"（裸容器名或 @fld 字段描述符），由 propagate
-             * 的函数内阶段解析拷贝——循环变量槽获得元素槽的写集类型，range-for 位点的
+             * 的函数内阶段解析拷贝——循环变量槽获得元素槽的写集类型，range-for
+             * 位点的
              * 虚调用接收者因此拿到动态证据。容器必须先完成声明期登记（局部/
              * 形参在函数域、字段在记录域），未登记不发行。
              */
@@ -8256,7 +8268,7 @@ export namespace cg::analysis
                 {
                     return;
                 }
-                if (!tokens_form_assignment(cg::clang::token_spellings(node)))
+                if (cg::clang::binary_opcode(node) != CX_BO_Assign)
                 {
                     return;
                 }

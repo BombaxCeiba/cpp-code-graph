@@ -1283,8 +1283,8 @@ namespace
             r,
             record.msbuild_record && !record.msbuild_full_build,
             "--record opts into the wrapped-capture channel");
-        const auto rec_allow = make_inv(
-            {"msbuild", "p", "--record", "--allow-failure"});
+        const auto rec_allow =
+            make_inv({"msbuild", "p", "--record", "--allow-failure"});
         cg::test::check(
             r,
             rec_allow.msbuild_record && rec_allow.msbuild_allow_failure,
@@ -2130,9 +2130,9 @@ namespace
         try
         {
             cg::cli::detail::open_store_create(msbuild_inv, rebuilt);
-            msbuild_recovered =
-                rebuilt.has_value()
-                && rebuilt->meta("schema_version").value_or("") == "16";
+            msbuild_recovered = rebuilt.has_value()
+                                && rebuilt->meta("schema_version").value_or("")
+                                       == std::to_string(db::schema_version);
         }
         catch (const std::exception&)
         {
@@ -2140,8 +2140,7 @@ namespace
         cg::test::check(
             r,
             msbuild_recovered,
-            "ccg msbuild recreates a schema-mismatched db by "
-            "default (fresh schema_version 16)");
+            "ccg msbuild recreates a schema-mismatched db by default");
         // 重建后再老化一次：index 无 --force 必须拒绝（既有契约不回退）。
         {
             db::GraphStore store{schema_db.string()};
@@ -3257,8 +3256,8 @@ namespace
             zero.has_value() && *zero > 400'000,
             "epoch zero parses with a huge age");
         // 合法：写入口径自产时间戳，解析到的年龄应当为 0。
-        const auto now_age = hk::iso8601_age_hours(
-            cg::util::cstd::iso8601_utc_timestamp());
+        const auto now_age =
+            hk::iso8601_age_hours(cg::util::cstd::iso8601_utc_timestamp());
         cg::test::check(
             r,
             now_age.has_value() && *now_age == 0,
@@ -3270,7 +3269,9 @@ namespace
             "leap day is a real date");
         // 日历上不存在的日子（from_stream 规范化后必然对不上原串）。
         cg::test::check(
-            r, reject("2026-02-30T10:30:00Z"), "Feb 30 is rejected");
+            r,
+            reject("2026-02-30T10:30:00Z"),
+            "Feb 30 is rejected");
         cg::test::check(
             r,
             reject("2026-02-29T10:30:00Z"),
@@ -3280,16 +3281,26 @@ namespace
             reject("2100-02-29T00:00:00Z"),
             "Feb 29 of a century non-leap year is rejected");
         cg::test::check(
-            r, reject("2026-04-31T00:00:00Z"), "Apr 31 is rejected");
+            r,
+            reject("2026-04-31T00:00:00Z"),
+            "Apr 31 is rejected");
         cg::test::check(
-            r, reject("2026-11-31T00:00:00Z"), "Nov 31 is rejected");
+            r,
+            reject("2026-11-31T00:00:00Z"),
+            "Nov 31 is rejected");
         // 字段值域与缺字段。
         cg::test::check(
-            r, reject("2026-13-01T00:00:00Z"), "month 13 is rejected");
+            r,
+            reject("2026-13-01T00:00:00Z"),
+            "month 13 is rejected");
         cg::test::check(
-            r, reject("2026-11-14T24:00:00Z"), "hour 24 is rejected");
+            r,
+            reject("2026-11-14T24:00:00Z"),
+            "hour 24 is rejected");
         cg::test::check(
-            r, reject("2026-11-14T10:60:00Z"), "minute 60 is rejected");
+            r,
+            reject("2026-11-14T10:60:00Z"),
+            "minute 60 is rejected");
         cg::test::check(
             r,
             reject("2026-11-14T10:30Z"),
@@ -3307,8 +3318,7 @@ namespace
             r,
             reject("1969-12-31T23:59:59Z"),
             "pre-1970 stamps are rejected");
-        cg::test::check(
-            r, reject("not a timestamp"), "garbage is rejected");
+        cg::test::check(r, reject("not a timestamp"), "garbage is rejected");
     }
 
     void hook_inprocess_queries(R& r)
@@ -3573,6 +3583,172 @@ namespace
     const cg::test::Registrar reg_nocdb{
         "cli.index.compile_db_required",
         &compile_db_required};
+
+    /**
+     * @brief cl 方言纯头单元语料：路由期 warning 披露 + 失败形态不变。
+     *
+     * 语料整库零命名模块、cl 风格命令行、消费者源文本书写
+     * `import "x.hpp";`——cl 模式路由无可路由单元提前返回，头单元降
+     * 级通道（活在自建链里）不进场，消费者对逐字重放的 argv 解析必
+     * 败。用户裁决：不修复该形态，索引开始前以 warning 讲清场景、后
+     * 果与涉及的 TU，并披露 db 方言（编译数据库路线）已支持同形态的
+     * 分叉。两层断言：warning 在路由期冒出且只点名携带头单元 import
+     * 的 TU；索引行为与既有现状一致（仅消费者 TU 一条经典
+     * parse-failed，非导入的经典 cl 条目照常成功，零新失败类）。
+     */
+    void cl_route_pure_header_unit_corpus_warning(R& r)
+    {
+        namespace fsn = std::filesystem;
+        cg::test::ScratchDir scratch{
+            fsn::absolute(fsn::temp_directory_path() / "ccg-cli-cl-hu")};
+        const fsn::path& base = scratch.base;
+
+        // 语料：纯头文件 + 两个消费者（import 它的 / 纯经典的），零
+        // 命名模块单元——警告必须只点名前者。
+        const fsn::path tree = base / "tree";
+        scratch.put(
+            tree / "math_api.hpp",
+            "inline int math_answer() { return 42; }\n");
+        scratch.put(
+            tree / "consumer.cpp",
+            "import \"math_api.hpp\";\n"
+            "int use_math() { return math_answer(); }\n");
+        scratch.put(
+            tree / "plain.cpp",
+            "#include \"math_api.hpp\"\n"
+            "int use_plain() { return math_answer(); }\n");
+
+        // cl 方言编译数据库（MSVC 风格命令行：/c、/EHsc、/std:、/I）。
+        std::error_code   abs_ec;
+        const fsn::path   abs = fsn::absolute(tree, abs_ec).lexically_normal();
+        const std::string t = cg::util::norm_path(abs.generic_string());
+        scratch.put(
+            tree / "compile_commands.json",
+            std::format(
+                "[\n"
+                " {{\"directory\": \"{0}\", \"arguments\": [\"clang-cl\", "
+                "\"--driver-mode=cl\", \"/c\", \"/EHsc\", \"/std:c++20\", "
+                "\"/I\", \"{0}\", \"{0}/consumer.cpp\"], \"file\": "
+                "\"{0}/consumer.cpp\"}},\n"
+                " {{\"directory\": \"{0}\", \"arguments\": [\"clang-cl\", "
+                "\"--driver-mode=cl\", \"/c\", \"/EHsc\", \"/std:c++20\", "
+                "\"/I\", \"{0}\", \"{0}/plain.cpp\"], \"file\": "
+                "\"{0}/plain.cpp\"}}\n"
+                "]\n",
+                t));
+
+        // 路由经 CLI 主干（真实 `ccg index` 的同一条路）；stderr 由 fd
+        // 捕获——warning 必须在索引开始前（路由期）冒出来。
+        const std::string   cdb = (abs / "compile_commands.json").string();
+        const std::string   root = t;
+        const std::string   db_abs = (base / "ccg.db").generic_string();
+        cg::cli::Invocation inv = make_inv(
+            {"index",
+             root,
+             "--compile-commands",
+             cdb,
+             "--config",
+             "cl-headerunit"});
+        inv.db_path = db_abs;
+        std::vector<cg::clang::CompileCommand> commands =
+            cg::clang::load(cdb, std::vector<std::string>{root});
+        const fsn::path                   cap = base / "stderr.txt";
+        cg::cli::detail::ResolvedCommands resolved;
+        {
+            FdRedirect redir{2, cap, /*readable=*/false};
+            resolved = cg::cli::detail::resolve_loaded_commands(
+                inv,
+                {root},
+                std::move(commands),
+                {},
+                cdb);
+        }
+        std::string captured;
+        {
+            std::ifstream in{cap, std::ios::binary};
+            captured.assign(
+                std::istreambuf_iterator<char>{in},
+                std::istreambuf_iterator<char>{});
+        }
+        cg::test::check(
+            r,
+            captured.find("ccg: warning:") != std::string::npos,
+            "[cl-headerunit] the cl route warns for a pure header-unit "
+            "corpus");
+        cg::test::check(
+            r,
+            captured.find("header-unit imports") != std::string::npos
+                && captured.find("will fail to parse") != std::string::npos,
+            "[cl-headerunit] the warning states scenario and consequence");
+        cg::test::check(
+            r,
+            captured.find("math_api.hpp") != std::string::npos,
+            "[cl-headerunit] the warning shows the actual detected "
+            "header spelling, not a fixed placeholder");
+        cg::test::check(
+            r,
+            captured.find("compile-database route") != std::string::npos,
+            "[cl-headerunit] the warning discloses the dialect divergence");
+        cg::test::check(
+            r,
+            captured.find(t + "/consumer.cpp") != std::string::npos,
+            "[cl-headerunit] the warning names the affected TU");
+        cg::test::check(
+            r,
+            captured.find("plain.cpp") == std::string::npos,
+            "[cl-headerunit] the warning leaves non-importing cl entries "
+            "unnamed");
+
+        // 行为不变（warning 只加可观测性）：仅消费者 TU 一条经典
+        // parse-failed，纯经典 cl 条目照常成功，失败类聚合零新类别。
+        db::GraphStore          store{db_abs};
+        cg::graph::IndexOptions opt;
+        opt.roots = {root};
+        opt.compile_db_path = cdb;
+        opt.db_path = db_abs;
+        opt.progress = false;
+        cg::graph::Indexer            indexer{store, std::move(opt)};
+        const cg::graph::IndexSummary summary = indexer.run(resolved.commands);
+        cg::test::check(
+            r,
+            summary.tus == 2 && summary.failed == 1,
+            std::format(
+                "[cl-headerunit] exactly the importing TU fails (tus {}, "
+                "failed {})",
+                summary.tus,
+                summary.failed));
+        cg::test::check(
+            r,
+            summary.failure_classes.size() == 1
+                && summary.failure_classes[0].first == "parse-failed"
+                && summary.failure_classes[0].second == 1,
+            std::format(
+                "[cl-headerunit] the failure keeps its classic parse-failed "
+                "class (aggregate size {}, head '{}')",
+                summary.failure_classes.size(),
+                summary.failure_classes.empty()
+                    ? std::string{"<none>"}
+                    : summary.failure_classes.front().first));
+        // 失败文本与既有现状同形：引擎对未知头单元的原始报错（与
+        // 编译数据库路线修复前的失败形态基线同一诊断家族）。
+        const std::vector<db::FailureRow> failures = db::all_failures(store);
+        cg::test::check(
+            r,
+            failures.size() == 1
+                && failures.front().failure_text.find("header unit")
+                       != std::string::npos,
+            std::format(
+                "[cl-headerunit] one failure row with the engine's raw "
+                "header-unit diagnostic (rows {}, text head '{}')",
+                failures.size(),
+                failures.empty()
+                    ? std::string{"<none>"}
+                    : failures.front().failure_text.substr(0, 80)));
+    }
+
+    const cg::test::Registrar reg_cl_headerunit{
+        "cli.index.cl_route.pure_header_unit_corpus_warning",
+        &cl_route_pure_header_unit_corpus_warning};
     const cg::test::Registrar reg_hook_budget{
         "cli.hook.update_budget",
         &hook_update_budget};
@@ -3829,8 +4005,7 @@ namespace
             f.kind = "method";
             f.qualified =
                 "Acme::Core::PluginGateway::ScriptHost::PythonResult::Check";
-            f.parent =
-                "Acme::Core::PluginGateway::ScriptHost::PythonResult";
+            f.parent = "Acme::Core::PluginGateway::ScriptHost::PythonResult";
             f.params = {};
             f.rel_file = "acme/Core/PluginGateway/src/ScriptHost.cpp";
             f.line = 328;
@@ -3905,8 +4080,7 @@ namespace
             // 调用者喂进按 key 推导的限定形态（全局函数的
             // key 父链为空，显示名就是裸名）。
             c1.qualified = "AcmeMakeAcmeGuid";
-            c1.first_rel_file =
-                "acme/Core/PluginGateway/src/IAcmeBase.cpp";
+            c1.first_rel_file = "acme/Core/PluginGateway/src/IAcmeBase.cpp";
             c1.first_line = 29;
             c1.occ = 4;
             hk::InjectionCaller c2;
@@ -3918,9 +4092,8 @@ namespace
             c2.first_line = 22;
             c2.occ = 2;
             hk::InjectionCaller c3;
-            c3.qualified =
-                "Acme::Core::PluginGateway::ComponentFactory::"
-                "FindInterface";
+            c3.qualified = "Acme::Core::PluginGateway::ComponentFactory::"
+                           "FindInterface";
             c3.first_rel_file =
                 "acme/Core/PluginGateway/src/ComponentFactory.cpp";
             c3.first_line = 60;
@@ -3930,7 +4103,8 @@ namespace
             f.dispatch.sites = 8;
             f.dispatch.resolved = 0;
             hk::InjectionCandidate top;
-            top.display_source = "Acme::Core::Exceptions::PythonException::what";
+            top.display_source =
+                "Acme::Core::Exceptions::PythonException::what";
             top.loc = "acme/Core/Exceptions/src/PythonException.cpp:144";
             top.confidence = "fallback";
             top.reason = "no_dynamic_type_evidence";

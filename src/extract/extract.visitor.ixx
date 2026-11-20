@@ -432,85 +432,330 @@ export namespace cg::extract
         }
 
         /**
-         * @brief constexpr 检测。
+         * @brief constexpr 检测：AST 重打印文本的声明头里找说明符。
          *
          * @internal
-         * 本 libclang 构建没有 clang_Cursor_isConstexpr 谓词，但关键字总是拼写
-         * 在声明的前导说明符里——声明起点与被声明名之间的原文。词匹配前先剥
-         * 注释。空前缀可断定为否：区间从被声明名开始（类内无说明符的构造/
-         * 析构/运算符），声明没有的说明符不可能含关键字——函数体内的
-         * constexpr 局部量不得标记该符号。只有不确定的前缀（宏生成的声明、
-         * 跨文件区间、缓冲不可用——或原文含 '#'）才回退到精确 token 扫描。
-         * 整区间 token 扫描其余场合一概不用：clang_tokenize 每次调用都从文件
-         * 顶部重新词法化，对多定义的文件是平方级（实测：一个 SWIG 生成的
-         * 翻译单元把 68 秒访问时间的 99% 花在 6.6 千次这样的扫描上——每次
-         * 10 毫秒、对着一个 3.8 MB 的文件）。
+         * 本 libclang 构建没有 clang_Cursor_isConstexpr 谓词（类型限定符、
+         * 存储类、求值结果族都与说明符正交），只能看文本——但看的必须是
+         * 编译器重建的文本（clang_getCursorPrettyPrinted），不是源文件
+         * 原文：打印走语义树，宏已展开。旧的前缀直读源文本判据有两个实
+         * 测缺陷——说明符由宏生成（#define CX constexpr）时前缀里只有宏
+         * 别名，漏报；名字由宏生成时前缀区间不可信，旧回退把整声明
+         * extent 词法化，函数体内的 constexpr 局部量污染判定，非
+         * constexpr 函数误报。
+         *
+         * 三道精化缺一不可：先剥字符串/字符字面量（字面量内容恰含
+         * "constexpr" 字样不是说明符），再把说明符之前的两类花括号组按
+         * 配对整组跳过（见下），最后截到函数体起点（函数定义的打印含
+         * 整个函数体——体内局部量的声明头不得污染本符号；分号是纯声明
+         * 尾的等价截断点）。词匹配按标识符边界分词（is_constexpr_x 之类
+         * 的标识符不命中）。单遍扫描、零中间拷贝，也彻底不经
+         * clang_tokenize——它每次调用都从文件顶部重新词法化，对多定义
+         * 文件是平方级（一个 SWIG 生成的翻译单元曾把 68 秒访问时间的
+         * 99% 花在 6.6 千次这样的扫描上）。
+         *
+         * 说明符之前的两类花括号不是函数体，按语境配对跳过：requires
+         * 词之后的首个花括号组是复合要求的体（`requires requires
+         * { ... }` 的体在说明符之前，stdexec 生态 asioexec/
+         * completion_token.hpp 的 query/prefer/require/dispatch/post/
+         * defer 六处为实测同型形态）；尖括号深度大于零（模板形参表）内
+         * 的花括号组是类类型非类型模板参数的花括号默认值
+         * （`T V = T{}`）。跳过标记一次性——下一个花括号回到截断语义；
+         * 组内字符串照剥、嵌套花括号计数。尖括号计数在运算符名
+         * （operator<、operator<<）上会失衡，失衡的退化方向只是"函数体
+         * 被整组跳过"：配对跳过不读组内内容，体内局部量同样不可见，
+         * 误配至多漏报、不产生体内污染误报。
+         *
+         * 例外分支——显式 defaulted 成员：打印器对 "= default" 分支结构
+         * 性丢弃 constexpr 说明符（各 PrintingPolicy 开关下均如此；
+         * "= delete" 与常规函数保留），打印头判据对
+         * `constexpr f() = default` 形态漏报。defaulted 声明的说明符
+         * 只能回到源文本前缀直读（文件缓冲字节扫描，零 tokenize，无
+         * 病态面；词匹配前剥注释与字符串/字符字面量——前缀起点含前导
+         * 属性，属性实参字符串恰含说明符本词不是说明符）。前缀不可得
+         * （宏生成的 defaulted）按未写处理——已披露的漏报盲区，不得引
+         * tokenize 回退（病态面拆除是本判据的核心收益）。另一已披露
+         * 残余盲区：打印器对属性实参里带转义引号的字符串会丢转义
+         * （"a\"constexpr\"b" 打印成 "a"constexpr"b"，字符串边界在打印
+         * 层已坏）——文本判据的固有税，语料零命中。
          */
         [[nodiscard]]
         inline auto is_constexpr_decl(const CXCursor& c) -> bool
         {
+            const std::string printed = cg::clang::pretty_printed_decl(c);
+            const std::size_t size = printed.size();
+            bool              in_string = false;
+            bool              in_char = false;
+            bool              escaped = false;
+            // 说明符之前的两类花括号语境：requires 词之后的首个花括号组
+            // 是复合要求的体；尖括号深度大于零（模板形参表）内的花括号
+            // 组是类类型 NTTP 的花括号默认值。两者都不是函数体。
+            bool        after_requires = false;
+            int         angle_depth = 0;
+            std::string word;
+            const auto  word_hits = [&word]
+            { return word == "constexpr" || word == "consteval"; };
+            // 词边界收口：说明符命中即真；requires 词开启一次性跳过语境。
+            const auto word_end = [&]()
+            {
+                if (word_hits())
+                {
+                    return true;
+                }
+                if (word == "requires")
+                {
+                    after_requires = true;
+                }
+                word.clear();
+                return false;
+            };
+            std::size_t i = 0;
+            while (i < size)
+            {
+                const char ch = printed[i];
+                if (in_string || in_char)
+                {
+                    if (escaped)
+                    {
+                        escaped = false;
+                    }
+                    else if (ch == '\\')
+                    {
+                        escaped = true;
+                    }
+                    else if (in_string && ch == '"')
+                    {
+                        in_string = false;
+                    }
+                    else if (in_char && ch == '\'')
+                    {
+                        in_char = false;
+                    }
+                    ++i;
+                    continue;
+                }
+                if (ch == '"' || ch == '\'')
+                {
+                    if (word_end())
+                    {
+                        return true;
+                    }
+                    in_string = ch == '"';
+                    in_char = ch == '\'';
+                    ++i;
+                    continue;
+                }
+                if (ch == '{')
+                {
+                    if (!after_requires && angle_depth == 0)
+                    {
+                        break; // 函数体起点：截断
+                    }
+                    if (word_end())
+                    {
+                        return true;
+                    }
+                    // requirement 体 / 花括号默认值：配对整组跳过（组内
+                    // 字符串照剥、嵌套花括号计数；组不闭合按截断处理）。
+                    int  depth = 1;
+                    bool str = false;
+                    bool chr = false;
+                    bool esc = false;
+                    while (++i < size)
+                    {
+                        const char g = printed[i];
+                        if (str || chr)
+                        {
+                            if (esc)
+                            {
+                                esc = false;
+                            }
+                            else if (g == '\\')
+                            {
+                                esc = true;
+                            }
+                            else if (str && g == '"')
+                            {
+                                str = false;
+                            }
+                            else if (chr && g == '\'')
+                            {
+                                chr = false;
+                            }
+                            continue;
+                        }
+                        if (g == '"')
+                        {
+                            str = true;
+                        }
+                        else if (g == '\'')
+                        {
+                            chr = true;
+                        }
+                        else if (g == '{')
+                        {
+                            ++depth;
+                        }
+                        else if (g == '}' && --depth == 0)
+                        {
+                            break;
+                        }
+                    }
+                    after_requires = false;
+                    word.clear();
+                    ++i;
+                    continue;
+                }
+                if (ch == ';')
+                {
+                    break;
+                }
+                if (ch == '<')
+                {
+                    if (word_end())
+                    {
+                        return true;
+                    }
+                    ++angle_depth;
+                    ++i;
+                    continue;
+                }
+                if (ch == '>')
+                {
+                    if (word_end())
+                    {
+                        return true;
+                    }
+                    if (angle_depth > 0)
+                    {
+                        --angle_depth;
+                    }
+                    ++i;
+                    continue;
+                }
+                const bool ident = (ch >= 'a' && ch <= 'z')
+                                   || (ch >= 'A' && ch <= 'Z')
+                                   || (ch >= '0' && ch <= '9') || ch == '_';
+                if (ident)
+                {
+                    word.push_back(ch);
+                }
+                else if (word_end())
+                {
+                    return true;
+                }
+                ++i;
+            }
+            if (word_hits())
+            {
+                return true;
+            }
+            if (!cg::clang::is_defaulted_method(c))
+            {
+                return false;
+            }
+            // defaulted 打印丢说明符：回到源前缀直读（词匹配前剥注释与
+            // 字符串/字符字面量）。
             const std::optional<std::string> prefix =
                 cg::clang::specifier_prefix_text(c);
-            if (prefix.has_value() && prefix->find('#') == std::string::npos)
+            if (!prefix.has_value())
             {
-                bool        line_comment = false;
-                bool        block_comment = false;
-                std::string word;
-                for (std::size_t i = 0; i < prefix->size(); ++i)
+                return false;
+            }
+            bool        line_comment = false;
+            bool        block_comment = false;
+            bool        p_in_string = false;
+            bool        p_in_char = false;
+            bool        p_escaped = false;
+            std::string prefix_word;
+            const auto  prefix_hits = [&prefix_word]
+            {
+                return prefix_word == "constexpr" || prefix_word == "consteval";
+            };
+            for (std::size_t j = 0; j < prefix->size(); ++j)
+            {
+                const char ch = (*prefix)[j];
+                if (p_in_string || p_in_char)
                 {
-                    const char ch = (*prefix)[i];
-                    if (line_comment)
+                    if (p_escaped)
                     {
-                        if (ch == '\n')
-                        {
-                            line_comment = false;
-                        }
+                        p_escaped = false;
+                    }
+                    else if (ch == '\\')
+                    {
+                        p_escaped = true;
+                    }
+                    else if (p_in_string && ch == '"')
+                    {
+                        p_in_string = false;
+                    }
+                    else if (p_in_char && ch == '\'')
+                    {
+                        p_in_char = false;
+                    }
+                    continue;
+                }
+                if (line_comment)
+                {
+                    if (ch == '\n')
+                    {
+                        line_comment = false;
+                    }
+                    continue;
+                }
+                if (block_comment)
+                {
+                    if (ch == '*' && j + 1 < prefix->size()
+                        && (*prefix)[j + 1] == '/')
+                    {
+                        block_comment = false;
+                        ++j;
+                    }
+                    continue;
+                }
+                if (ch == '/' && j + 1 < prefix->size())
+                {
+                    if ((*prefix)[j + 1] == '/')
+                    {
+                        line_comment = true;
+                        ++j;
                         continue;
                     }
-                    if (block_comment)
+                    if ((*prefix)[j + 1] == '*')
                     {
-                        if (ch == '*' && i + 1 < prefix->size()
-                            && (*prefix)[i + 1] == '/')
-                        {
-                            block_comment = false;
-                            ++i;
-                        }
+                        block_comment = true;
+                        ++j;
                         continue;
-                    }
-                    if (ch == '/' && i + 1 < prefix->size())
-                    {
-                        if ((*prefix)[i + 1] == '/')
-                        {
-                            line_comment = true;
-                            ++i;
-                            continue;
-                        }
-                        if ((*prefix)[i + 1] == '*')
-                        {
-                            block_comment = true;
-                            ++i;
-                            continue;
-                        }
-                    }
-                    const bool ident = (ch >= 'a' && ch <= 'z')
-                                       || (ch >= 'A' && ch <= 'Z')
-                                       || (ch >= '0' && ch <= '9') || ch == '_';
-                    if (ident)
-                    {
-                        word.push_back(ch);
-                    }
-                    else
-                    {
-                        if (word == "constexpr" || word == "consteval")
-                        {
-                            return true;
-                        }
-                        word.clear();
                     }
                 }
-                return word == "constexpr" || word == "consteval";
+                if (ch == '"' || ch == '\'')
+                {
+                    if (prefix_hits())
+                    {
+                        return true;
+                    }
+                    prefix_word.clear();
+                    p_in_string = ch == '"';
+                    p_in_char = ch == '\'';
+                    continue;
+                }
+                const bool ident = (ch >= 'a' && ch <= 'z')
+                                   || (ch >= 'A' && ch <= 'Z')
+                                   || (ch >= '0' && ch <= '9') || ch == '_';
+                if (ident)
+                {
+                    prefix_word.push_back(ch);
+                }
+                else if (prefix_hits())
+                {
+                    return true;
+                }
+                else
+                {
+                    prefix_word.clear();
+                }
             }
-            return cg::clang::has_token_spelling(c, {"constexpr", "consteval"});
+            return prefix_hits();
         }
 
         /**
@@ -633,9 +878,8 @@ export namespace cg::extract
                     {
                         out.symbols.push_back(p.symbols[i]);
                         out.symbol_regions.push_back(
-                            i < p.symbol_regions.size()
-                                ? p.symbol_regions[i]
-                                : p.file);
+                            i < p.symbol_regions.size() ? p.symbol_regions[i]
+                                                        : p.file);
                     }
                 }
                 for (const EdgeRec& e : p.edges)
@@ -657,8 +901,7 @@ export namespace cg::extract
              * @internal 卫生计数器的头缓存按文件拆账（缓存关闭时只走聚合
              * 计数，零额外开销）：external=false 记 external_dropped。
              */
-            void note_drop(const cg::clang::SourceLocation& loc,
-                           bool                             oper)
+            void note_drop(const cg::clang::SourceLocation& loc, bool oper)
             {
                 if (oper)
                 {
@@ -714,14 +957,12 @@ export namespace cg::extract
              */
             bool skip_cached_file(const CXCursor& c)
             {
-                const cg::clang::SourceLocation loc =
-                    cg::clang::location(c);
-                const std::string raw{loc.file};
+                const cg::clang::SourceLocation loc = cg::clang::location(c);
+                const std::string               raw{loc.file};
                 const auto [it, fresh] = file_skip_.try_emplace(raw);
                 if (fresh)
                 {
-                    it->second.normed =
-                        raw.empty() ? std::string{} : norm(loc);
+                    it->second.normed = raw.empty() ? std::string{} : norm(loc);
                     if (raw.empty() || it->second.normed == out.main_file
                         || bridge_ == nullptr)
                     {
