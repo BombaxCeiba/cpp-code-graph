@@ -1220,6 +1220,86 @@ namespace
         }
     }
 
+    /**
+     * @brief 转型声称证据：接收者指针来源未知时，
+     *        reinterpret_cast / static_cast / C 样式转型的目标类型直接接
+     *        受为接收者槽证据（接口声称展开成实现族并集）；槽有更强证据
+     *        （直连 new / 入参扇投）时声称弃用。
+     */
+    void cast_claim_target_evidence(R& r)
+    {
+        db::GraphStore store{":memory:"};
+        (void)index_fixture(store, "cast_target");
+        const std::vector<DEdge> edges = dispatch_edges(store);
+        // 三种转型各一个锚点：唯一实现族经声称展开收敛 0.7。
+        for (const std::string_view caller :
+             {"reinterpret_claim", "static_claim", "cstyle_claim"})
+        {
+            const DEdge* e = find_edge(edges, caller, "SwigDirector_IFace::emit");
+            cg::test::check(
+                r,
+                e != nullptr,
+                "cast claim reaches the director implementation");
+            cg::test::check(
+                r,
+                e != nullptr && e->confidence == 0.7,
+                "cast claim converges to the director implementation (0.7)");
+            const auto site = site_named(store, caller, "emit");
+            cg::test::check(
+                r,
+                site.has_value() && site->resolved,
+                "cast claim site is resolved");
+            cg::test::check(
+                r,
+                site.has_value()
+                    && site->candidates.find("cast_target")
+                           != std::string::npos,
+                "candidate reason discloses the cast claim origin");
+        }
+        // 采集层：声称行独立落库（source=CastTarget，不与别名行混流）。
+        cg::test::check(
+            r,
+            hint_has(
+                store,
+                static_cast<int>(cg::analysis::HintSource::CastTarget),
+                "IFace"),
+            "cast_target hint row records the claimed interface");
+        // 槽空才填（直连 new 在场）：声称不把 1.0 直连稀释成 0.7。
+        const DEdge* direct =
+            find_edge(edges, "direct_new_wins", "SwigDirector_IFace::emit");
+        cg::test::check(
+            r,
+            direct != nullptr && direct->confidence == 1.0,
+            "direct new evidence is never diluted by a cast claim");
+        // 槽空才填（入参扇投在场）：单候选 0.7，声称不得并出第二实现。
+        const DEdge* fanin = find_edge(edges, "fanin_guard", "PortA::open");
+        cg::test::check(
+            r,
+            fanin != nullptr && fanin->confidence == 0.7,
+            "param fan-in evidence keeps its single converged target (0.7)");
+        bool fanin_polluted = false;
+        for (const DEdge& e : edges)
+        {
+            if (e.src_name == "fanin_guard"
+                && e.dst_name == "PortB::open")
+            {
+                fanin_polluted = true;
+            }
+        }
+        cg::test::check(
+            r,
+            !fanin_polluted,
+            "cast claim never overrides param fan-in with extra candidates");
+        // 多声称并集：诚实披露双候选 0.4，绝不伪装唯一。
+        const DEdge* claim_a = find_edge(edges, "two_claims", "PortA::open");
+        const DEdge* claim_b = find_edge(edges, "two_claims", "PortB::open");
+        cg::test::check(
+            r,
+            claim_a != nullptr && claim_a->confidence == 0.4
+                && claim_b != nullptr && claim_b->confidence == 0.4,
+            "two divergent claims disclose both candidates at low (0.4)");
+    }
+
     /** @brief 依赖接收者的成员调用不建具名 calls 边（幻觉边修正）。 */
     void dependent_member_calls(R& r)
     {
@@ -3068,6 +3148,9 @@ const cg::test::Registrar reg_cast_wrap{
 const cg::test::Registrar reg_cstyle_cast{
     "analysis.cast.cstyle_operand_evidence",
     &cstyle_cast_evidence};
+const cg::test::Registrar reg_cast_claim_target{
+    "analysis.cast.claim_target_evidence",
+    &cast_claim_target_evidence};
 const cg::test::Registrar reg_depcall{
     "analysis.calls.dependent_receiver",
     &dependent_member_calls};
@@ -3973,7 +4056,7 @@ const cg::test::Registrar reg_indirect_instance_flow{
     "analysis.indirect.instance_flow",
     &indirect_instance_flow};
 
-// 归因定案：界外字段槽的"CLI 零落"=双重根因——(a) 实例化体里 lambda→
+// 界外字段槽的"CLI 零落"=双重根因——(a) 实例化体里 lambda→
 // 函数指针隐式转换被显式化（转换 CallExpr 三层包裹，探针实证），
 // function_target_key 剥不到（def 零产生）；(b) def 修复后消费侧
 // heads 可空 → edges.site_file=0 触发 FK（整事务回滚）。修复=转换
@@ -5272,6 +5355,174 @@ void snapshot_roundtrip_equivalence(R& r)
 const cg::test::Registrar reg_snapshot_roundtrip{
     "analysis.snapshot_roundtrip_equivalence",
     &snapshot_roundtrip_equivalence};
+
+/**
+ * @brief 跨 TU 声称链的增量等价：干净 TU 里的转型声称槽被脏上游卷入
+ *        增量闭包复位重算后，声称证据不丢。
+ *
+ * @internal 双 TU 语料（cast_claim_chain）：声称槽在 main.cpp（全程干
+ *           净），返回源与全局对象在 b.cpp。基准轮全表装载并装配快照；
+ *           脏批改 b.cpp 指纹（模拟上游 TU 编辑）后恢复——增量闭包沿
+ *           #ret→raw→p（别名链）与 #ret→q（返回链）把干净文件的声称槽
+ *           卷入复位重算，终态必须与全量表读路径逐项相等（缺陷形态：
+ *           声称填充是 finalize 的单向注入而非传播边，行流跳过保留槽后
+ *           缓冲无注入源，槽整槽丢失回退空）。from_warm 断言钉住"槽确实
+ *           进了闭包重算"——闭包没卷入时该面会退化为 warm 直通（测试空
+ *           转）。
+ */
+void cast_claim_incremental_equivalence(R& r)
+{
+    db::GraphStore store{":memory:"};
+    const cg::graph::IndexSummary sum =
+        index_fixture(store, "cast_claim_chain");
+    cg::test::check(r, sum.failed == 0, "cast_claim_chain indexes cleanly");
+    if (sum.failed != 0)
+    {
+        return;
+    }
+    // 双 TU 文件定位：main.cpp（声称槽所在，全程干净）与 b.cpp（上游）。
+    std::optional<cg::db::FileId> clean_tu;
+    std::optional<cg::db::FileId> upstream_tu;
+    for (const cg::db::FileRow& f : cg::db::all_files(store))
+    {
+        if (f.path.ends_with("main.cpp"))
+        {
+            clean_tu = f.id;
+        }
+        else if (f.path.ends_with("b.cpp"))
+        {
+            upstream_tu = f.id;
+        }
+    }
+    cg::test::check(
+        r,
+        clean_tu.has_value() && upstream_tu.has_value(),
+        "fixture exposes both translation units");
+    if (!clean_tu.has_value() || !upstream_tu.has_value())
+    {
+        return;
+    }
+    // 基准：全表装载增量 + 快照装配（模拟 dispatch_commit 写侧）。
+    std::unordered_set<cg::db::FileId> no_dirty;
+    cg::analysis::IncrementalPlan      plan_a;
+    plan_a.active = true;
+    plan_a.dirty_files = &no_dirty;
+    cg::analysis::snap::SnapshotData dump;
+    plan_a.snap_dump = &dump;
+    const cg::analysis::StubTypeOracle oracle;
+    const cg::analysis::PropagationState state_a =
+        cg::analysis::run(store, oracle, nullptr, &plan_a);
+    cg::test::check(
+        r,
+        state_a.incremental && !plan_a.degraded,
+        "baseline incremental run converges");
+    dump.snapshot_seq = 1;
+    dump.fingerprints = cg::db::all_fingerprints(store);
+    const std::string bytes = cg::analysis::snap::serialize(dump);
+    const std::filesystem::path snap_path =
+        cg::util::platform::unique_temp_path(
+            std::filesystem::temp_directory_path()
+            / "ccg-snap-claim-chain.snap");
+    cg::test::check(
+        r,
+        !bytes.empty()
+            && cg::util::platform::atomic_write_file(snap_path, bytes),
+        "claim-chain snapshot serializes and lands");
+    if (bytes.empty())
+    {
+        return;
+    }
+    // 脏批：上游 TU 指纹前移（模拟 b.cpp 编辑——行内容未变，闭包卷入面
+    // 与真实编辑一致：种子是"行/owner 在脏文件的槽"，与行内容无关）。
+    bool upstream_touched = false;
+    for (const cg::db::FingerprintRow& fp : cg::db::all_fingerprints(store))
+    {
+        if (fp.file_id == *upstream_tu)
+        {
+            cg::db::FingerprintRow mutated = fp;
+            mutated.mtime_ns += 1;
+            store.set_fingerprint(mutated);
+            upstream_touched = true;
+            break;
+        }
+    }
+    cg::test::check(r, upstream_touched, "upstream fingerprint row touched");
+    std::unordered_set<cg::db::FileId> upstream_dirty{*upstream_tu};
+    cg::analysis::snap::RestoreRequest req;
+    req.path = snap_path;
+    req.snapshot_seq = 1;
+    cg::analysis::IncrementalPlan plan_b;
+    plan_b.active = true;
+    plan_b.dirty_files = &upstream_dirty;
+    plan_b.snap_request = &req;
+    const cg::analysis::PropagationState state_b =
+        cg::analysis::run(store, oracle, nullptr, &plan_b);
+    cg::test::check(
+        r,
+        plan_b.snap_hit && plan_b.snap_dirty_files == 1,
+        "upstream-delta restore hits with exactly one dirty file");
+    cg::test::check(
+        r,
+        state_b.incremental && !plan_b.degraded,
+        "claim-chain incremental run converges (degraded="
+            + plan_b.degrade_reason + ")");
+    // 两个声称槽（别名链 p / 返回链 q）：闭包重算后声称面逐项保持。
+    const auto find_hint = [](const cg::analysis::PropagationState& s,
+                              std::string_view fn,
+                              std::string_view var)
+    {
+        const cg::analysis::PropagatedHint* found = nullptr;
+        for (const cg::analysis::PropagatedHint& h : s.hints)
+        {
+            if (h.owner_key.find(fn) != std::string::npos
+                && h.var_name == var)
+            {
+                found = &h;
+                break;
+            }
+        }
+        return found;
+    };
+    for (const auto& [fn, var] :
+         {std::pair<std::string_view, std::string_view>{
+              "consume_claim_via_alias", "p"},
+          {"consume_claim_via_ret", "q"}})
+    {
+        const cg::analysis::PropagatedHint* base = find_hint(state_a, fn, var);
+        const cg::analysis::PropagatedHint* delta = find_hint(state_b, fn, var);
+        cg::test::check(
+            r,
+            base != nullptr && delta != nullptr,
+            std::string{fn} + " claim slot present in both runs");
+        if (base == nullptr || delta == nullptr)
+        {
+            continue;
+        }
+        cg::test::check(
+            r,
+            !base->types.empty() && base->source
+                                        == cg::analysis::HintSource::CastTarget,
+            std::string{fn} + " baseline slot carries the claim face");
+        cg::test::check(
+            r,
+            !delta->from_warm,
+            std::string{fn}
+                + " slot is closure-recomputed (not a warm passthrough)");
+        cg::test::check(
+            r,
+            delta->types == base->types
+                && delta->source == cg::analysis::HintSource::CastTarget
+                && delta->reason == base->reason,
+            std::string{fn}
+                + " claim face survives the incremental closure round");
+    }
+    std::error_code ec;
+    std::filesystem::remove(snap_path, ec);
+}
+
+const cg::test::Registrar reg_cast_claim_incremental{
+    "analysis.cast.claim_incremental_equivalence",
+    &cast_claim_incremental_equivalence};
 
 /**
  * @brief 快照格式层的往返与失效：序列化字段逐项还原、指纹对称差正确、

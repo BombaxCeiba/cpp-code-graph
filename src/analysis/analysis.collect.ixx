@@ -836,6 +836,73 @@ export namespace cg::analysis
             }
 
             /**
+             * @brief cast_claim_target 的廉价入口闸：原始 kind 是三种转型
+             *        或透明包装（Unexposed/Paren）时才可能有声称。
+             *
+             * @internal 全库百万级赋值/接收者表达式的早退判定前移——一次
+             *           kind 读取替代 unwrap 往返；unwrap 只剥 Unexposed/
+             *           Paren 两类包装，其余 kind 经 unwrap 后必非转型，
+             *           闸上跳过与函数内判空逐字节同值。
+             */
+            [[nodiscard]]
+            static auto cast_claim_shape(CXCursorKind k) -> bool
+            {
+                switch (k)
+                {
+                case CXCursor_CXXStaticCastExpr:
+                case CXCursor_CXXReinterpretCastExpr:
+                case CXCursor_CStyleCastExpr:
+                case CXCursor_UnexposedExpr:
+                case CXCursor_ParenExpr:
+                    return true;
+                default:
+                    return false;
+                }
+            }
+
+            /**
+             * @brief 转型声称目标：指针转型在操作数
+             *        无任何动态证据时，目标记录 key 直接接受为槽的类型声称。
+             *
+             * @internal 形态边界（AST 判据，不做文本猜测）：仅
+             *           reinterpret_cast / static_cast / C 样式三种指针/引用
+             *           转型——dynamic_cast 自带运行时下发语义（既有 CastDown
+             *           判据维持）、const_cast 不改类型、值转型走 expr_type_keys
+             *           既有值档；操作数携带动态证据（new/值记录等，与
+             *           hint_from_expr 转型臂的 operand_has_evidence 同一口
+             *           径）时指针来源已知，返回空——既有 CastDown/传播语义
+             *           逐字节保持。语义担保方是程序员的转型声称：声称行只落
+             *           库不建边，槽终态无任何动态证据时才由传播侧填入（更强
+             *           证据在场绝不覆盖）。
+             */
+            [[nodiscard]]
+            auto cast_claim_target(const CXCursor& expr) -> std::string
+            {
+                const CXCursor     cur = unwrap_expr(expr);
+                const CXCursorKind k = cg::clang::kind(cur);
+                if (k != CXCursor_CXXStaticCastExpr
+                    && k != CXCursor_CXXReinterpretCastExpr
+                    && k != CXCursor_CStyleCastExpr)
+                {
+                    return {};
+                }
+                if (!cg::clang::is_pointer_or_reference(cur))
+                {
+                    return {}; // 值转型由 expr_type_keys 既有值档承载
+                }
+                const CXCursor operand = cast_operand(cur);
+                if (cg::clang::is_null(operand))
+                {
+                    return {};
+                }
+                if (!expr_type_keys(strip_casts(cur)).empty())
+                {
+                    return {}; // 指针来源已知：既有转型证据语义不动
+                }
+                return record_key_of_decl(cg::clang::type_declaration(cur));
+            }
+
+            /**
              * @brief 构造调用是否显式智能指针类型（unique_ptr/shared_ptr）。
              *
              * @internal 两名是 std 公开类型（已批名单），按全词匹配：子串
@@ -871,9 +938,9 @@ export namespace cg::analysis
 
             // ============ 出参包装类/取址方法结构判据（零项目名参与）
             // ============
-            // 以下判据函数按派发可行性定案实现：出参包装类
+            // 以下判据函数按派发可行性实现：出参包装类
             // 四判据、取址方法判据四条件 + 成员链比对。判据只依赖
-            // canonical 类型的 type-parameter- 标记（定案依据：C++ 标识符
+            // canonical 类型的 type-parameter- 标记（依据：C++ 标识符
             // 不含 '-'，不可伪造，零误报）。消费方已接线：
             // is_outparam_wrapper_class 驱动出参壳绑定
             // （bind_outparam_shell / outparam_writeback_call），
@@ -1542,7 +1609,7 @@ export namespace cg::analysis
              * @internal 特化成员先经 specialized 归一（pattern 成员对
              * specialized 回答 InvalidFile 垃圾，is_addressof_method
              * 同款导航）；语义父类再
-             * 归一到主模板。非模板类返回空（单一判据的语料定案只覆盖类模板）。
+             * 归一到主模板。非模板类返回空（单一判据的语料只覆盖类模板）。
              */
             [[nodiscard]]
             static auto pattern_class_of(const CXCursor& fn) -> CXCursor
@@ -2732,6 +2799,17 @@ export namespace cg::analysis
                     return;
                 }
                 const CXCursor rhs = kids[1];
+                // 转型声称目标：RHS 三通道（类型键/
+                // 别名/返回槽）全空时仍可能是转型声称形态（如
+                // `arg1 = reinterpret_cast<I*>(argp1)` 的 SWIG 解包、
+                // `p = (I*)opaque();`），声称行独立于三通道发射——槽终态为空
+                // 才由传播侧填入。入口闸前移：非转型/非包装 RHS 一次 kind
+                // 读取即早退，不进判定函数。
+                std::string cast_claim;
+                if (cast_claim_shape(cg::clang::kind(rhs)))
+                {
+                    cast_claim = cast_claim_target(rhs);
+                }
                 std::string    related_var = ref_var_name(rhs);
                 // 断链 1（赋值侧）：RHS 是透传 getter 调用（*pp = p.Get() /
                 // x.f = q.Get()）时槽引用取 getter 接收者——值 = 壳实例槽的
@@ -2813,7 +2891,8 @@ export namespace cg::analysis
                 {
                     return;
                 }
-                if (keys.empty() && related_var.empty() && related_key.empty())
+                if (cast_claim.empty() && keys.empty() && related_var.empty()
+                    && related_key.empty())
                 {
                     return;
                 }
@@ -2823,6 +2902,21 @@ export namespace cg::analysis
                 {
                     return;
                 }
+                const auto emit_cast_claim = [&](const std::string& owner,
+                                                 const std::string& var)
+                {
+                    if (cast_claim.empty() || owner.empty() || var.empty())
+                    {
+                        return;
+                    }
+                    TypeHintRec hint = make_hint(owner, var, loc);
+                    hint.type_keys.assign(1, cast_claim);
+                    hint.source = HintSource::CastTarget;
+                    hint.confidence = Confidence::Low;
+                    hint.fallback_reason =
+                        std::string{source_name(HintSource::CastTarget)};
+                    emit_hint(std::move(hint));
+                };
                 const FieldTarget field = field_target_of(kids[0]);
                 if (!field.name.empty() && !field.owner_key.empty())
                 {
@@ -2838,6 +2932,7 @@ export namespace cg::analysis
                         hint.related_key = related_key;
                     }
                     emit_hint(std::move(hint));
+                    emit_cast_claim(field.owner_key, field.name);
                     return;
                 }
                 const CXCursor lhs = unwrap_expr(kids[0]);
@@ -2856,6 +2951,7 @@ export namespace cg::analysis
                 {
                     return;
                 }
+                emit_cast_claim(ctx.fn_key, name);
                 // 容器拷贝赋值（容器元素局部拷贝流）：`b = a;` 时元素槽随对象
                 // 一起继承源元素槽；仅同域变量/字段源（返回容器不走元素流，
                 // 返回槽类型是容器对象而非元素）。容器对象的静态模板键不是
@@ -4363,13 +4459,37 @@ export namespace cg::analysis
                 int                line,
                 int                col)
             {
-                const CXCursor inner = unwrap_expr(expr);
-                if (cg::clang::kind(inner) != cg::clang::kind(expr))
+                const CXCursorKind outer_kind = cg::clang::kind(expr);
+                const CXCursor     inner = unwrap_expr(expr);
+                if (cg::clang::kind(inner) != outer_kind)
                 {
                     hint_from_expr(inner, owner, var, file, line, col);
                     return;
                 }
-                const CXCursorKind k = cg::clang::kind(expr);
+                // 转型声称行：与既有转型臂/别名行并行
+                // 落库（行键含 source，天然不冲突），类型只在传播终态槽为空时
+                // 填入——有更强证据的站点行为不变。入口闸前移：非转型/非包装
+                // 表达式一次 kind 读取即早退。
+                if (cast_claim_shape(outer_kind))
+                {
+                    if (const std::string claim = cast_claim_target(expr);
+                        !claim.empty())
+                    {
+                        TypeHintRec cast_hint;
+                        cast_hint.owner_key = owner;
+                        cast_hint.var_name = var;
+                        cast_hint.file = file;
+                        cast_hint.line = line;
+                        cast_hint.col = col;
+                        cast_hint.type_keys.assign(1, claim);
+                        cast_hint.source = HintSource::CastTarget;
+                        cast_hint.confidence = Confidence::Low;
+                        cast_hint.fallback_reason =
+                            std::string{source_name(HintSource::CastTarget)};
+                        emit_hint(std::move(cast_hint));
+                    }
+                }
+                const CXCursorKind k = outer_kind;
                 TypeHintRec        hint;
                 hint.owner_key = owner;
                 hint.var_name = var;
@@ -6143,7 +6263,7 @@ export namespace cg::analysis
              * 引用转换（cast），且函数返回类型是引用——返回的引用与形参实参
              * 指称同一对象，其一切调用点可视同实参本身（transparent
              * forwarder）。覆盖面自动含标准库 move/forward/as_const 与项目自
-             * 定义转发助手——设计定案：其本质就是"函数体内 static_cast 到
+             * 定义转发助手——其本质就是"函数体内 static_cast 到
              * 引用"，不按名字枚举。
              * 边界（宁漏勿猜，逐条拒收）：定义不可见（纯声明）不判；body 除
              * return 外还有其它语句（StaticAssert 与只含类型别名的 DeclStmt
@@ -7114,7 +7234,7 @@ export namespace cg::analysis
              *
              * @internal 签名方向闸：两层剥得开、第三层剥不开定深度；
              *           pointee_declaration 剥到底取记录声明。值形参/一级
-             *           指针/三级指针/内建 pointee 全部拒绝（试点定案：无
+             *           指针/三级指针/内建 pointee 全部拒绝（试点实测：无
              *           闸 33% 误判、双指针出参方向闸后 0）。
              */
             [[nodiscard]]
@@ -7860,7 +7980,7 @@ export namespace cg::analysis
             /**
              * @brief 容器元素 range-for 链接行：CXCursor_CXXForRangeStmt
              * 直接子恰 三个（range 声明 / range 初始化式 / body，fac-llvm
-             * 源码级 定案；kind 225 是独立语句种类，永不命中 ForStmt case——
+             * 源码级核实；kind 225 是独立语句种类，永不命中 ForStmt case——
              *        预研 v1 的核心教训）。
              *
              * @internal 链接行 var_name = 循环变量、related_var =

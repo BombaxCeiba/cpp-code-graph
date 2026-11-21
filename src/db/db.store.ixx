@@ -1083,6 +1083,18 @@ namespace cg::db
         [[nodiscard]]
         auto load_type_hints_analysis_files(const std::vector<FileId>& files)
             -> std::vector<TypeHintRow>;
+        /**
+         * @brief load_type_hints_analysis 的按来源投影（source == 给定值
+         *        的全行集）。
+         *
+         * @internal 快照增量路径给保留槽回灌转型声称缓冲用：声称行只占
+         *           hint 总量的极小子集（WHERE 走表扫但免整表物化），列裁
+         *           剪与排序和全表读逐字节一致（同一 order_by）；文件级
+         *           过滤（重读集排除）由调用方做——集是内存小集。
+         */
+        [[nodiscard]]
+        auto load_type_hints_of_source(std::int64_t source)
+            -> std::vector<TypeHintRow>;
 
         /**
          * @brief 单属主的类型线索读取（查询路径的属主点查）。
@@ -1135,8 +1147,8 @@ namespace cg::db
          * @brief 删除某文件站点上的全部 virtual_dispatch 边（编辑路径：
          *      延迟收敛批只按文件粒度撤旧派发边，绝不整类清空）。
          *
-         * @internal edges_dispatch 部分索引与 edges_own(site_file_id) 共同
-         * 服务本形状；与 purge_file 的全类型站点边删除互补——这里只动
+         * @internal edges_own(site_file_id) 服务本形状的文件过滤；与
+         * purge_file 的全类型站点边删除互补——这里只动
          * type_id=7，供派发数据自身的失效纪律单独调用。
          */
         void erase_vd_edges_of_file(FileId file);
@@ -2581,6 +2593,41 @@ namespace cg::db
                 th.relatedKey)
                 .from(th)
                 .where(th.fileId.in(id_list))
+                .order_by(
+                    th.ownerId.asc(),
+                    th.varName.asc(),
+                    th.fileId.asc(),
+                    th.line.asc(),
+                    th.col.asc(),
+                    th.source.asc()));
+        for (const auto& row : rows)
+        {
+            out.push_back(to_type_hint_row(row));
+        }
+        return out;
+    }
+
+    auto GraphStore::load_type_hints_of_source(std::int64_t source)
+        -> std::vector<TypeHintRow>
+    {
+        const tab::TypeHints     th{};
+        std::vector<TypeHintRow> out;
+        auto                     rows = impl_->run(
+            sqlpp::select(
+                th.ownerId,
+                th.varName,
+                th.fileId,
+                th.line,
+                th.col,
+                th.typeSet,
+                th.source,
+                th.confidence,
+                th.fallbackReason,
+                th.paramIndex,
+                th.relatedVar,
+                th.relatedKey)
+                .from(th)
+                .where(th.source == source)
                 .order_by(
                     th.ownerId.asc(),
                     th.varName.asc(),

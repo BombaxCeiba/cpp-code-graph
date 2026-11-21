@@ -1,6 +1,8 @@
 // C-style cast evidence fixture (fac6 SWIG diagnosis): generated code
-// writes `(Impl*)x` uniformly; expr_type_keys must keep operand evidence
-// and never adopt the cast target as dynamic evidence.
+// writes `(Impl*)x` uniformly; expr_type_keys must keep operand evidence.
+// Origin-unknown casts adopt the target as a claim (filled only when the
+// slot ends up empty); use_downcast below keeps its
+// operand-side evidence path intact.
 struct I
 {
     virtual int f();
@@ -26,7 +28,7 @@ int use_new_assign()
 }
 
 // C-style downcast of a param: operand carries no dynamic evidence and the
-// Impl target must NOT be adopted - no positive edge may arise from here.
+// Impl target enters as a cast claim (filled only into an empty slot).
 int use_downcast(I* q)
 {
     Impl* d = (Impl*)q;

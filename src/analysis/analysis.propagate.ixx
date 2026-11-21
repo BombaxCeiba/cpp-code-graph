@@ -1253,6 +1253,18 @@ export namespace cg::analysis
             TypeArena arena;
             /** @brief 装载期字符串类型集暂存（oracle 在字符串形态上跑）。 */
             std::vector<std::vector<std::string>> pending_types;
+            /**
+             * @brief 转型声称缓冲（与 slots 下标对齐）。
+             * @internal CastTarget 行的类型串只入缓冲不进 pending——声称绝
+             *           不参与传播（不建边、不流动），传播终态槽动态集为空
+             *           时才整批填入（finalize_hints），有更强证据的槽不受
+             *           影响。快照保留槽的行流跳过对声称行豁免（闭包卷入
+             *           复位重算后缓冲须有注入源），行集由装载侧补装。
+             */
+            std::vector<std::vector<std::string>> slot_cast_claims;
+            /** @brief 声称根 -> 物化声称面（派生闭包串集）的装载期缓存。 */
+            std::unordered_map<std::string, std::vector<std::string>>
+                claim_face_of;
             /** @brief 装载期行级别名引用（槽下标, related_var）。 */
             std::vector<std::pair<std::size_t, std::string>> pending_row_alias;
             /** @brief 槽的源文件全集（与 slots 对齐；半脏判定与快照段用）。 */
@@ -1964,9 +1976,27 @@ export namespace cg::analysis
                         std::vector<cg::db::FileId>{
                             reread.begin(),
                             reread.end()});
+                    // 保留槽的转型声称行补装：声称填充是 finalize 的单向注
+                    // 入（不是传播边），增量闭包把保留槽复位到初始值重算后，
+                    // 缓冲没有注入源就会整槽丢失（与全量重建分叉）。全量表
+                    // 读路径天然覆盖；快照路径只重读脏文件侧，干净文件的声
+                    // 称行在此补入（文件在重读集内的已随文件投影装载，不重
+                    // 复）；这些行只可能命中保留槽——新行必在脏文件，其槽已
+                    // 整槽剔除重建，行随重读集装载。
+                    for (const cg::db::TypeHintRow& crow :
+                         store.load_type_hints_of_source(
+                             static_cast<std::int64_t>(HintSource::CastTarget)))
+                    {
+                        if (!reread.contains(crow.file_id))
+                        {
+                            hint_rows.push_back(crow);
+                        }
+                    }
                     slots.reserve(sd.slots.size() + hint_rows.size());
                     slot_of.reserve(sd.slots.size() * 2);
                     pending_types.reserve(sd.slots.size() + hint_rows.size());
+                    slot_cast_claims.reserve(
+                        sd.slots.size() + hint_rows.size());
                     slot_row_dirty.reserve(sd.slots.size() + hint_rows.size());
                     slot_derived_seed.reserve(
                         sd.slots.size() + hint_rows.size());
@@ -2025,6 +2055,7 @@ export namespace cg::analysis
                                 // 下标对齐（保留
                                 // 槽在行流重建槽之前连续装填，前缀即对齐面）。
                                 pending_types.emplace_back();
+                                slot_cast_claims.emplace_back();
                                 slot_row_dirty.push_back(0);
                                 slot_derived_seed.push_back(
                                     s.derived_seed ? 1 : 0);
@@ -2128,23 +2159,87 @@ export namespace cg::analysis
                         slot.reason = row.fallback_reason;
                         slots.push_back(std::move(slot));
                         pending_types.emplace_back();
+                        slot_cast_claims.emplace_back();
                         slot_row_dirty.push_back(0);
                         slot_derived_seed.push_back(0);
                         slot_file_list.emplace_back();
                         slot_from_snap.push_back(0);
                     }
-                    else if (slot_from_snap[it->second] != 0)
+                    // 保留槽的转型声称行是行流跳过的唯一例外：闭包卷入的
+                    // 保留槽被复位到初始值重算后，声称缓冲必须有注入源（全
+                    // 量路径行流天然装载）；其余行仍跳过（初始态已在快照，
+                    // 重复应用会重复登记行级别名边）。保留槽的声称行只入缓
+                    // 冲：文件清单/脏标记不动（快照的槽文件面已含声称行文
+                    // 件，重复登记污染观测面）。
+                    const bool retained = !fresh
+                                          && slot_from_snap[it->second] != 0;
+                    if (retained
+                        && row.source
+                               != static_cast<int>(HintSource::CastTarget))
                     {
                         continue; // 保留槽：初始态已在快照，行流不重复应用
                     }
-                    slot_file_list[it->second].push_back(row.file_id);
+                    if (!retained)
+                    {
+                        slot_file_list[it->second].push_back(row.file_id);
+                        if (incr_candidate && dirty_fids.contains(row.file_id))
+                        {
+                            slot_row_dirty[it->second] = 1;
+                        }
+                    }
+                    if (row.source
+                        == static_cast<int>(HintSource::CastTarget))
+                    {
+                        // 转型声称行：只入缓冲——不发
+                        // 传播边、不吸收槽标签（置信度/来源/reason 不动），
+                        // 终态空槽判定在 finalize_hints；脏标记与文件清单
+                        // 照常（声称行所在文件重写时槽必须进脏闭包重建）。
+                        // 缓冲面 = 声称面 ∪ 派生闭包（运行时类型 ∈ 面内任
+                        // 一记录；接口声称展开成实现族并集，与 qi iid 锁/
+                        // 出参族的展开语义同款，闭包位图沿
+                        // derived_closure_bits 的既有缓存与特化折算）——在
+                        // 缓冲期展开使闭包串随缓冲进入 intern 类型域
+                        // （finalize 期动态扩域会破坏快照域一致性）。巨族声
+                        // 称（如 IDasBase 全库实现族）按根去重缓存物化面，
+                        // 千行同根不再逐行重算。
+                        std::vector<std::string>& claims =
+                            slot_cast_claims[it->second];
+                        for (const std::string& t :
+                             parse_string_array(row.type_set))
+                        {
+                            cg::util::push_unique(claims, t);
+                            auto fit = claim_face_of.find(t);
+                            if (fit == claim_face_of.end())
+                            {
+                                std::vector<std::string> face;
+                                derived_closure_bits(t)->each_set(
+                                    [&](std::int64_t id)
+                                    {
+                                        const std::string derived =
+                                            lookup.key_of(id);
+                                        if (!derived.empty())
+                                        {
+                                            face.push_back(derived);
+                                        }
+                                    });
+                                std::ranges::sort(face);
+                                face.erase(
+                                    std::unique(face.begin(), face.end()),
+                                    face.end());
+                                fit = claim_face_of
+                                         .emplace(t, std::move(face))
+                                         .first;
+                            }
+                            for (const std::string& d : fit->second)
+                            {
+                                cg::util::push_unique(claims, d);
+                            }
+                        }
+                        continue;
+                    }
                     HintSlot&                 slot = slots[it->second];
                     std::vector<std::string>& pending =
                         pending_types[it->second];
-                    if (incr_candidate && dirty_fids.contains(row.file_id))
-                    {
-                        slot_row_dirty[it->second] = 1;
-                    }
                     // 派生闭包种子行（槽终态含闭包展开值的增量重建标记）：
                     // out_param_this（QI this 写回）与 qi iid 锁两形态（接口
                     // 级类型入槽、装载期展开成实现族并集）。
@@ -2698,6 +2793,11 @@ export namespace cg::analysis
                     std::unordered_set<std::string> distinct;
                     distinct.insert(std::string{});
                     for (const std::vector<std::string>& ts : pending_types)
+                    {
+                        distinct.insert(ts.begin(), ts.end());
+                    }
+                    // 转型声称串参与赋号（终态空槽填充需要 id 形态）。
+                    for (const std::vector<std::string>& ts : slot_cast_claims)
                     {
                         distinct.insert(ts.begin(), ts.end());
                     }
@@ -4563,6 +4663,61 @@ export namespace cg::analysis
              */
             void finalize_hints()
             {
+                // 转型声称填充：接收者指针来源未知的
+                // reinterpret_cast/static_cast/C 样式转型，其目标类型是程序
+                // 员的类型声称，直接接受为槽的类型证据——但仅当传播终态该槽
+                // 动态集为空（工厂/直连/入参扇投等更强证据在场时声称弃用，
+                // 有证据站点行为不变）。缓冲面已在装载期展开为声称面 ∪ 派生
+                // 闭包；此处经 oracle 过滤后，界外根键（符号域解析失败，入
+                // 动态集只会制造 key miss 阻断收敛）剔除再入集。填充不建传
+                // 播边（声称只在槽本位生效），槽标签如实改写为声称来源
+                // （reason=cast_target）；多声称并集多候选时由既有 cap-to-low
+                // 纪律接管。
+                for (std::size_t i = 0; i < slots.size(); ++i)
+                {
+                    if (slot_cast_claims.empty()
+                        || slot_cast_claims[i].empty()
+                        || slots[i].type_len != 0)
+                    {
+                        continue;
+                    }
+                    TypeHintRec probe;
+                    probe.owner_key = slots[i].owner_key;
+                    probe.var_name = slots[i].var_name;
+                    probe.type_keys = slot_cast_claims[i];
+                    probe.static_types = slots[i].static_types;
+                    probe.source = HintSource::CastTarget;
+                    probe.confidence = Confidence::Low;
+                    std::vector<std::string> claimed =
+                        oracle.points_to(probe);
+                    std::erase_if(
+                        claimed,
+                        [this](const std::string& t)
+                        {
+                            return !lookup.by_key(t).has_value();
+                        });
+                    if (claimed.empty())
+                    {
+                        continue;
+                    }
+                    const std::vector<std::int32_t> ids =
+                        intern_ids(claimed);
+                    if (add_types(
+                            slots[i],
+                            ids,
+                            Confidence::Low,
+                            HintSource::CastTarget,
+                            source_name(HintSource::CastTarget)))
+                    {
+                        // 类型集全部来自声称：标签与置信如实归位（别名行
+                        // 的 Medium 空流不构成证据，不得顶替声称披露）。
+                        slots[i].confidence = Confidence::Low;
+                        slots[i].source = HintSource::CastTarget;
+                        slots[i].reason =
+                            std::string{
+                                source_name(HintSource::CastTarget)};
+                    }
+                }
                 // 每个槽的最终置信度：多候选一律 cap 到 low；无类型 =
                 // fallback。
                 for (std::size_t i = 0; i < slots.size(); ++i)

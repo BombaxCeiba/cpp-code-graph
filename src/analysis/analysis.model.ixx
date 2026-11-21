@@ -101,6 +101,13 @@ export namespace cg::analysis
         OutParamFlow, // 出参写回：*pp = e 或出参包装壳 Set(e)（owner = 函数）
         External,     // 外部边界 RTA：接口级可达集（严禁站点级直用）
         ContainerElemFlow, // 容器元素槽：写集/拷贝流/range-for 链接行
+        /**
+         * 转型声称目标：接收者指针来源未知时，
+         * reinterpret_cast/static_cast/C 样式转型的目标类型直接接受为
+         * 接收者类型证据。语义担保方是程序员的转型声称；只在槽终态无
+         * 任何动态证据时填入（传播侧守卫），不与更强证据合流。
+         */
+        CastTarget,
     };
 
     [[nodiscard]]
@@ -136,6 +143,8 @@ export namespace cg::analysis
             return "external_rta";
         case HintSource::ContainerElemFlow:
             return "container_elem_flow";
+        case HintSource::CastTarget:
+            return "cast_target";
         }
         return "no_dynamic_type_evidence";
     }
@@ -143,7 +152,7 @@ export namespace cg::analysis
     [[nodiscard]]
     constexpr auto source_of(int id) noexcept -> HintSource
     {
-        return id >= 0 && id <= static_cast<int>(HintSource::ContainerElemFlow)
+        return id >= 0 && id <= static_cast<int>(HintSource::CastTarget)
                    ? static_cast<HintSource>(id)
                    : HintSource::Declared;
     }
@@ -166,7 +175,7 @@ export namespace cg::analysis
     /**
      * @brief 外部边界 RTA 行的保留变量名（root set 线）。
      *
-     * @internal 数据契约（root set 线定案）：owner = 外部可达接口的记录
+     * @internal 数据契约（root set 线）：owner = 外部可达接口的记录
      * key（SWIG 导出 / director / 插件注册表 / dlopen 边界命中），type_set =
      * R(I) = extends 后代闭包 ∩ 全库实例化类型集。语义分级硬约束：站点
      * 级直用严禁——'#' 前缀槽名永不匹配接收者/实参变量名（find_slot 天然
@@ -177,7 +186,7 @@ export namespace cg::analysis
     inline constexpr std::string_view external_slot = "#external";
 
     /**
-     * @brief 外部边界的 reason 词表（定案；测试与渲染按文本断言，
+     * @brief 外部边界的 reason 词表（测试与渲染按文本断言，
      * 与 source_name 同层的稳定契约）。
      *
      * @internal swig_export/plugin_registry 两词随 external 边界重写
@@ -842,7 +851,7 @@ export namespace cg::analysis
      *        cap = 2×P99 取整 = 56，三粒度统一。
      *
      * @internal 语义是"槽目标集"（函数/方法目标，indirect_calls 消费用），
-     *           与 MAX_TYPES（类型集封顶 32，另有定案勿动）相互独立。超
+     *           与 MAX_TYPES（类型集封顶 32，勿动）相互独立。超
      *           限不静默截断成猜测——整体标注 truncated（宁可如实报告
      *           截断，也不给出看似完整的部分答案）。
      */

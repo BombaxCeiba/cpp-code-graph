@@ -1,0 +1,12 @@
+[
+  {
+    "directory": ".",
+    "file": "main.cpp",
+    "command": "c++ -std=c++23 -I . -c main.cpp -o main.o"
+  },
+  {
+    "directory": ".",
+    "file": "b.cpp",
+    "command": "c++ -std=c++23 -I . -c b.cpp -o b.o"
+  }
+]

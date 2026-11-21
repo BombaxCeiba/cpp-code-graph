@@ -123,7 +123,7 @@ export namespace cg::analysis
         };
 
         /**
-         * @brief 静态收窄子树的规模上限（预研定案：参考语料 105/6271 站点
+         * @brief 静态收窄子树的规模上限（参考语料 105/6271 站点
          *        单子树 >256 节点，巨型接口必须封顶）。
          */
         inline constexpr std::size_t MAX_SUBTREE_NODES = 256;
@@ -1795,7 +1795,7 @@ export namespace cg::analysis
             const std::map<std::int64_t, int> nearest = // member id -> distance
                 nearest_overrides(family, dynamic_ids, absent_ids);
             const std::size_t absent = key_miss + absent_ids.size();
-            // 最近覆盖收敛不降级（预研定案）：全部动态类型都参与解析
+            // 最近覆盖收敛不降级：全部动态类型都参与解析
             // （absent==0）且并集后恰一个最近覆盖——多类型不等于必然模糊，
             // 收敛到同一实现时按单覆盖同档给 Medium(0.7)。封口用槽级
             // dynamic_types.size()<32（截断代理），不用全局 budget_exhausted
@@ -1806,7 +1806,7 @@ export namespace cg::analysis
                                            && site.dynamic_types.size() < 32;
             // ── 异族豁免封口：缺席全部可证噪声时的条件提档 ─────────────
             //
-            // 四闸合取（按真库锚证定案，任一不满足维持弱带 0.4）：
+            // 四闸合取（按真库锚证，任一不满足维持弱带 0.4）：
             // (a) 异族豁免——缺席类型全部落在接收者声明面排除域之外
             //     （extends 后代闭包可证无关；接口名缺席是合法声明面
             //     的合法缺席——其正解是家族闭包展开后参与收敛，保持
@@ -2051,8 +2051,48 @@ export namespace cg::analysis
                 candidates.clear();
                 candidates_truncated = false;
             }
-            const bool has_dynamic =
-                !site.dynamic_types.empty() && !static_face_priority;
+            // ── 转型声称弱带 × 静态硬证明的静态优先 ──────────────────
+            //
+            // 声称槽（reason 词根 cast_target）的动
+            // 态证据是程序员的转型声称（Low 档弱带），静态侧能硬证唯一
+            // （final/具体类/宿主抽象 直连 High(1.0)）时静态优先——声称不
+            // 得把静态直连压成 0.7。静态不决议（static_narrowed/外部边界
+            // 关闸等形态）时维持声称候选：声称面对无证据带是纯增益。与
+            // 出参族并集的 static_face_priority 同构（弱带动态 × 硬证明
+            // 静态 → 静态接管），但触发域不同（槽 reason 词根判定，声称
+            // 槽绝无 out_param_family 后缀，两门互斥）。
+            bool cast_claim_static_priority = false;
+            if (!site.dynamic_types.empty() && !static_face_priority
+                && site.reason.starts_with("cast_target"))
+            {
+                std::vector<DispatchCandidate> shadow_candidates;
+                std::vector<DispatchCandidate> shadow_edges;
+                std::string                   shadow_fallback;
+                bool                          shadow_resolved = false;
+                bool                          shadow_truncated = false;
+                resolve_static_site(
+                    site,
+                    family,
+                    method,
+                    shadow_candidates,
+                    shadow_edges,
+                    shadow_fallback,
+                    shadow_resolved,
+                    shadow_truncated);
+                if (shadow_resolved)
+                {
+                    // 静态直连接管展示面与决议位；声称候选整批让位。
+                    candidates = std::move(shadow_candidates);
+                    edge_targets = std::move(shadow_edges);
+                    fallback_reason = std::move(shadow_fallback);
+                    candidates_truncated = shadow_truncated;
+                    static_resolved = true;
+                    cast_claim_static_priority = true;
+                }
+            }
+            const bool has_dynamic = !site.dynamic_types.empty()
+                                     && !static_face_priority
+                                     && !cast_claim_static_priority;
             if (has_dynamic && candidates.empty())
             {
                 // 有动态类型却没有任何家族成员匹配：如实降级到静态命中
@@ -2068,7 +2108,7 @@ export namespace cg::analysis
             {
                 edge_targets = candidates;
             }
-            else if (!has_dynamic)
+            else if (!has_dynamic && !static_resolved)
             {
                 resolve_static_site(
                     site,
