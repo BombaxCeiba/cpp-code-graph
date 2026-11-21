@@ -806,9 +806,10 @@ namespace cg::db
     /**
      * @brief 某一边类型的全部原始边行（按站点/置信度读取）。
      *
-     * @internal 查询侧 dispatch 证据索引只关心 type_id = 7；部分索引
-     * `edges_dispatch` 让这次全扫描只触及 dispatch 边（参考语料规模约一万行），
-     * 绝不扫 26 万条普通边。
+     * @internal `edges_type(type_id)` 普通索引把按类型取行变成索引直达：
+     * dispatch 证据整读（type_id=7，参考语料约一万行）与 Extends/
+     * Specializes 继承图装载（约六千行）都只触及该类型的边行，绝不扫
+     * 全表近 29 万行边。
      */
     export auto edges_of_type(GraphStore& store, EdgeType type)
         -> std::vector<EdgeRow>
@@ -825,7 +826,7 @@ namespace cg::db
         return out;
     }
 
-    /** @brief 某一边类型的当前行数（部分索引服务 dispatch 边的整库计数）。 */
+    /** @brief 某一边类型的当前行数（edges_type 索引服务整库计数）。 */
     export auto count_edges_of_type(GraphStore& store, EdgeType type)
         -> std::int64_t
     {

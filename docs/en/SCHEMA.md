@@ -41,7 +41,7 @@ CREATE TABLE meta (
     value TEXT NOT NULL
 ) WITHOUT ROWID;
 -- Seeded rows:
---   schema_version = <current schema version (14)>  (bumped on incompatible
+--   schema_version = <current schema version (19)>  (bumped on incompatible
 --                                 DDL change OR an extraction change that
 --                                 alters rows for unchanged sources; see
 --                                 section 4)
@@ -226,7 +226,15 @@ CREATE UNIQUE INDEX edges_site ON edges(src_id, dst_id, type_id, site_file_id, s
 -- pays for one less B-tree. edges_dst stays (callers / upstream).
 CREATE INDEX edges_dst ON edges(dst_id, type_id);   -- callers / upstream (impact)
 CREATE INDEX edges_own ON edges(site_file_id);      -- per-file purge
-CREATE INDEX edges_dispatch ON edges(type_id) WHERE type_id = 7;
+-- edges_dispatch (partial index on type_id = 7) was folded into edges_type
+-- in schema v19: the plain index covers it too. The partial index cost
+-- nothing to maintain for any other edge type, so keeping both would have
+-- charged double maintenance only on virtual_dispatch edges. edges_type
+-- serves typed loads (extends/specializes graph load, dispatch evidence
+-- scan, per-type counts); the price is one extra B-tree maintained on
+-- every edge insert and delete (~1MB of database size per 100k edge rows),
+-- buying indexed direct access for loads of any edge type.
+CREATE INDEX edges_type ON edges(type_id);         -- typed loads (v19)
 
 -- ------------------------------------------------------- dynamic dispatch ----
 -- schema v11: derived analysis facts. Both tables are pure caches of
@@ -483,7 +491,7 @@ the first flavor in walk order (return, then params, then locals).
 
 ## 4. Versioning and migration
 
-Current version: **14**. `meta.schema_version` is checked on every open.
+Current version: **19**. `meta.schema_version` is checked on every open.
 
 - **No cross-version migration is maintained while the project is
   unreleased.** A fresh db is created at the current version in one step;

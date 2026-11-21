@@ -40,7 +40,7 @@ CREATE TABLE meta (
     value TEXT NOT NULL
 ) WITHOUT ROWID;
 -- Seeded rows:
---   schema_version = <current schema version (14)>  (bumped on incompatible
+--   schema_version = <current schema version (19)>  (bumped on incompatible
 --                                 DDL change OR an extraction change that
 --                                 alters rows for unchanged sources; see
 --                                 section 4)
@@ -225,7 +225,13 @@ CREATE UNIQUE INDEX edges_site ON edges(src_id, dst_id, type_id, site_file_id, s
 -- pays for one less B-tree. edges_dst stays (callers / upstream).
 CREATE INDEX edges_dst ON edges(dst_id, type_id);   -- callers / upstream (impact)
 CREATE INDEX edges_own ON edges(site_file_id);      -- per-file purge
-CREATE INDEX edges_dispatch ON edges(type_id) WHERE type_id = 7;
+-- edges_dispatch（type_id = 7 部分索引）在 schema v19 并入 edges_type：
+-- 普通索引已完全覆盖它；部分索引对其余边类型零维护，双份并存时付
+-- 双份维护账的只有 virtual_dispatch 一种边。edges_type 服务按类型取行
+-- （Extends/Specializes 继承图装载、dispatch 证据整读、整类计数）；
+-- 代价是全部边类型的每次插入与删除都多维护一棵 B 树、约每十万行边
+-- 多占 1MB 库体积，换取任意边类型的索引直达装载。
+CREATE INDEX edges_type ON edges(type_id);         -- 按类型取行（v19）
 
 -- ------------------------------------------------------- dynamic dispatch ----
 -- schema v11: derived analysis facts. Both tables are pure caches of
@@ -481,7 +487,7 @@ CREATE TABLE update_claim (
 
 ## 4. 版本管理与迁移
 
-当前版本：**14**。每次打开都会检查 `meta.schema_version`。
+当前版本：**19**。每次打开都会检查 `meta.schema_version`。
 
 - **项目尚未发布期间不维护任何跨版本迁移。** 全新数据库一步以当前
   版本创建；`schema_version` 不匹配的既有数据库——无论偏旧、偏新还是

@@ -36,7 +36,7 @@ export namespace cg::db
      * 当前值不符的已存库在打开时直接拒绝，由 `ccg index --force` 重建
      * 文件；全新库由 ddl_statements 一步建成当前版本形态。
      */
-    inline constexpr int schema_version = 18;
+    inline constexpr int schema_version = 19;
 
     /** @brief 每次打开数据库时执行的 PRAGMA 清单。 */
     inline constexpr std::string_view open_pragmas[] = {
@@ -157,7 +157,14 @@ export namespace cg::db
         "site_file_id, site_line)",
         "CREATE INDEX edges_dst ON edges(dst_id, type_id)",
         "CREATE INDEX edges_own ON edges(site_file_id)",
-        "CREATE INDEX edges_dispatch ON edges(type_id) WHERE type_id = 7",
+        // type_id 普通索引：按边类型取行的装载查询共用——Extends/
+        // Specializes 继承图装载、dispatch 证据整读、整类计数。代价：
+        // 全部边类型的每次插入与删除都多维护一棵 B 树、约每十万行边
+        // 多占 1MB 库体积，换取任意边类型的索引直达装载。此前仅覆盖
+        // virtual_dispatch 的部分索引被本索引完全包含而退役：部分索引
+        // 对其余边类型零维护，双份并存时付双份维护账的只有
+        // virtual_dispatch 一种边。
+        "CREATE INDEX edges_type ON edges(type_id)",
 
         R"(CREATE TABLE type_hints (
     hint_id         INTEGER PRIMARY KEY,

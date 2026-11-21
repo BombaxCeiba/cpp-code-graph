@@ -323,8 +323,7 @@ namespace
                 std::format("edge type {} keeps its seeded name", p.name));
         }
         // db 独有边类型（派发层与回调注册管线产物，extract 不产）：id 空档
-        // 7/8/9 也要钉死，播种表的 type_id 与 edges_dispatch 索引都锚在这些
-        // 值上。
+        // 7/8/9 也要钉死，播种表的 type_id 行锚在这些值上。
         cg::test::check(
             r,
             cg::db::to_id(cg::db::EdgeType::VirtualDispatch) == 7
