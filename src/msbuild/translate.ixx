@@ -957,7 +957,7 @@ export namespace cg::msbuild
             }
         }
         out.is_producer = yc_set;
-        // 以命令行为准：仅显式 /Yu 才算 PCH 消费者（设计定案）。
+        // 以命令行为准：仅显式 /Yu 才算 PCH 消费者。
         // /Fp 只是产物路径声明，不等于"要使用 PCH"——工程配了 /Fp 但
         // NotUsing 的场景不应被卷进影子 PCH 通道。
         out.pch_use = !yc_set && yu_set;

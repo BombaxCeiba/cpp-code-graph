@@ -1,4 +1,4 @@
-# BMI 分层并行 e2e（bmi-parallel 波步骤四；设计=设计文档测试清单 (3)-(7)
+# BMI 分层并行 e2e（设计=设计文档测试清单 (3)-(7)
 # 与附录二 T2-T7，另含追加的 update 边缘三形态）。
 #
 # 夹具全部是手写 clang 方言 compile db（无喂给条目 → self_build 路由，

@@ -3920,7 +3920,7 @@ namespace
         &equiv_analysis_warmstart};
 
     // ------------------------------------------------ 扇入延迟/收敛
-    // ------------ 扇入等价回归（修复定案的固化）：生成共享头扇入语料
+    // ------------ 扇入等价回归（修复的固化）：生成共享头扇入语料
     // （fan TU 全含 shared.h， hold TU 带
     // -DFANIN_EXTRA 只含 cond.h——跳过批与宏差 TU 都在场），先 全量，再按 `ccg
     // update` 快速批的同一参数面（seed_files + defer_dispatch）

@@ -1,7 +1,7 @@
 /**
  * @module cg.analysis.external
  *
- * @brief 外部边界扫描与接口级 RTA（root set 线定案）：识别
+ * @brief 外部边界扫描与接口级 RTA（root set 线）：识别
  *        director / dlopen 边界上的接口，计算 R(I) = extends 后代闭包
  *        ∩ 全库实例化类型集，落 type_hints 的 source=External 保留槽行
  *        （var_name="`#external`"）。
@@ -13,7 +13,7 @@
  *           （propagate find_slot 天然防线）+ propagate 读入显式跳过
  *           source=External 行（双护栏）。dlopen/LoadLibrary 与
  *           SwigDirector 前缀、std 容器表同属已批第三类系统/工具链名单。
- *           红线（设计定案）：不读 compile db 边界外的文件（.i 文本扫描
+ *           红线：不读 compile db 边界外的文件（.i 文本扫描
  *           永久移除）；注入内容只含确定性事实——register* 前缀形参
  *           提及等猜测性关联一律不采；每条 dlopen_boundary 行必须可
  *           溯源到具体调用点（related_var 存 API 锚点
@@ -152,7 +152,7 @@ export namespace cg::analysis
 
         // dlopen_boundary：加载链证据配对（同一 caller 函数内）。API 名单
         // 调用点是加载锚点；接口静态接收类型调用点是类型链的确定终点——
-        // collect 对指针转型目标永不采证（soundness 定案），故
+        // collect 对指针转型目标永不采证（soundness），故
         // reinterpret_cast 到 IPlugin*(*)() 这类签名的可索引终点就是其后
         // 的接口类型化站点。链断在中间（void* 直转无签名、接口只在别的
         // 函数里使用）不发行（宁漏勿猜）；锚点行（related_var）携带 API

@@ -1,8 +1,8 @@
 /**
  * @module cg.util.shellscan
  *
- * @brief shell 命令的"字符串查找意图"提取层（PreToolUse 四工具监听，
- *        设计定案）：Bash 命令经 tree-sitter 官方 Bash 语法
+ * @brief shell 命令的"字符串查找意图"提取层（PreToolUse 四工具监听）：
+ *        Bash 命令经 tree-sitter 官方 Bash 语法
  *        解析后识别其中的 rg 调用并产出结构化查找请求；PowerShell
  *        命令经进程内 C# 对象宿主（cg.util.cshost）产出同构请求；Search
  *        工具载荷按候选字段直读。三方共用本模块定义的请求结构。
@@ -12,7 +12,7 @@
  * 是纯内存操作，除 PowerShell 桥接经引擎宿主外零输入输出。
  *
  * @internal
- * Bash 侧按预研定案的 tree-sitter 路线（预研原型直译）：词法/
+ * Bash 侧按 tree-sitter 路线：词法/
  * 切分/识别三层由语法树天然承担（heredoc 正文不构成 command 节点、
  * 注释内引号天然免疫、残缺输入产 ERROR 节点），rg 的旗标表解析与
  * 宁漏勿猜判定仍自守（用例矩阵 62 条的口径）。PowerShell 侧只做
@@ -108,7 +108,7 @@ export namespace cg::util::shellscan
     /**
      * @brief Search 工具载荷的字段直读适配。
      *
-     * Search 工具未在本环境注册（步骤一三渠道核实），按官方契约防御式
+     * Search 工具未在本环境注册（三渠道核实），按官方契约防御式
      * 实现：依次尝试 query/pattern/q 三个候选字段名，取第一个存在的
      * 字符串值作为查找文本；全部缺失或非字符串时静默放弃。可选的
      * path 字段（与 Grep 工具同形）作为单条路径提示带上。
@@ -140,8 +140,7 @@ namespace cg::util::shellscan
             "var_assignment",
         };
 
-        /// string 内嵌动态成分节点（比 word 级少 var_assignment，预研
-        /// 原型期定下的口径）。
+        /// string 内嵌动态成分节点（比 word 级少 var_assignment）。
         constexpr std::string_view STRING_DYNAMIC[] = {
             "simple_expansion",
             "command_substitution",
@@ -329,10 +328,10 @@ namespace cg::util::shellscan
         /**
          * @brief 节点的静态文本值（去引号）；含动态成分时返回 nullopt。
          *
-         * 直译原型的 cooked()：raw_string/string 去首尾引号；word 与
+         * raw_string/string 去首尾引号；word 与
          * number 全文；拼接（concatenation/string_array）递归；其余类型视为
-         * 动态。ansii_c_string 的前缀是 $' 两字符（原型的 [1:-1] 会残留 $，
-         * 此处按语法事实修正为 [2:-1]），且不做 ANSI-C 转义解释——保留原文
+         * 动态。ansii_c_string 的前缀是 $' 两字符（[1:-1] 切法会残留 $，
+         * 故取 [2:-1]），且不做 ANSI-C 转义解释——保留原文
          * 让下游标识符链判定自行拒绝，方向仍是宁漏勿猜。
          */
         [[nodiscard]]
@@ -574,7 +573,7 @@ namespace cg::util::shellscan
         };
 
         /**
-         * @brief rg 的参数解析（预研原型的分层直译）。
+         * @brief rg 的参数解析。
          *
          * argv 是已去掉命令名的静态参数串。放弃原因与矩阵口径逐字一致
          * （files-mode/meta-noop/pattern-from-file/invert/regex-dialect/
@@ -792,7 +791,7 @@ namespace cg::util::shellscan
                     continue;
                 }
                 // 位置参数先暂存：是否当路径取决于 -e/--regexp 是否出现，
-                // 而它与位置参数的先后顺序无关（rg 真实语义，预研定案）。
+                // 而它与位置参数的先后顺序无关（rg 真实语义）。
                 positional.push_back(a);
             }
 
@@ -849,7 +848,7 @@ namespace cg::util::shellscan
         /**
          * @brief rg 单元之前最近的字面 cd 目标（cwd 提示）。
          *
-         * 直译原型的 cd_hint_before：在同一 list/program 内按序找
+         * 在同一 list/program 内按序找
          * 本命令之前的命令，倒序第一个 cd 带静态目标即提示；遇到 pushd 则
          * 放弃（目录栈语义不可知）。
          */
@@ -1306,7 +1305,7 @@ namespace cg::util::shellscan
         {
             return outcome;
         }
-        // 防御式三候选字段（步骤一定案）：取第一个存在的字符串值。
+        // 防御式三候选字段：取第一个存在的字符串值。
         constexpr std::string_view CANDIDATES[] = {"query", "pattern", "q"};
         for (const std::string_view key : CANDIDATES)
         {

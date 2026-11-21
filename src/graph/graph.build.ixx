@@ -6395,7 +6395,7 @@ export namespace cg::graph
                 // 的贡献走 occurrences bump-upsert（提交段 site_writable 的
                 // bump_feed 补充集），其余观察者的行原样保留。
                 //
-                // 原型期默认关（CCG_HEADCACHE_INCLUDE_MERGE=1 开启）：增量
+                // 默认关（CCG_HEADCACHE_INCLUDE_MERGE=1 开启）：增量
                 // 等价测试（incr.equiv.*）钉住的全闭包重解析语义在本路径
                 // 下有边集差（含 friend_of/uses 的行级出入与 occurrences
                 // 口径），等价性未收敛前不进默认路径——宁可漏收益不错语义。

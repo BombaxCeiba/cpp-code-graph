@@ -4,7 +4,7 @@
  * @brief 动态派发分析的伞形模块：model/collect/points_to/propagate/
  *        dispatch/external 的重导出。
  *
- * @internal 依赖围栏（设计定案）：analysis → db/clang；graph/cli →
+ * @internal 依赖围栏：analysis → db/clang；graph/cli →
  * analysis。extract/db/clang 绝不导入 analysis。未来全程序指针/别名
  * 分析只在 src/analysis 内演进。
  */

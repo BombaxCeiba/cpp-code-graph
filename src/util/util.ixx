@@ -323,15 +323,16 @@ export namespace cg::util
     /**
      * @brief ASCII 大小写折叠：'A'-'Z' 映射为小写，其余字节原样。
      *
-     * 刻意只做 ASCII——字节映射在每个 locale 下都确定，不像
-     * std::tolower（路径与扩展名比较的既定选择）。仓内 ASCII 折叠的唯一定义
-     * （替换昔日路径折叠、方言 flag 折叠、db 文件路径匹配各自的手写版本）。
+     * 折叠口径跨环境确定（路径与扩展名比较的既定要求）：仓内无人调用
+     * setlocale，进程 locale 恒为 "C"，std::tolower 在该 locale 下恰好只
+     * 折叠 'A'-'Z'、其余字节原样。仓内 ASCII 折叠的唯一定义（替换昔日
+     * 路径折叠、方言 flag 折叠、db 文件路径匹配各自的手写版本）。
      */
     /** @brief ascii_lower 的单字符形态：逐字符比较处的折叠单点。 */
     [[nodiscard]]
     inline auto ascii_lower_char(char c) -> char
     {
-        return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+        return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
 
     [[nodiscard]]

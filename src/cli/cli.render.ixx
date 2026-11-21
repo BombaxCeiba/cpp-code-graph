@@ -10,7 +10,7 @@ module;
  * CLI 规格文档 第 2 节的示例即格式契约；每个 JSON 载荷在适用处携带
  * error/partial/truncated 字段（第 1 节）。truncated 只表"结果被截
  * 断"；--depth 上限处的 BFS 前沿信号由 deeperEdgesExist 独立承载
- * （语义定案见 deeper_note 的三要素注释）。
+ * （语义见 deeper_note 的三要素注释）。
  *
  * @internal
  * db.tables.h 置于全局模块片段：本单元导入 cg.db，MSVC 要求 sqlpp23
@@ -1241,7 +1241,7 @@ export namespace cg::cli::render
             }
             const auto        row = cg::db::get_symbol(store, entry.id);
             const std::string name = row ? row->qualified_name : "?";
-            // 双行号口径（实测定案）：主坐标=对端符号定义
+            // 双行号口径（实测）：主坐标=对端符号定义
             // 行（与 query/impact/trace 一致），调用点移入 calls: 段（同文件
             // 省文件名）；边行缺失时只有定义坐标（诚实降级，不冒充调用点）。
             const cg::db::SymId pred =
@@ -2966,7 +2966,7 @@ export namespace cg::cli::render
      * @brief graph --symbol 的 JSON 载荷（agent 消费）。
      *
      * 诚实位一对：truncated = 结果被截断（闭包无条目上限，恒 false）；
-     * deeperEdgesExist 承载 --depth 上限处的前沿信号（语义定案见
+     * deeperEdgesExist 承载 --depth 上限处的前沿信号（语义见
      * deeper_note 的三要素注释）。
      */
     [[nodiscard]]

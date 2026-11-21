@@ -15,7 +15,7 @@
 #     该通道生效；vendor.compile-options 通道不生效，synth 命令的
 #     运行库旗标由 CMake 内部拼装、项目侧不可及）。
 #   - CMake < 4.5：CMake 实验性合成库丢 STL charconv 内联静态量
-#     （LNK2001 探针定案），项目自建 cg_std_modules OBJECT 库为
+#     （LNK2001 探针），项目自建 cg_std_modules OBJECT 库为
 #     std 生产者，影子 include 直接挂到那一个目标上。
 # 其余一切（VS 系统文件、ccg 源码、其它每个 TU）零触碰，clang64
 # 路径从不加载本文件。

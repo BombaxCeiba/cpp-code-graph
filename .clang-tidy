@@ -10,10 +10,20 @@ Checks: >
   -modernize-avoid-c-arrays,
   -modernize-use-transparent-functors,
   readability-identifier-naming,
+  readability-function-size,
 WarningsAsErrors: ''
 # 只检查项目自有源码头文件，排除第三方头（boost/fmt/spdlog 等）
 HeaderFilterRegex: 'cpp-code-graph/(src|tests)/'
 CheckOptions:
+  # ================= 函数尺寸 (readability-function-size) =================
+  # 单函数体上限 300 行。注意选项名是
+  # LineThreshold（无 s，写错会被 clang-tidy 静默忽略）；lambda 体
+  # 并入外围函数统计（不单独报，lambda 由 pre-commit 大 lambda 闸
+  # 以 40 行单独拦截，两层互补）。存量超限随简化批收官清零。
+  - key: readability-function-size.LineThreshold
+    value: '300'
+  # 分支数/参数数等其余维度暂不设阈值，只管行数。
+
   # ================= C++ 命名规范 (readability-identifier-naming) =================
   # --- 类型 / 别名 ---
   - key: readability-identifier-naming.ClassCase

@@ -21,6 +21,16 @@ on:
 permissions:
   contents: write
 
+# One in-flight run per ref: a newer push to the same branch or tag
+# cancels the superseded run, so rapid pushes stop stacking full
+# build+package pipelines (runner time is the only cost of a stale
+# smoke run, and two tag re-pushes racing on the same draft release
+# would duplicate uploads). Distinct refs (branch vs tag, tag vs tag)
+# land in different groups and never cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-package:
     runs-on: windows-2025-vs2026
@@ -82,7 +92,7 @@ jobs:
           "release version: $v"
 
       # CMake drift watch: the windows-2025-vs2026 image ships CMake
-      # 4.4.3 on PATH today (verified 2026-11, image 20260925.250.1), so
+      # 4.4.3 on PATH today (verified on image 20260925.250.1), so
       # this configure takes the <4.5 legacy std-module path. When the
       # image rolls to CMake >= 4.5 it auto-switches to the synth-target
       # + shadow modules.json path (cmake/CcgC2801Workaround.cmake) that

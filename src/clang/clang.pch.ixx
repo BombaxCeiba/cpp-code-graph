@@ -10,7 +10,7 @@
  * 条目逐字节原样返回（零变化门禁）。生产命令只认构建系统记录：
  * CMake/GNU 的 `-x c++-header` + `-emit-pch`/`.pch` 条目，或 MSBuild
  * sidecar `pch.json` 的 `/Yc` 调用。没有记录就文本回退——绝不拿消费者
- * 伞头合成 recipe（设计定案）。
+ * 伞头合成 recipe。
  */
 export module cg.clang.pch;
 

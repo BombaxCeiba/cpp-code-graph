@@ -5,7 +5,7 @@
 # 点名覆盖变量，绝不烤死绝对路径；实现在 cmake/CcgDeps.cmake）
 # 并以 cg:: 目标暴露；
 # 其余一律经 CPM 拉取，走可覆盖的 GITHUB_MIRROR_URL。下列配方全部
-# 已于 2026-10 在 MSVC 与 MinGW 双工具链本机 configure
+# 已在 MSVC 与 MinGW 双工具链本机 configure
 # 实测通过。
 
 set(GITHUB_MIRROR_URL "https://github.com" CACHE STRING "GitHub prefix override")
@@ -38,7 +38,7 @@ endforeach()
 function(_cpm_add_pfr)
     # 第一个：它的 Boost::pfr 目标必须在 cpp_yyjson 校验
     # CPPYYJSON_PFR_TARGET 之前存在。版本钉：boost-1.92.0 =
-    # boostorg/pfr 的最新稳定 tag（2026-10-11 经 GitHub tags API 核对）。
+    # boostorg/pfr 的最新稳定 tag（经 GitHub tags API 核对）。
     # BUILD_TESTING OFF：pfr 的测试链接 Boost::core/Boost::container_hash
     # （只在 Boost 超级工程内才有定义）。首次全新 configure 碰巧跳过
     # 它们（3rdParty 运行时 BUILD_TESTING 还没进缓存）；之后的重新生成
@@ -105,7 +105,7 @@ function(_cpm_add_sqlpp23)
 endfunction()
 
 function(_cpm_add_treesitter)
-    # tree-sitter 运行时 v0.27.1（PreToolUse shell 监听的设计定案
+    # tree-sitter 运行时 v0.27.1（PreToolUse shell 监听
     # ）。AMALGAMATED 单 TU（官方 CMake 的 AMALGAMATED 选项形态：
     # lib/src/lib.c 就地 include 全部实现 .c）——一个翻译单元拿到完整
     # 核心库，wasm 特性默认关闭（wasm_store.c 在无 TREE_SITTER_FEATURE_WASM

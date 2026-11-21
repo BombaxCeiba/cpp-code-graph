@@ -42,7 +42,7 @@ export namespace cg::util::treesit
     /**
      * @brief 行列位置（row 零基；column 为字节列，同样零基）。
      *
-     * 与 tree-sitter 的 TSPoint 同口径直译；独立命名以免泄漏 ts_ 名字。
+     * 与 tree-sitter 的 TSPoint 同口径；独立命名以免泄漏 ts_ 名字。
      */
     struct Point
     {

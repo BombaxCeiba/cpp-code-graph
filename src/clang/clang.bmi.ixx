@@ -886,7 +886,7 @@ export namespace cg::clang
         }
 
         /**
-         * @brief 工具集下限（设计定案）：14.44 是自建支持的最老 MSVC STL
+         * @brief 工具集下限：14.44 是自建支持的最老 MSVC STL
          * 世代；更老的工具集以零兼容投入降级。按 major.minor 数值比较。
          */
         [[nodiscard]]
@@ -2579,7 +2579,7 @@ export namespace cg::clang
          *
          * @internal 同层两节点不可能有依赖边（u 传递依赖 v 则 u 的度数归零
          * 必然晚于 v，u 层 > v 层），互不在彼此传递闭包内——这是层内可并行
-         * 构建、层间屏障后下游闭包定案的依据。未入任何层的节点在环上（或
+         * 构建、层间屏障后下游闭包的依据。未入任何层的节点在环上（或
          * 依赖环），由调用方按展平集标 module-dag-cycle（文本不变）。std
          * 伪节点绝不阻塞分层。
          */
@@ -3029,7 +3029,7 @@ export namespace cg::clang
      * import 的连接器模块——构建它们耗时且会在缺失依赖上失败）。拓扑
      * 序落选者处于（或依赖）import 环：接口 BMI 无法产出。
      * std pcm 段：std pcm 落在本趟 `<config_key>`/ 目录、用纯名（配置维度
-     * 是子目录、绝不是文件名指纹）。地板/工具集缺席降级（设计定案：
+     * 是子目录、绝不是文件名指纹）。地板/工具集缺席降级（
      * 14.44 之下零兼容投入——那些 std.ixx 世代的 STL 期导出错误无 flag
      * 向量可修）。姊妹引擎目录在本引擎下已死（绝不混喂新旧引擎
      * pcm），但只由显式 --force/--full 且超过 1 小时宽限期回收；增量/
@@ -4433,7 +4433,7 @@ export namespace cg::clang
             create_dir(config_dir);
         }
         std::unordered_map<std::string, std::vector<std::string>> closure_memo;
-        // 闭包预算：closure_of 只读构建期不变的 direct 字段（扫描期定案），
+        // 闭包预算：closure_of 只读构建期不变的 direct 字段（扫描期冻结），
         // 循环前按展平序一次算齐——此后含层内并行任务全程只读零锁。
         for (const std::string& name : order)
         {

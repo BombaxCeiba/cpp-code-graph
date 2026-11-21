@@ -14,7 +14,7 @@ module;
 /**
  * @module cg.clang.loader
  *
- * @brief LLVM 引擎库的运行时加载（按数据库解析的世界观，设计定案）：
+ * @brief LLVM 引擎库的运行时加载（按数据库解析的世界观）：
  * ccg 永不对 libclang 做链接期依赖。
  *
  * 本模块持有动态库加载的全部平台 API 与引擎 PATH 解析链；cg.clang.capi

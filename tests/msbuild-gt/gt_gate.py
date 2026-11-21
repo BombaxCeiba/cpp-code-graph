@@ -7,7 +7,7 @@ groundtruth.json 与 ccg 记录通道产物 compile_commands.json +
 pch.json，见 corpus/ 目录与 README.md 的语料来源说明）做六维
 对账，全部实测指标与入库基线逐值比对，任何一维漂移即失败。
 
-六维口径（判据源自金标评测战役的定案判据；每维对应基线 JSON 的同名节）：
+六维口径（判据源自金标评测；每维对应基线 JSON 的同名节）：
   tu_coverage（TU 覆盖）—— 金标构建参与实例集与 cdb 条目集双向
      对账，条目数差额必须恰为 .ixx 双趟数；
   defines（宏定义）—— 保序逐位（含重复出现位置）；
@@ -56,7 +56,7 @@ SHA_KEYS = {
     "pch.json": "pch_sha256",
 }
 
-# 语言标准 metadata 值到 /std: 旗标的映射（CL task SwitchOrder 直译）。
+# 语言标准 metadata 值到 /std: 旗标的映射（CL task SwitchOrder）。
 STD_MAP = {
     "stdcpplatest": "/std:c++latest",
     "stdcpp26": "/std:c++26",

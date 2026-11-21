@@ -12,7 +12,7 @@
 # 0.0.0-dev（本地无注入的默认值）。CI 在 tag 上剥 v 前缀后经环境变量
 # 注入，安装器文件名与包版本随之生成。
 #
-# 安装形态（用户已裁定）：仅 Windows、默认 user 级
+# 安装形态：仅 Windows、默认 user 级
 # （PrivilegesRequired=lowest 永不请求管理员，安装根随 {autopf} 落
 # 用户本地 Programs 目录）、per-machine 档与桌面快捷方式不做；唯一
 # 勾选项 addtopath（默认勾选）走垫片方案——在 %LOCALAPPDATA%\ccg\bin

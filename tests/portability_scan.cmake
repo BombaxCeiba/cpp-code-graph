@@ -111,7 +111,7 @@ if(_violations)
         "CCG_SQLITE3_ROOT cache overrides.")
 endif()
 
-# 分析层依赖栅栏（设计定案）：只有 graph/cli 可以
+# 分析层依赖栅栏：只有 graph/cli 可以
 # import cg.analysis。extract/db/clang 引它会倒置
 # 分层方向（analysis -> db/clang），是硬失败。
 file(GLOB_RECURSE _src_units "${root}/src/*.ixx")

@@ -660,7 +660,7 @@ Editing a **project file** (`.sln` / `.vcxproj` / `.vcxitems` / `.props` /
 list, include paths, property inheritance — not the bytes of any TU.
 Those edits used to be dropped silently (the hook's corpus-extension
 filter never let them through, and `ccg update <vcxproj>` only ever
-reported "not tracked"). The linkage (msbuild-incr phase 1) routes them
+reported "not tracked"). The linkage routes them
 through the SAME queue into a re-capture:
 
 1. **Hook gate widened**: project files pass the PostToolUse filter

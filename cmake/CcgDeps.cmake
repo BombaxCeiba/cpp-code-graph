@@ -37,7 +37,7 @@ function(_ccg_override_root out_var new_cache deprecated_cache)
 endfunction()
 
 function(_config_sqlite3)
-    # sqlite3，静态链接（用户决定）。两个来源，由覆盖值分流：
+    # sqlite3，静态链接。两个来源，由覆盖值分流：
     #   CCG_SQLITE3_ROOT 未设置（默认）：自行拉取固定的 sqlite.org
     #     合并版（MSVC cl 与 MSYS2 clang64 均探针验证）并在
     #     树内构建 sqlite3.c——每个工具集同一份源码，任何地方
@@ -122,8 +122,7 @@ endfunction()
 
 function(_config_libclang)
     # 系统 libclang，自每库一引擎政策起改为运行期加载
-    # （设计定案）：ccg 不再链接依赖 libclang 的
-    # 任何东西——引擎（libclang.dll / libclang.so）经
+    # ccg 不再链接依赖 libclang 的任何东西——引擎（libclang.dll / libclang.so）经
     # cg.clang.loader 在运行期打开。构建仍需要 clang-c
     # 头文件（cg.clang.capi 的派发表按它们定型）以及
     # 运行期库的前缀位置（测试把它前插到
