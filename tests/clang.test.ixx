@@ -377,6 +377,16 @@ namespace
     }
 
     // 模块条目捕获契约：
+    /// 夹具目录内相对路径的规范化拼接。
+    [[nodiscard]]
+    auto path_under(const std::string& base, std::string_view rel)
+        -> std::string
+    {
+        return cg::util::norm_path((std::filesystem::path{base} / rel)
+                                       .lexically_normal()
+                                       .generic_string());
+    }
+
     // 编译器令牌保留为 BMI 生产者身份，@modmap 展开
     // 记录产出的 BMI（module_output）与喂入的 BMI
     // （module_feeds，绝对路径），modmap 路径锚定 BMI 映射，
@@ -390,12 +400,6 @@ namespace
             return;
         }
         const std::string fix = cg::util::norm_path(fixture_dir);
-        const auto        under_fix = [&](std::string_view rel)
-        {
-            return cg::util::norm_path((std::filesystem::path{fix} / rel)
-                                           .lexically_normal()
-                                           .generic_string());
-        };
 
         cg::test::check(
             r,
@@ -403,19 +407,20 @@ namespace
             "compiler token (argv[0]) is kept aside");
         cg::test::check(
             r,
-            db[0].module_output == under_fix("build/mod_out.pcm"),
+            db[0].module_output == path_under(fix, "build/mod_out.pcm"),
             "-fmodule-output= from the rsp is recorded absolute");
         cg::test::check(
             r,
-            db[0].module_map == under_fix("mod_rsp.modmap"),
+            db[0].module_map == path_under(fix, "mod_rsp.modmap"),
             "the modmap response file path is recorded");
         cg::test::check(
             r,
             db[0].module_feeds.size() == 2
                 && db[0].module_feeds[0].name == "std"
-                && db[0].module_feeds[0].pcm == under_fix("build/std.pcm")
+                && db[0].module_feeds[0].pcm == path_under(fix, "build/std.pcm")
                 && db[0].module_feeds[1].name == "cg.util"
-                && db[0].module_feeds[1].pcm == under_fix("build/cg.util.pcm"),
+                && db[0].module_feeds[1].pcm
+                       == path_under(fix, "build/cg.util.pcm"),
             "rsp -fmodule-file=NAME=path feeds capture name + "
             "absolute pcm");
         bool out_dropped = true;
@@ -433,7 +438,7 @@ namespace
                 x_present = true;
             }
             if (db[0].argv[i]
-                == "-fmodule-file=std=" + under_fix("build/std.pcm"))
+                == "-fmodule-file=std=" + path_under(fix, "build/std.pcm"))
             {
                 feed_resolved = true;
             }
@@ -457,7 +462,8 @@ namespace
             db[1].compiler == "clang++.exe" && db[1].module_output.empty()
                 && db[1].module_map.empty() && db[1].module_feeds.size() == 1
                 && db[1].module_feeds[0].name == "std"
-                && db[1].module_feeds[0].pcm == under_fix("build/std.pcm"),
+                && db[1].module_feeds[0].pcm
+                       == path_under(fix, "build/std.pcm"),
             "plain-command-line module flags capture identically");
         cg::test::check(
             r,
@@ -937,19 +943,22 @@ namespace
             "artifact_size reports an empty artifact as 0");
     }
 
+    /// 读文件全文（缺失时给空串）。
+    [[nodiscard]]
+    auto read_file_or_empty(const std::filesystem::path& p) -> std::string
+    {
+        return cg::util::read_text_file(p.generic_string())
+            .value_or(std::string{});
+    }
+
     // donor 校验：0 字节/尺寸不符/头部损坏的 donor 绝不复制，目标保持原样。
     void bmi_copy_donor_verified(R& r)
     {
         namespace fs = std::filesystem;
         TempProj        proj{"ccg-bmi-donor-"};
         std::error_code ec;
-        const auto      read = [](const fs::path& p)
-        {
-            return cg::util::read_text_file(p.generic_string())
-                .value_or(std::string{});
-        };
-        const fs::path donor = proj.base / "donor.pcm";
-        const fs::path target = proj.base / "cfga" / "m.pcm";
+        const fs::path  donor = proj.base / "donor.pcm";
+        const fs::path  target = proj.base / "cfga" / "m.pcm";
         {
             std::ofstream out{donor, std::ios::binary};
             out << "CPCHgood";
@@ -962,7 +971,7 @@ namespace
             "a sized donor with a CPCH header copies");
         cg::test::check(
             r,
-            fs::exists(target, ec) && read(target) == "CPCHgood",
+            fs::exists(target, ec) && read_file_or_empty(target) == "CPCHgood",
             "the copied target carries the donor bytes");
 
         // 0 字节 donor：拒绝，目标不存在。
@@ -1018,7 +1027,7 @@ namespace
             "a donor whose size disagrees with the ledger is rejected");
         cg::test::check(
             r,
-            fs::exists(stale, ec) && read(stale) == "old",
+            fs::exists(stale, ec) && read_file_or_empty(stale) == "old",
             "the failed verification keeps the old target");
         // 复制失败/尺寸不符时必须清理临时文件。
         std::size_t leftovers = 0;
@@ -1033,25 +1042,29 @@ namespace
         cg::test::check(r, leftovers == 0, "donor verification leaves no tmp");
     }
 
+    /// 清单条目的合成构造（尺寸恒 1 的最小行）。
+    [[nodiscard]]
+    auto make_bmi_entry(
+        std::string_view name,
+        std::string_view command,
+        std::string_view pcm) -> cc::BmiEntry
+    {
+        cc::BmiEntry e;
+        e.name = name;
+        e.command = command;
+        e.pcm = pcm;
+        e.pcm_size = 1;
+        return e;
+    }
+
     // 并发写者不丢其它配置条目：写前并集并集是“不丢”的核心。
     void bmi_manifest_merge_preserves_entries(R& r)
     {
-        const auto make = [](std::string_view name,
-                             std::string_view command,
-                             std::string_view pcm)
-        {
-            cc::BmiEntry e;
-            e.name = name;
-            e.command = command;
-            e.pcm = pcm;
-            e.pcm_size = 1;
-            return e;
-        };
         cc::BmiManifest mine;
-        mine.entries.push_back(make("a", "cmd-a2", "cfga/a.pcm"));
+        mine.entries.push_back(make_bmi_entry("a", "cmd-a2", "cfga/a.pcm"));
         cc::BmiManifest disk; // 另一个进程刚写下的清单
-        disk.entries.push_back(make("a", "cmd-a2", "cfga/a.pcm"));
-        disk.entries.push_back(make("b", "cmd-b", "cfgb/b.pcm"));
+        disk.entries.push_back(make_bmi_entry("a", "cmd-a2", "cfga/a.pcm"));
+        disk.entries.push_back(make_bmi_entry("b", "cmd-b", "cfgb/b.pcm"));
         const std::size_t merged =
             cc::detail::merge_manifest_entries(mine, disk);
         cg::test::check(
@@ -1063,7 +1076,8 @@ namespace
             mine.entries[1].name == "b",
             "the sibling config entry survives the merge");
         cc::BmiManifest fresh_target;
-        fresh_target.entries.push_back(make("a", "cmd-a2", "cfga/a.pcm"));
+        fresh_target.entries.push_back(
+            make_bmi_entry("a", "cmd-a2", "cfga/a.pcm"));
         const std::unordered_set<std::string> dropped{
             cc::detail::bmi_entry_key("b", "cmd-b")};
         const std::size_t again =
@@ -1647,6 +1661,54 @@ namespace
         }
     }
 
+    /// 文本的换行计数。
+    [[nodiscard]]
+    auto line_count_of(std::string_view text) -> std::size_t
+    {
+        return static_cast<std::size_t>(std::ranges::count(text, '\n'));
+    }
+
+    /// 文本中子串出现次数（允许重叠）。
+    [[nodiscard]]
+    auto substring_count(std::string_view text, std::string_view needle)
+        -> std::size_t
+    {
+        std::size_t hits = 0;
+        for (std::size_t at = text.find(needle); at != std::string_view::npos;
+             at = text.find(needle, at + 1))
+        {
+            ++hits;
+        }
+        return hits;
+    }
+
+    /// 文本的第 n 行（0 起；越界给空视图）。
+    [[nodiscard]]
+    auto nth_line_of(std::string_view text, std::size_t n) -> std::string_view
+    {
+        std::size_t at = 0;
+        std::size_t seen = 0;
+        while (at <= text.size())
+        {
+            const std::size_t      end = text.find('\n', at);
+            const std::string_view line = text.substr(
+                at,
+                end == std::string_view::npos ? std::string_view::npos
+                                              : end - at);
+            if (seen == n)
+            {
+                return line;
+            }
+            ++seen;
+            if (end == std::string_view::npos)
+            {
+                break;
+            }
+            at = end + 1;
+        }
+        return std::string_view{};
+    }
+
     // ------------------------------------------------- cl 方言规则
     // ---------
 
@@ -1714,14 +1776,36 @@ namespace
                 && hus[2] == "multi-line.h",
             "header-unit import lines detected in file order");
 
-        // import 重写覆盖层：伞头、头单元、去模块化。
-        const std::string        src = read_fixture("hu_units.ixx");
-        std::vector<std::string> replaced;
-        const std::string        out =
-            cc::import_rewrite_overlay(src, true, true, false, &replaced);
+        // 混合 TU 检测器：`#include` 解析进钉住的根内
+        // （never-feed-std.pcm 规则的触发器）。
+        const std::vector<std::string> roots{
+            std::string{fixture_dir} + "/stlroot"};
         cg::test::check(
             r,
-            replaced.size() == 6,
+            cc::detail::text_has_stl_include(
+                std::string{fixture("stl_inc.cpp")},
+                roots),
+            "STL include under a pinned root detected");
+        cg::test::check(
+            r,
+            !cc::detail::text_has_stl_include(
+                std::string{fixture("plain_inc.cpp")},
+                roots),
+            "project-only includes do not trigger the detector");
+    }
+
+    // import 重写覆盖层的形态面：伞头、头单元、去模块化；行数恒等；
+    // 同行跟随、行中点位、被丢弃模块的同宽抹除与名字收集。
+    void import_rewrite_overlay_cases(R& r)
+    {
+        // import 重写覆盖层：伞头、头单元、去模块化。
+        const std::string       src = read_fixture("hu_units.ixx");
+        const cc::ImportOverlay res =
+            cc::import_rewrite_overlay(src, true, true, false);
+        const std::string& out = res.text;
+        cg::test::check(
+            r,
+            res.replaced.size() == 6,
             "std + std.compat + export-std + 3 header units replaced");
         cg::test::check(
             r,
@@ -1740,11 +1824,9 @@ namespace
             r,
             out.find("import hu.other;") != std::string::npos,
             "named-module imports stay verbatim");
-        const auto count_lines = [](std::string_view text)
-        { return static_cast<std::size_t>(std::ranges::count(text, '\n')); };
         cg::test::check(
             r,
-            count_lines(src) == count_lines(out),
+            line_count_of(src) == line_count_of(out),
             "line count preserved");
 
         // 重写在伞下必须处理的 import 声明形态：
@@ -1758,34 +1840,18 @@ namespace
                                              "export\nimport std;\n"
                                              "import\n  std.compat;\n"
                                              "int body() { return 0; }\n";
-        std::vector<std::string>       mix_replaced;
         const std::vector<std::string> dropped{"util"};
-        const std::string              mixed = cc::import_rewrite_overlay(
-            mix,
-            true,
-            false,
-            false,
-            &mix_replaced,
-            dropped);
+        const cc::ImportOverlay        mix_res =
+            cc::import_rewrite_overlay(mix, true, false, false, dropped);
+        const std::string& mixed = mix_res.text;
         cg::test::check(
             r,
-            count_lines(mix) == count_lines(mixed),
+            line_count_of(mix) == line_count_of(mixed),
             "shape rewrite preserves the line count");
-        const auto count_hits =
-            [](std::string_view text, std::string_view needle)
-        {
-            std::size_t hits = 0;
-            for (std::size_t at = text.find(needle);
-                 at != std::string_view::npos;
-                 at = text.find(needle, at + 1))
-            {
-                ++hits;
-            }
-            return hits;
-        };
         cg::test::check(
             r,
-            count_hits(mixed, "#include <__msvc_all_public_headers.hpp>") == 4,
+            substring_count(mixed, "#include <__msvc_all_public_headers.hpp>")
+                == 4,
             "std/std.compat imports become the umbrella include "
             "except the one with a follower import on its line "
             "(that tail is not inert, so it blanks - the "
@@ -1804,8 +1870,8 @@ namespace
             "code below the rewrites stays untouched");
         cg::test::check(
             r,
-            mix_replaced.size() == 6 && mix_replaced[3] == "util"
-                && mix_replaced[5] == "std.compat",
+            mix_res.replaced.size() == 6 && mix_res.replaced[3] == "util"
+                && mix_res.replaced[5] == "std.compat",
             "rewritten names collect in file order incl. dropped");
 
         // 不是本行第一个非空白令牌的 '#' 不是
@@ -1819,16 +1885,16 @@ namespace
             sites.size() == 3 && sites[0].starts_line && !sites[1].starts_line
                 && !sites[2].starts_line,
             "scanner reports whether each site opens its line");
-        std::vector<std::string> mid_replaced;
-        const std::string        mid = "import win; import std;\n"
-                                       "#include <string>\n"
-                                       "void g(); import \"cfg.h\";\n"
-                                       "int body() { return 0; }\n";
-        const std::string        mid_out =
-            cc::import_rewrite_overlay(mid, true, true, false, &mid_replaced);
+        const std::string       mid = "import win; import std;\n"
+                                      "#include <string>\n"
+                                      "void g(); import \"cfg.h\";\n"
+                                      "int body() { return 0; }\n";
+        const cc::ImportOverlay mid_res =
+            cc::import_rewrite_overlay(mid, true, true, false);
+        const std::string& mid_out = mid_res.text;
         cg::test::check(
             r,
-            count_lines(mid) == count_lines(mid_out),
+            line_count_of(mid) == line_count_of(mid_out),
             "mid-line rewrite preserves the line count");
         cg::test::check(
             r,
@@ -1849,16 +1915,15 @@ namespace
             "same-line neighbors and authored directives stay put");
         cg::test::check(
             r,
-            mid_replaced.size() == 2 && mid_replaced[0] == "std"
-                && mid_replaced[1] == "cfg.h",
+            mid_res.replaced.size() == 2 && mid_res.replaced[0] == "std"
+                && mid_res.replaced[1] == "cfg.h",
             "mid-line rewrites still collect their names");
-        std::vector<std::string> rider_replaced;
-        const std::string        rider = cc::import_rewrite_overlay(
-            "void f(); export import std;\n",
-            true,
-            false,
-            false,
-            &rider_replaced);
+        const std::string rider = cc::import_rewrite_overlay(
+                                      "void f(); export import std;\n",
+                                      true,
+                                      false,
+                                      false)
+                                      .text;
         cg::test::check(
             r,
             rider.find('#') == std::string::npos
@@ -1872,148 +1937,97 @@ namespace
         // import 区段之后的本行剩余部分
         // 全是空白/注释时才能发出；跟随代码回退到同宽
         // 抹除（两种情况下 import 行都经 `replaced` 幸存）。
-        const auto nth_line = [](std::string_view text, std::size_t n)
-        {
-            std::size_t at = 0;
-            std::size_t seen = 0;
-            while (at <= text.size())
-            {
-                const std::size_t      end = text.find('\n', at);
-                const std::string_view line = text.substr(
-                    at,
-                    end == std::string_view::npos ? std::string_view::npos
-                                                  : end - at);
-                if (seen == n)
-                {
-                    return line;
-                }
-                ++seen;
-                if (end == std::string_view::npos)
-                {
-                    break;
-                }
-                at = end + 1;
-            }
-            return std::string_view{};
-        };
-        const std::string        tail_src = read_fixture("follower_header.cpp");
-        std::vector<std::string> tail_replaced;
-        const std::string        tail_out = cc::import_rewrite_overlay(
-            tail_src,
-            false,
-            true,
-            false,
-            &tail_replaced);
+        const std::string       tail_src = read_fixture("follower_header.cpp");
+        const cc::ImportOverlay tail_res =
+            cc::import_rewrite_overlay(tail_src, false, true, false);
+        const std::string& tail_out = tail_res.text;
         cg::test::check(
             r,
-            count_lines(tail_src) == count_lines(tail_out),
+            line_count_of(tail_src) == line_count_of(tail_out),
             "follower header rewrite preserves the line count");
         cg::test::check(
             r,
-            nth_line(tail_out, 4).size() == nth_line(tail_src, 4).size()
-                && nth_line(tail_out, 4).find('#') == std::string_view::npos
-                && nth_line(tail_out, 4).find("import")
+            nth_line_of(tail_out, 4).size() == nth_line_of(tail_src, 4).size()
+                && nth_line_of(tail_out, 4).find('#') == std::string_view::npos
+                && nth_line_of(tail_out, 4).find("import")
                        == std::string_view::npos
-                && nth_line(tail_out, 4).find("int follower_impl()")
+                && nth_line_of(tail_out, 4).find("int follower_impl()")
                        != std::string_view::npos,
             "follower code after a line-start header import blanks "
             "same-width");
         cg::test::check(
             r,
-            nth_line(tail_out, 5).starts_with("#include \"follower_cfg.h\"")
-                && nth_line(tail_out, 5).find("// comment-only follower")
+            nth_line_of(tail_out, 5).starts_with("#include \"follower_cfg.h\"")
+                && nth_line_of(tail_out, 5).find("// comment-only follower")
                        != std::string_view::npos,
             "whitespace/comment-only tail keeps the grown directive");
         cg::test::check(
             r,
-            tail_replaced.size() == 2 && tail_replaced[0] == "follower_cfg.h"
-                && tail_replaced[1] == "follower_cfg.h",
+            tail_res.replaced.size() == 2
+                && tail_res.replaced[0] == "follower_cfg.h"
+                && tail_res.replaced[1] == "follower_cfg.h",
             "both header sites still collect their import names");
-        const std::string umb_src = read_fixture("follower_umbrella.cpp");
-        std::vector<std::string> umb_replaced;
-        const std::string        umb_out = cc::import_rewrite_overlay(
-            umb_src,
-            true,
-            false,
-            false,
-            &umb_replaced);
+        const std::string       umb_src = read_fixture("follower_umbrella.cpp");
+        const cc::ImportOverlay umb_res =
+            cc::import_rewrite_overlay(umb_src, true, false, false);
+        const std::string& umb_out = umb_res.text;
         cg::test::check(
             r,
-            count_lines(umb_src) == count_lines(umb_out),
+            line_count_of(umb_src) == line_count_of(umb_out),
             "follower umbrella rewrite preserves the line count");
         cg::test::check(
             r,
-            nth_line(umb_out, 4).size() == nth_line(umb_src, 4).size()
-                && nth_line(umb_out, 4).find('#') == std::string_view::npos
-                && nth_line(umb_out, 4).find("import") == std::string_view::npos
-                && nth_line(umb_out, 4).find("int umbrella_follow()")
+            nth_line_of(umb_out, 4).size() == nth_line_of(umb_src, 4).size()
+                && nth_line_of(umb_out, 4).find('#') == std::string_view::npos
+                && nth_line_of(umb_out, 4).find("import")
+                       == std::string_view::npos
+                && nth_line_of(umb_out, 4).find("int umbrella_follow()")
                        != std::string_view::npos,
             "follower code after a line-start std import blanks "
             "same-width");
         cg::test::check(
             r,
-            nth_line(umb_out, 5)
+            nth_line_of(umb_out, 5)
                     .starts_with("#include <__msvc_all_public_headers.hpp>")
-                && nth_line(umb_out, 5).find("// comment-only follower")
+                && nth_line_of(umb_out, 5).find("// comment-only follower")
                        != std::string_view::npos,
             "whitespace/comment-only tail keeps the umbrella directive");
         cg::test::check(
             r,
-            umb_replaced.size() == 2 && umb_replaced[0] == "std"
-                && umb_replaced[1] == "std",
+            umb_res.replaced.size() == 2 && umb_res.replaced[0] == "std"
+                && umb_res.replaced[1] == "std",
             "both std sites still collect their import names");
 
         // 注释/字符串/指令里的 `import` 绝不匹配。
-        const std::string        decoy = "// import std;\n"
-                                         "const char* s = \"import std;\";\n"
-                                         "#import <nope.tlb>\n"
-                                         "int keep() { return 1; }\n";
-        std::vector<std::string> decoy_replaced;
-        const std::string        decoy_out = cc::import_rewrite_overlay(
-            decoy,
-            true,
-            false,
-            false,
-            &decoy_replaced);
+        const std::string       decoy = "// import std;\n"
+                                        "const char* s = \"import std;\";\n"
+                                        "#import <nope.tlb>\n"
+                                        "int keep() { return 1; }\n";
+        const cc::ImportOverlay decoy_res =
+            cc::import_rewrite_overlay(decoy, true, false, false);
+        const std::string& decoy_out = decoy_res.text;
         cg::test::check(
             r,
-            decoy_replaced.empty()
+            decoy_res.replaced.empty()
                 && decoy_out.find("import std;") != std::string::npos
                 && decoy_out == decoy,
             "commented/quoted/directive imports stay verbatim");
 
         // 去模块化：模块声明同宽抹除。
         const std::string demod =
-            cc::import_rewrite_overlay(src, false, false, true);
+            cc::import_rewrite_overlay(src, false, false, true).text;
         cg::test::check(
             r,
             demod.find("export module hu.fixture;") == std::string::npos,
             "module declaration blanked under demodule");
         cg::test::check(
             r,
-            count_lines(src) == count_lines(demod),
+            line_count_of(src) == line_count_of(demod),
             "demodule preserves the line count");
         cg::test::check(
             r,
             demod.find("int body()") != std::string::npos,
             "demodule keeps the body text");
-
-        // 混合 TU 检测器：`#include` 解析进钉住的根内
-        // （never-feed-std.pcm 规则的触发器）。
-        const std::vector<std::string> roots{
-            std::string{fixture_dir} + "/stlroot"};
-        cg::test::check(
-            r,
-            cc::detail::text_has_stl_include(
-                std::string{fixture("stl_inc.cpp")},
-                roots),
-            "STL include under a pinned root detected");
-        cg::test::check(
-            r,
-            !cc::detail::text_has_stl_include(
-                std::string{fixture("plain_inc.cpp")},
-                roots),
-            "project-only includes do not trigger the detector");
     }
 
     // 剥离层（cl cdb 记录 argv 权威的承重件）：MSVC 模块开关在三个消费点
@@ -2199,7 +2213,14 @@ namespace
             s8a.argv == std::vector<std::string>{"/TP", "h.ixx"},
             "all three spellings of /exportHeader and "
             "/sourceDependencies strip with their values");
+    }
 
+    // 剥离层的等价与单一事实源面：修复前后三种 cdb 拼写剥除产物逐字节
+    // 一致、同名前缀不误伤、共享清单在 classify 与 strip 两个消费面
+    // 上的全部拼写归类正确。
+    void msvc_module_strip_ledger_invariants(R& r)
+    {
+        using cc::detail::MsvcModuleStrip;
         // 修复形态等价守卫（翻译层成对保留落地后的关键不变量）：cdb 中
         // 六项为两段式带值（或冒号连写）——剥离层成对剥除后，引擎 argv 与
         // 修复前裸拼写形态（值被丢的历史 cdb）的剥除产物逐字节一致。引擎
@@ -2476,6 +2497,21 @@ namespace
             "byte-identical");
     }
 
+    /// token 是否以大小写不敏感的 .exe 结尾（引擎可执行路径的形状）。
+    [[nodiscard]]
+    auto exe_shaped_token(const std::string& a) -> bool
+    {
+        return a.size() >= 4
+               && cg::util::ascii_iequals(a.substr(a.size() - 4), ".exe");
+    }
+
+    /// 参数向量里是否没有任何引擎可执行路径 token。
+    [[nodiscard]]
+    auto argv_exe_free(const std::vector<std::string>& v) -> bool
+    {
+        return std::ranges::none_of(v, exe_shaped_token);
+    }
+
     // 拼装层断言（逃逸缺陷修复的承重件）：接口 BMI 重放命令的参数向量组装
     // ——产物绝不携带可执行路径 token（引擎路径由 run_tool 首参携带，命令
     // 行首 token 由 run_process 拼装"exe" + 参数；参数向量里再出现一份引
@@ -2488,14 +2524,6 @@ namespace
         using cc::detail::bmi_replay_argv;
         using cc::detail::MsvcModuleStrip;
 
-        // 大小写不敏感的 .exe 后缀形状（引擎可执行路径的特征尾巴）。
-        const auto exe_shaped = [](const std::string& a)
-        {
-            return a.size() >= 4
-                   && cg::util::ascii_iequals(a.substr(a.size() - 4), ".exe");
-        };
-        const auto exe_free = [&](const std::vector<std::string>& v)
-        { return std::ranges::none_of(v, exe_shaped); };
         const std::vector<std::pair<std::string, std::string>> feeds = {
             {"std", "E:/c/bmi/std.pcm"}};
 
@@ -2533,7 +2561,7 @@ namespace
             "module suffix and dep feeds");
         cg::test::check(
             r,
-            exe_free(cl_replay),
+            argv_exe_free(cl_replay),
             "the replay argv carries no executable-path token "
             "(the engine path lives in run_tool's exe slot)");
 
@@ -2555,7 +2583,10 @@ namespace
                 && std::ranges::find(topped, "/std:c++20") != topped.end(),
             "a recorded argv without a std switch gets the "
             "dialect default appended");
-        cg::test::check(r, exe_free(topped), "the topped argv stays exe-free");
+        cg::test::check(
+            r,
+            argv_exe_free(topped),
+            "the topped argv stays exe-free");
 
         // cl 方言合成基线（无记录权威）：driver-mode/EHsc/std 先行压入，
         // 基线中的重复项跳过。
@@ -2584,7 +2615,7 @@ namespace
             "leading trio");
         cg::test::check(
             r,
-            exe_free(cl_synth),
+            argv_exe_free(cl_synth),
             "the synthesized cl argv is "
             "exe-free");
 
@@ -2609,7 +2640,7 @@ namespace
             "the synthesized gnu baseline keeps one -std only");
         cg::test::check(
             r,
-            exe_free(gnu_synth),
+            argv_exe_free(gnu_synth),
             "the synthesized gnu argv is "
             "exe-free");
     }
@@ -2718,6 +2749,22 @@ namespace
             "cl flags without the switch keep the GNU supplement");
     }
 
+    /// 补充参数里 -isystem 旗标后的取值列表。
+    [[nodiscard]]
+    auto isystem_values_of(const std::vector<std::string>& extra)
+        -> std::vector<std::string>
+    {
+        std::vector<std::string> values;
+        for (std::size_t i = 0; i + 1 < extra.size(); i += 2)
+        {
+            if (extra[i] == "-isystem")
+            {
+                values.push_back(extra[i + 1]);
+            }
+        }
+        return values;
+    }
+
     // B 路接线闸门（接线修复）：带 -nostdinc++ 的 TU
     // 自带 C++ 标准库 include，所以补充绝不能在其后
     // 再追加引擎自己的标准库根（libc++ 也带
@@ -2736,19 +2783,6 @@ namespace
                 stdlib_roots.push_back(dir);
             }
         }
-        const auto isystem_values = [](const std::vector<std::string>& extra)
-        {
-            std::vector<std::string> values;
-            for (std::size_t i = 0; i + 1 < extra.size(); i += 2)
-            {
-                if (extra[i] == "-isystem")
-                {
-                    values.push_back(extra[i + 1]);
-                }
-            }
-            return values;
-        };
-
         const std::vector<std::string> wired = {
             "-std=c++20",
             "-nostdinc++",
@@ -2759,7 +2793,7 @@ namespace
         const std::vector<std::string> wired_extra =
             cc::driver_supplement("x.cpp", wired);
         const std::vector<std::string> wired_values =
-            isystem_values(wired_extra);
+            isystem_values_of(wired_extra);
         bool leaked = false;
         for (const std::string& root : stdlib_roots)
         {
@@ -2792,7 +2826,7 @@ namespace
         const std::vector<std::string> plain_extra =
             cc::driver_supplement("x.cpp", plain);
         const std::vector<std::string> plain_values =
-            isystem_values(plain_extra);
+            isystem_values_of(plain_extra);
         bool stdlib_present = stdlib_roots.empty();
         for (const std::string& root : stdlib_roots)
         {
@@ -3345,8 +3379,6 @@ namespace
     // 指令或更长的标识符内部。
     void export_overlay_rules(R& r)
     {
-        const auto blanked = [&](std::string_view src)
-        { return cc::export_overlay(src); };
 
         // 永远同宽（保列保行正是全部意义）。
         const std::pair<std::string_view, std::string_view> keep_or_blank[] = {
@@ -3374,7 +3406,7 @@ namespace
         };
         for (const auto& [src, want] : keep_or_blank)
         {
-            const std::string got = blanked(src);
+            const std::string got = cc::export_overlay(src);
             cg::test::check(
                 r,
                 got == want,
@@ -3389,7 +3421,7 @@ namespace
         // 末尾后面无物的 `export` 保持原样。
         cg::test::check(
             r,
-            blanked("int x;\nexport") == "int x;\nexport",
+            cc::export_overlay("int x;\nexport") == "int x;\nexport",
             "export at EOF is not blanked");
 
         // 幂等：抹两次等于抹一次。
@@ -3398,12 +3430,16 @@ namespace
             "// export\nexport { int g(); }\n";
         cg::test::check(
             r,
-            blanked(blanked(mixed)) == blanked(mixed),
+            cc::export_overlay(cc::export_overlay(mixed))
+                == cc::export_overlay(mixed),
             "overlay is idempotent");
 
         // 原始字符串里的标记词 `export` 完好无损。
         const std::string raw = "auto r = R\"x(export namespace)x\";";
-        cg::test::check(r, blanked(raw) == raw, "export inside a raw string");
+        cg::test::check(
+            r,
+            cc::export_overlay(raw) == raw,
+            "export inside a raw string");
     }
 
     // 迷你夹具上的解析级证明：覆盖层生效后，
@@ -3565,45 +3601,104 @@ namespace
     // 根的优先级矩阵（空标记文件——解析只探测
     // 存在性，从不加载），外加已加载引擎的身份面。
 
+    /// 建出假引擎条目文件（含父目录）并断言创建成功。
+    void touch_fake_entry(R& r, const std::filesystem::path& p)
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(p.parent_path(), ec);
+        std::ofstream out{p, std::ios::binary};
+        cg::test::check(
+            r,
+            out.good(),
+            std::string{"fake engine entry created: "} + p.generic_string());
+    }
+
+    /// 建出假驱动条目文件（含父目录）并断言创建成功。
+    void touch_fake_driver_entry(R& r, const std::filesystem::path& p)
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(p.parent_path(), ec);
+        std::ofstream out{p, std::ios::binary};
+        cg::test::check(
+            r,
+            out.good(),
+            std::string{"fake driver entry created: "} + p.generic_string());
+    }
+
+    /// 四路输入的驱动链解析（只取驱动路径）。
+    [[nodiscard]]
+    auto driver_chain_of(
+        const std::string& override_root,
+        const std::string& engine_library,
+        const std::string& env_root,
+        const std::string& path_env) -> std::string
+    {
+        return cc::resolve_driver_chain_from(
+                   override_root,
+                   engine_library,
+                   env_root,
+                   path_env)
+            .driver;
+    }
+
+    /// 目录内驱动文件的规范化路径。
+    [[nodiscard]]
+    auto driver_path_in(const std::string& driver, const std::string& dir)
+        -> std::string
+    {
+        return (std::filesystem::path{dir} / driver)
+            .lexically_normal()
+            .generic_string();
+    }
+
+    /// 解析抛出的 runtime_error 文本是否含给定针串（不抛给假）。
+    [[nodiscard]]
+    auto resolve_throws_with(
+        const std::string& configured,
+        const std::string& env,
+        const std::string& paths,
+        std::string_view   needle) -> bool
+    {
+        try
+        {
+            (void)cc::engine::resolve_library_from(configured, env, paths);
+        }
+        catch (const std::runtime_error& e)
+        {
+            return std::string_view{e.what()}.find(needle)
+                   != std::string_view::npos;
+        }
+        return false;
+    }
+
     void engine_resolution_matrix(R& r)
     {
         namespace fs = std::filesystem;
-        TempProj        proj{"ccg-engine-"};
-        std::error_code ec;
-        const auto      touch = [&](const fs::path& p)
-        {
-            std::error_code ec;
-            fs::create_directories(p.parent_path(), ec);
-            std::ofstream out{p, std::ios::binary};
-            cg::test::check(
-                r,
-                out.good(),
-                std::string{"fake engine entry created: "}
-                    + p.generic_string());
-        };
+        TempProj          proj{"ccg-engine-"};
+        std::error_code   ec;
         const std::string lib{cc::engine::library_file_name};
         const std::string driver{cc::engine::discovery_driver_names[0]};
 
         // rootA：库在 bin/ 下的前缀（msys2/VS 布局）。
         const std::string root_a = (proj.base / "a").generic_string();
-        touch(proj.base / "a" / "bin" / driver);
-        touch(proj.base / "a" / "bin" / lib);
+        touch_fake_entry(r, proj.base / "a" / "bin" / driver);
+        touch_fake_entry(r, proj.base / "a" / "bin" / lib);
         // rootB：库只在 lib/ 下的前缀（已批准设计的
         // root/lib 拼写）。
         const std::string root_b = (proj.base / "b").generic_string();
-        touch(proj.base / "b" / "lib" / lib);
+        touch_fake_entry(r, proj.base / "b" / "lib" / lib);
         // rootC：发现根——PATH 上的 clang 驱动，库在
         // 其旁边。
         const std::string dir_c = (proj.base / "c" / "bin").generic_string();
-        touch(proj.base / "c" / "bin" / driver);
-        touch(proj.base / "c" / "bin" / lib);
+        touch_fake_entry(r, proj.base / "c" / "bin" / driver);
+        touch_fake_entry(r, proj.base / "c" / "bin" / lib);
         // rootD：工具链根里哪里都没有库的驱动。
         const std::string dir_d = (proj.base / "d" / "bin").generic_string();
-        touch(proj.base / "d" / "bin" / driver);
+        touch_fake_entry(r, proj.base / "d" / "bin" / driver);
         // 一个配置成文件（库本身，任意名字）的根和一个空目录。
         const std::string direct =
             (proj.base / "direct" / "myclang.dll").generic_string();
-        touch(proj.base / "direct" / "myclang.dll");
+        touch_fake_entry(r, proj.base / "direct" / "myclang.dll");
         const std::string root_empty = (proj.base / "empty").generic_string();
         fs::create_directories(fs::path{root_empty}, ec);
 
@@ -3685,22 +3780,22 @@ namespace
         // r5：配置的根没有库是可操作的错误。
         cg::test::check(
             r,
-            throws_with(root_empty, "", "", root_empty)
-                && throws_with(root_empty, "", "", "llvm-path"),
+            resolve_throws_with(root_empty, "", "", root_empty)
+                && resolve_throws_with(root_empty, "", "", "llvm-path"),
             "configured root without a library fails, naming the "
             "root and the llvm-path knob");
         // r6：哪里都没有 -> 点名每个旋钮的可操作错误。
         cg::test::check(
             r,
-            throws_with("", "", "", "CCG_LLVM_ROOT")
-                && throws_with("", "", "", "llvm-path"),
+            resolve_throws_with("", "", "", "CCG_LLVM_ROOT")
+                && resolve_throws_with("", "", "", "llvm-path"),
             "no engine at all fails, naming env and config knobs");
         // r7：PATH 上的驱动而其根没有库时确定性
         // 失败（绝不静默滑到另一个
         // 工具链）。
         cg::test::check(
             r,
-            throws_with("", "", dir_d, "driver"),
+            resolve_throws_with("", "", dir_d, "driver"),
             "driver without a library fails naming the driver");
     }
 
@@ -3782,102 +3877,76 @@ namespace
     void driver_chain_matrix(R& r)
     {
         namespace fs = std::filesystem;
-        TempProj        proj{"ccg-driver-"};
-        std::error_code ec;
-        const auto      touch = [&](const fs::path& p)
-        {
-            std::error_code ec;
-            fs::create_directories(p.parent_path(), ec);
-            std::ofstream out{p, std::ios::binary};
-            cg::test::check(
-                r,
-                out.good(),
-                std::string{"fake driver entry created: "}
-                    + p.generic_string());
-        };
+        TempProj          proj{"ccg-driver-"};
+        std::error_code   ec;
         const std::string driver{cc::engine::discovery_driver_names[0]};
         const std::string lib{cc::engine::library_file_name};
 
         // eBin：引擎库在驱动旁（bin/ 布局）。
         const std::string ebin = (proj.base / "eBin" / "bin").generic_string();
-        touch(proj.base / "eBin" / "bin" / driver);
-        touch(proj.base / "eBin" / "bin" / lib);
+        touch_fake_driver_entry(r, proj.base / "eBin" / "bin" / driver);
+        touch_fake_driver_entry(r, proj.base / "eBin" / "bin" / lib);
         // eLib：库在 lib/ 下、驱动在 bin/ 下（lib/ 布局）。
         const std::string elib = (proj.base / "eLib").generic_string();
-        touch(proj.base / "eLib" / "lib" / lib);
-        touch(proj.base / "eLib" / "bin" / driver);
+        touch_fake_driver_entry(r, proj.base / "eLib" / "lib" / lib);
+        touch_fake_driver_entry(r, proj.base / "eLib" / "bin" / driver);
         // eRoot：库文件在前缀根、驱动在 bin/ 下。
         const std::string eroot = (proj.base / "eRoot").generic_string();
-        touch(proj.base / "eRoot" / "myclang.dll");
-        touch(proj.base / "eRoot" / "bin" / driver);
+        touch_fake_driver_entry(r, proj.base / "eRoot" / "myclang.dll");
+        touch_fake_driver_entry(r, proj.base / "eRoot" / "bin" / driver);
         // eNone：仅引擎布局——哪都没有驱动的库。
         const std::string enone =
             (proj.base / "eNone" / "bin").generic_string();
-        touch(proj.base / "eNone" / "bin" / lib);
+        touch_fake_driver_entry(r, proj.base / "eNone" / "bin" / lib);
         // envP：环境可能点名的另一个工具链根。
         const std::string envp = (proj.base / "envP").generic_string();
-        touch(proj.base / "envP" / "bin" / driver);
+        touch_fake_driver_entry(r, proj.base / "envP" / "bin" / driver);
         // pathP：经 PATH 找到的工具链。
         const std::string pathp =
             (proj.base / "pathP" / "bin").generic_string();
-        touch(proj.base / "pathP" / "bin" / driver);
-
-        const auto chain = [&](const std::string& override_root,
-                               const std::string& engine_library,
-                               const std::string& env_root,
-                               const std::string& path_env)
-        {
-            return cc::resolve_driver_chain_from(
-                       override_root,
-                       engine_library,
-                       env_root,
-                       path_env)
-                .driver;
-        };
-        const auto expected = [&](const std::string& dir)
-        {
-            return (fs::path{dir} / driver).lexically_normal().generic_string();
-        };
+        touch_fake_driver_entry(r, proj.base / "pathP" / "bin" / driver);
 
         // d1：引擎自己的驱动压过环境根与 PATH。
         cg::test::check(
             r,
-            chain("", ebin + "/" + lib, envp, pathp) == expected(ebin),
+            driver_chain_of("", ebin + "/" + lib, envp, pathp)
+                == driver_path_in(driver, ebin),
             "bin-layout engine wins over env root and PATH");
         // d2：lib/ 布局经安装前缀解析。
         cg::test::check(
             r,
-            chain("", elib + "/lib/" + lib, envp, pathp)
-                == expected(elib + "/bin"),
+            driver_chain_of("", elib + "/lib/" + lib, envp, pathp)
+                == driver_path_in(driver, elib + "/bin"),
             "lib-layout engine resolves through its prefix");
         // d3：前缀根里的库文件找到 root/bin。
         cg::test::check(
             r,
-            chain("", eroot + "/myclang.dll", "", "")
-                == expected(eroot + "/bin"),
+            driver_chain_of("", eroot + "/myclang.dll", "", "")
+                == driver_path_in(driver, eroot + "/bin"),
             "root-layout engine finds its own bin/");
         // d4/d5：仅引擎布局（没有自己的驱动）回退到
         // 环境根，再到 PATH。
         cg::test::check(
             r,
-            chain("", enone + "/" + lib, envp, pathp)
-                == expected(envp + "/bin"),
+            driver_chain_of("", enone + "/" + lib, envp, pathp)
+                == driver_path_in(driver, envp + "/bin"),
             "driverless engine falls back to the env root");
         cg::test::check(
             r,
-            chain("", enone + "/" + lib, "", pathp) == expected(pathp),
+            driver_chain_of("", enone + "/" + lib, "", pathp)
+                == driver_path_in(driver, pathp),
             "driverless engine without env falls back to PATH");
         // d6：覆盖获胜且是唯一来源；引擎库的
         // 文件拼写锚定在文件所在目录。
         cg::test::check(
             r,
-            chain(ebin + "/" + lib, elib + "/lib/" + lib, envp, pathp)
-                == expected(ebin),
+            driver_chain_of(ebin + "/" + lib, elib + "/lib/" + lib, envp, pathp)
+                == driver_path_in(driver, ebin),
             "override as the library file wins and anchors");
         // d7：点名不到驱动的覆盖失败——不静默回退。
         cg::test::check(
             r,
-            chain(
+            driver_chain_of(
                 (proj.base / "nope").generic_string(),
                 ebin + "/" + lib,
                 envp,
@@ -3887,13 +3956,17 @@ namespace
         // d8：未加载引擎——环境根生效，再到 PATH。
         cg::test::check(
             r,
-            chain("", "", envp, pathp) == expected(envp + "/bin"),
+            driver_chain_of("", "", envp, pathp)
+                == driver_path_in(driver, envp + "/bin"),
             "no engine loaded: the env root applies");
         cg::test::check(
             r,
-            chain("", "", "", pathp) == expected(pathp),
+            driver_chain_of("", "", "", pathp) == driver_path_in(driver, pathp),
             "no engine, no env: PATH applies");
     }
+
+    [[nodiscard]]
+    auto dir_files_gone(const std::filesystem::path& dir) -> bool;
 
     // 驱动缓存重定键回归（缓存键=已加载引擎）：引擎在
     // 同一进程的两个索引尾巴之间静默切换（按库世界观，
@@ -4055,40 +4128,15 @@ namespace
         // 删除传播中，容忍；任何条目打得开 → 文件真实存活，红。
         // 轮询在外层吸收删除传播的亚秒级瞬态，全挂起/已删首轮即
         // 通过、不再空耗。
-        const auto files_gone = [&temp_base]
-        {
-            std::error_code exists_ec;
-            if (!fs::exists(temp_base, exists_ec))
-            {
-                return true;
-            }
-            try
-            {
-                for (const fs::directory_entry& entry :
-                     fs::directory_iterator{temp_base})
-                {
-                    std::ifstream probe{entry.path(), std::ios::binary};
-                    if (probe.is_open())
-                    {
-                        return false;
-                    }
-                }
-            }
-            catch (const std::filesystem::filesystem_error&)
-            {
-                return true;
-            }
-            return true;
-        };
         int gone_retries = 0;
-        while (gone_retries < 5 && !files_gone())
+        while (gone_retries < 5 && !dir_files_gone(temp_base))
         {
             ++gone_retries;
             std::this_thread::sleep_for(std::chrono::milliseconds{100});
         }
         cg::test::check(
             r,
-            files_gone(),
+            dir_files_gone(temp_base),
             std::format(
                 "copy engine files leaked (leak-level failure): {} still "
                 "has live entries after unload (delete-pending entries "
@@ -4103,6 +4151,34 @@ namespace
             std::error_code rm_ec;
             fs::remove_all(temp_base, rm_ec);
         }
+    }
+
+    /// 目录内是否已无打得开的条目（目录消失/枚举失败/删除挂起均算过）。
+    [[nodiscard]]
+    auto dir_files_gone(const std::filesystem::path& dir) -> bool
+    {
+        namespace fs = std::filesystem;
+        std::error_code exists_ec;
+        if (!fs::exists(dir, exists_ec))
+        {
+            return true;
+        }
+        try
+        {
+            for (const fs::directory_entry& entry : fs::directory_iterator{dir})
+            {
+                std::ifstream probe{entry.path(), std::ios::binary};
+                if (probe.is_open())
+                {
+                    return false;
+                }
+            }
+        }
+        catch (const std::filesystem::filesystem_error&)
+        {
+            return true;
+        }
+        return true;
     }
 
     // PCH 加载器规范化：`-Xclang` 原子对、`-include-pch` /
@@ -4310,6 +4386,55 @@ namespace
             "identity (mtime is not identity)");
     }
 
+    /// compile_commands 条目的 JSON 文本（cl.exe 直调形态）。
+    [[nodiscard]]
+    auto cl_cdb_item(const std::string& root, const std::string& file)
+        -> std::string
+    {
+        return "{\"directory\":" + q(root) + ",\"file\":" + q(file)
+               + ",\"arguments\":[\"cl.exe\",\"/c\",\"/I\"," + q(root)
+               + ",\"/EHsc\",\"/std:c++20\"," + q(file) + "]}";
+    }
+
+    /// PCH 计划里指定文件消费的影子路径（未找到给空串）。
+    [[nodiscard]]
+    auto shadow_path_of(const std::string& root, const cc::PchPlanResult& plan)
+        -> std::string
+    {
+        std::string path;
+        for (const cc::CompileCommand& c : plan.commands)
+        {
+            if (c.file != root + "/main.cpp")
+            {
+                continue;
+            }
+            for (std::size_t i = 0; i + 3 < c.argv.size(); ++i)
+            {
+                if (c.argv[i] == "-Xclang" && c.argv[i + 1] == "-include-pch")
+                {
+                    path = c.argv[i + 3];
+                }
+            }
+        }
+        return path;
+    }
+
+    /// PCH 计划里指定文件的消费者身份（缺席给空串）。
+    [[nodiscard]]
+    auto pch_consumer_identity(
+        const std::string&       file,
+        const cc::PchPlanResult& plan) -> std::string
+    {
+        for (const cc::CompileCommand& c : plan.commands)
+        {
+            if (c.file == file)
+            {
+                return c.pch.identity;
+            }
+        }
+        return std::string{};
+    }
+
     // 只经 CPATH 可达的头文件必须进入闭包：搜索路径来自环境而非构建记录。
     // 同样的“同尺寸 + 恢复 mtime”编辑必须让闭包哈希改变、影子重建，消费
     // 者身份随之变化——否则图会静默保留旧字段。
@@ -4367,17 +4492,6 @@ namespace
         cc::PchOptions opt;
         opt.ccg_config_dir = proj.root + "/.ccg/Debug";
         opt.compile_db_path = db_path;
-        const auto consumer_identity = [&proj](const cc::PchPlanResult& plan)
-        {
-            for (const cc::CompileCommand& c : plan.commands)
-            {
-                if (c.file == proj.root + "/main.cpp")
-                {
-                    return c.pch.identity;
-                }
-            }
-            return std::string{};
-        };
         const cc::PchPlanResult first = cc::plan_pch(db, db, opt);
         cg::test::check(
             r,
@@ -4407,8 +4521,10 @@ namespace
         cg::test::check(
             r,
             third.built == 1 && third.reused == 0
-                && consumer_identity(third) != consumer_identity(second)
-                && !consumer_identity(third).empty(),
+                && pch_consumer_identity(proj.root + "/main.cpp", third)
+                       != pch_consumer_identity(proj.root + "/main.cpp", second)
+                && !pch_consumer_identity(proj.root + "/main.cpp", third)
+                        .empty(),
             "same-size mtime-restored CPATH header edit rebuilds the "
             "shadow and changes the consumer identity");
     }
@@ -4598,6 +4714,27 @@ namespace
     // 字节计算，同一命令的带空格/不带空格记录分裂成两个槽位，影子
     // 烙进的宏值与消费者命令行（cdb 已修剪）按字节比对即拒载。两种
     // 记录规划出的 producer_digest 与槽位必须完全一致。
+    /// PCH 旁车 JSON 全文（单生产者/单消费者，argv 里嵌给定宏 token）。
+    [[nodiscard]]
+    auto pch_sidecar_text(
+        const std::string& root,
+        const std::string& digest,
+        const std::string& macro_token) -> std::string
+    {
+        return "{\"version\":1,\"cdb_sha256\":\"" + digest
+               + "\",\"producers\":[{\"pch_key\":" + q(root + "/app.pch")
+               + ",\"source\":" + q(root + "/pch.cpp")
+               + ",\"umbrella\":\"pch.h\",\"umbrella_path\":\"\",\"cwd\":"
+               + q(root)
+               + ",\"argv\":[\"clang-cl\",\"--driver-mode=cl\",\"/c\","
+                 "\"/I\","
+               + q(root) + ",\"" + macro_token + "\",\"/Ycpch.h\",\"/Fp" + root
+               + "/app.pch\"," + q(root + "/pch.cpp")
+               + "],\"command_digest\":\"x\"}],\"consumers\":[{\"file\":"
+               + q(root + "/main.cpp") + ",\"pch_key\":" + q(root + "/app.pch")
+               + ",\"pch_header\":\"pch.h\",\"command_digest\":\"y\"}]}";
+    }
+
     void pch_sidecar_macro_space_digest(R& r)
     {
         namespace fs = std::filesystem;
@@ -4634,27 +4771,9 @@ namespace
                 std::span<const char>{cdb_text.data(), cdb_text.size()}));
         // 旁车与 cdb 记录的是同一条命令：cdb 条目是已修剪形态，旁车
         // argv 逐字透传宏 token（实害形态 = 等号后带空格）。
-        const auto sidecar_of = [&](const std::string& macro_token)
-        {
-            return "{\"version\":1,\"cdb_sha256\":\"" + digest
-                   + "\",\"producers\":[{\"pch_key\":"
-                   + q(proj.root + "/app.pch")
-                   + ",\"source\":" + q(proj.root + "/pch.cpp")
-                   + ",\"umbrella\":\"pch.h\",\"umbrella_path\":\"\",\"cwd\":"
-                   + q(proj.root)
-                   + ",\"argv\":[\"clang-cl\",\"--driver-mode=cl\",\"/c\","
-                     "\"/I\","
-                   + q(proj.root) + ",\"" + macro_token
-                   + "\",\"/Ycpch.h\",\"/Fp" + proj.root + "/app.pch\","
-                   + q(proj.root + "/pch.cpp")
-                   + "],\"command_digest\":\"x\"}],\"consumers\":[{\"file\":"
-                   + q(proj.root + "/main.cpp")
-                   + ",\"pch_key\":" + q(proj.root + "/app.pch")
-                   + ",\"pch_header\":\"pch.h\",\"command_digest\":\"y\"}]}";
-        };
         proj.put(
             proj.base / "pch.json",
-            sidecar_of("/DNTDDI_VERSION= 0x06030000"));
+            pch_sidecar_text(proj.root, digest, "/DNTDDI_VERSION= 0x06030000"));
         const auto     db = cc::load(cdb_path, {});
         cc::PchOptions opt;
         opt.ccg_config_dir = proj.root + "/.ccg/Debug";
@@ -4678,7 +4797,7 @@ namespace
         // 影子（归一化缺失时 digest 分裂成两个槽位、影子必然重建）。
         proj.put(
             proj.base / "pch.json",
-            sidecar_of("/DNTDDI_VERSION=0x06030000"));
+            pch_sidecar_text(proj.root, digest, "/DNTDDI_VERSION=0x06030000"));
         const cc::PchPlanResult second = cc::plan_pch(db, db, opt);
         cg::test::check(
             r,
@@ -4699,6 +4818,41 @@ namespace
     // 闭包不可解析：宏形态 `#include INC_HEADER` 隐藏了真实依赖。该
     // producer 每轮强制重建（绝不复用），note 如实可见；影子解析与文本
     // 基线的 AST（主文件声明集）一致。
+    /// 解析 argv 后收集主文件声明集（排除预处理游标；有序返回）。
+    [[nodiscard]]
+    auto main_file_decls(
+        const cc::Index&                index,
+        const std::string&              file,
+        const std::vector<std::string>& argv) -> std::vector<std::string>
+    {
+        const cc::ParsedTu       parsed = cc::parse(index, file, argv);
+        std::vector<std::string> out;
+        cc::children(
+            parsed.tu.cursor(),
+            [&](const CXCursor& c)
+            {
+                const CXCursorKind k = cc::kind(c);
+                const bool         preprocessing =
+                    k == CXCursor_InclusionDirective
+                    || k == CXCursor_MacroDefinition
+                    || k == CXCursor_MacroExpansion
+                    || k == CXCursor_PreprocessingDirective;
+                if (cc::in_main_file(parsed.tu, c) && !preprocessing)
+                {
+                    const std::string spelling = cc::spelling(c);
+                    if (!spelling.empty())
+                    {
+                        out.push_back(
+                            std::to_string(static_cast<int>(k)) + ":"
+                            + spelling);
+                    }
+                }
+                return true;
+            });
+        std::ranges::sort(out);
+        return out;
+    }
+
     void pch_macro_include_closure(R& r)
     {
         namespace fs = std::filesystem;
@@ -4761,45 +4915,18 @@ namespace
             "rebuild");
         // 图等价：影子解析与文本回退解析的主文件声明集必须一致。
         const cc::Index index;
-        const auto decls = [&index, &proj](const std::vector<std::string>& argv)
-        {
-            const cc::ParsedTu parsed =
-                cc::parse(index, proj.root + "/main.cpp", argv);
-            std::vector<std::string> out;
-            cc::children(
-                parsed.tu.cursor(),
-                [&](const CXCursor& c)
-                {
-                    const CXCursorKind k = cc::kind(c);
-                    const bool         preprocessing =
-                        k == CXCursor_InclusionDirective
-                        || k == CXCursor_MacroDefinition
-                        || k == CXCursor_MacroExpansion
-                        || k == CXCursor_PreprocessingDirective;
-                    if (cc::in_main_file(parsed.tu, c) && !preprocessing)
-                    {
-                        const std::string spelling = cc::spelling(c);
-                        if (!spelling.empty())
-                        {
-                            out.push_back(
-                                std::to_string(static_cast<int>(k)) + ":"
-                                + spelling);
-                        }
-                    }
-                    return true;
-                });
-            std::ranges::sort(out);
-            return out;
-        };
         for (const cc::CompileCommand& c : third.commands)
         {
             if (c.file != proj.root + "/main.cpp")
             {
                 continue;
             }
-            const std::vector<std::string> shadow_decls = decls(c.argv);
-            const std::vector<std::string> text_decls =
-                decls(c.pch_fallback_argv);
+            const std::vector<std::string> shadow_decls =
+                main_file_decls(index, proj.root + "/main.cpp", c.argv);
+            const std::vector<std::string> text_decls = main_file_decls(
+                index,
+                proj.root + "/main.cpp",
+                c.pch_fallback_argv);
             cg::test::check(
                 r,
                 c.pch.status == cc::PchUse::Status::shadow
@@ -4923,28 +5050,8 @@ namespace
             second.built == 0 && second.reused == 1 && second.donated == 1,
             "second config copies the shadow from the sibling "
             "config (0 built / 1 donor)");
-        const auto shadow_of = [&](const cc::PchPlanResult& plan)
-        {
-            std::string path;
-            for (const cc::CompileCommand& c : plan.commands)
-            {
-                if (c.file != proj.root + "/main.cpp")
-                {
-                    continue;
-                }
-                for (std::size_t i = 0; i + 3 < c.argv.size(); ++i)
-                {
-                    if (c.argv[i] == "-Xclang"
-                        && c.argv[i + 1] == "-include-pch")
-                    {
-                        path = c.argv[i + 3];
-                    }
-                }
-            }
-            return path;
-        };
-        const std::string first_shadow = shadow_of(first);
-        const std::string second_shadow = shadow_of(second);
+        const std::string first_shadow = shadow_path_of(proj.root, first);
+        const std::string second_shadow = shadow_path_of(proj.root, second);
         cg::test::check(
             r,
             !first_shadow.empty() && fs::is_regular_file(second_shadow, ec)
@@ -5339,23 +5446,18 @@ namespace
             "};\n"
             "int main() { return 0; }\n");
         proj.put(proj.base / "gnu_main.cpp", "int main(){return 0;}\n");
-        const auto cl_item = [&](const std::string& file)
-        {
-            return "{\"directory\":" + q(proj.root) + ",\"file\":" + q(file)
-                   + ",\"arguments\":[\"cl.exe\",\"/c\",\"/I\"," + q(proj.root)
-                   + ",\"/EHsc\",\"/std:c++20\"," + q(file) + "]}";
-        };
         const std::string gnu_item =
             "{\"directory\":" + q(proj.root)
             + ",\"file\":" + q(proj.root + "/gnu_main.cpp")
             + ",\"arguments\":[\"clang++\",\"-I\"," + q(proj.root)
             + ",\"-std=c++20\",\"-c\"," + q(proj.root + "/gnu_main.cpp") + "]}";
         const std::string db_text =
-            "[" + cl_item(proj.root + "/x323_tpl.cpp") + ","
-            + cl_item(proj.root + "/x135_tpl.cpp") + ","
-            + cl_item(proj.root + "/x32_fntpl.cpp") + ","
-            + cl_item(proj.root + "/x105_memberdef.cpp") + ","
-            + cl_item(proj.root + "/x32_clsmember.cpp") + "," + gnu_item + "]";
+            "[" + cl_cdb_item(proj.root, proj.root + "/x323_tpl.cpp") + ","
+            + cl_cdb_item(proj.root, proj.root + "/x135_tpl.cpp") + ","
+            + cl_cdb_item(proj.root, proj.root + "/x32_fntpl.cpp") + ","
+            + cl_cdb_item(proj.root, proj.root + "/x105_memberdef.cpp") + ","
+            + cl_cdb_item(proj.root, proj.root + "/x32_clsmember.cpp") + ","
+            + gnu_item + "]";
         proj.put(proj.base / "compile_commands.json", db_text);
         const std::string db_path = cg::util::norm_path(
             (proj.base / "compile_commands.json").generic_string());
@@ -5537,12 +5639,6 @@ namespace
             "__declspec(selectany) int A<int>::v;\n"
             "__declspec(selectany) int A<long>::v = 3;\n"
             "int main() { return 0; }\n");
-        const auto cl_item = [&](const std::string& file)
-        {
-            return "{\"directory\":" + q(proj.root) + ",\"file\":" + q(file)
-                   + ",\"arguments\":[\"cl.exe\",\"/c\",\"/I\"," + q(proj.root)
-                   + ",\"/EHsc\",\"/std:c++20\"," + q(file) + "]}";
-        };
         const std::string gnu_item =
             "{\"directory\":" + q(proj.root)
             + ",\"file\":" + q(proj.root + "/spec_gnu.cpp")
@@ -5550,7 +5646,8 @@ namespace
             + ",\"-std=c++20\",\"-c\"," + q(proj.root + "/spec_gnu.cpp") + "]}";
         proj.put(
             proj.base / "compile_commands.json",
-            "[" + cl_item(proj.root + "/spec_main.cpp") + "," + gnu_item + "]");
+            "[" + cl_cdb_item(proj.root, proj.root + "/spec_main.cpp") + ","
+                + gnu_item + "]");
         const std::string db_path = cg::util::norm_path(
             (proj.base / "compile_commands.json").generic_string());
         const auto                db = cc::load(db_path, {});
@@ -5674,6 +5771,58 @@ namespace
     // 装载层的模板模式等效旗标（仅原生 cl.exe 著条目）：未声明模板模式
     // 的条目 argv 末尾补 /Zc:twoPhase-（MSVC 默认延迟解析的 clang-cl 官
     // 方等效拼写）；显式声明过（/permissive- 或 /Zc:twoPhase 系列）的原
+    /// 路径分隔符的原生拼写（'/' 全部换 '\'）。
+    [[nodiscard]]
+    auto native_path_spelling(std::string s) -> std::string
+    {
+        for (char& c : s)
+        {
+            if (c == '/')
+            {
+                c = '\\';
+            }
+        }
+        return s;
+    }
+
+    /// 构建树的文件清单快照（相对路径有序，排除缓存目录）。
+    [[nodiscard]]
+    auto build_tree_snapshot(const std::filesystem::path& base)
+        -> std::vector<std::string>
+    {
+        namespace fs = std::filesystem;
+        std::vector<std::string> out;
+        std::error_code          sec;
+        for (fs::recursive_directory_iterator it{base, sec}, end;
+             !sec && it != end;
+             it.increment(sec))
+        {
+            std::error_code fec;
+            if (!it->is_regular_file(fec))
+            {
+                continue;
+            }
+            const std::string rel =
+                fs::relative(it->path(), base, fec).generic_string();
+            if (fec || rel.starts_with(".pchcache/"))
+            {
+                continue;
+            }
+            out.push_back(rel);
+        }
+        std::ranges::sort(out);
+        return out;
+    }
+
+    /// 条目的 argv 是否含给定旗标。
+    [[nodiscard]]
+    auto command_has_flag(const cc::CompileCommand* c, std::string_view flag)
+        -> bool
+    {
+        return c != nullptr
+               && std::ranges::find(c->argv, flag) != c->argv.end();
+    }
+
     // 样保留；clang-cl 自著条目忠实其自身语义不加。
     void loader_two_phase_equivalence(R& r)
     {
@@ -5698,33 +5847,30 @@ namespace
             cg::util::norm_path(
                 (proj.base / "compile_commands.json").generic_string()),
             {});
-        const auto has_flag = [](const cc::CompileCommand* c)
-        {
-            return c != nullptr
-                   && std::ranges::find(c->argv, "/Zc:twoPhase-")
-                          != c->argv.end();
-        };
         cg::test::check(
             r,
-            has_flag(
+            command_has_flag(
                 cc::find_command(
                     db,
-                    cg::util::norm_path(proj.root + "/plain.cpp"))),
+                    cg::util::norm_path(proj.root + "/plain.cpp")),
+                "/Zc:twoPhase-"),
             "native cl entry without a declared template mode gets "
             "/Zc:twoPhase- appended (visible in the db argv)");
         cg::test::check(
             r,
-            !has_flag(
+            !command_has_flag(
                 cc::find_command(
                     db,
-                    cg::util::norm_path(proj.root + "/strict.cpp"))),
+                    cg::util::norm_path(proj.root + "/strict.cpp")),
+                "/Zc:twoPhase-"),
             "explicit /permissive- stays verbatim, no append");
         cg::test::check(
             r,
-            !has_flag(
+            !command_has_flag(
                 cc::find_command(
                     db,
-                    cg::util::norm_path(proj.root + "/clangcl.cpp"))),
+                    cg::util::norm_path(proj.root + "/clangcl.cpp")),
+                "/Zc:twoPhase-"),
             "clang-cl authored entry keeps its own semantics "
             "(no append)");
     }
@@ -5966,36 +6112,12 @@ namespace
         const auto db = cc::load(db_path, {});
         // 构建树快照：排除缓存目录（.pchcache）后，影子构建前后文件集合
         // 必须逐项相同——不只断言两个已知污染文件名不存在。
-        const auto tree_snapshot = [&proj]()
-        {
-            std::vector<std::string> out;
-            std::error_code          sec;
-            for (fs::recursive_directory_iterator it{proj.base, sec}, end;
-                 !sec && it != end;
-                 it.increment(sec))
-            {
-                std::error_code fec;
-                if (!it->is_regular_file(fec))
-                {
-                    continue;
-                }
-                const std::string rel =
-                    fs::relative(it->path(), proj.base, fec).generic_string();
-                if (fec || rel.starts_with(".pchcache/"))
-                {
-                    continue;
-                }
-                out.push_back(rel);
-            }
-            std::ranges::sort(out);
-            return out;
-        };
-        const std::vector<std::string> before = tree_snapshot();
+        const std::vector<std::string> before = build_tree_snapshot(proj.base);
         cc::PchOptions                 opt;
         opt.ccg_config_dir = proj.root + "/.pchcache/Debug";
         opt.compile_db_path = db_path;
         const cc::PchPlanResult        plan = cc::plan_pch(db, db, opt);
-        const std::vector<std::string> after = tree_snapshot();
+        const std::vector<std::string> after = build_tree_snapshot(proj.base);
         cg::test::check(
             r,
             plan.built == 1,
@@ -6396,30 +6518,21 @@ namespace
         const cc::MsvcToolsetPath toolset = cc::parse_msvc_toolset_path(cl);
         if (!toolset.vcvars_bat.empty())
         {
-            const auto native = [](std::string s)
-            {
-                for (char& c : s)
-                {
-                    if (c == '/')
-                    {
-                        c = '\\';
-                    }
-                }
-                return s;
-            };
             const std::filesystem::path manual =
                 proj.base / "manual-include.cmd";
             const std::filesystem::path manual_out =
                 proj.base / "manual-include.txt";
             {
                 std::ofstream out{manual, std::ios::binary | std::ios::trunc};
-                out << "@echo off\r\ncall \"" << native(toolset.vcvars_bat)
+                out << "@echo off\r\ncall \""
+                    << native_path_spelling(toolset.vcvars_bat)
                     << "\" -vcvars_ver=" << toolset.version
                     << " >nul 2>&1\r\nset INCLUDE > \""
-                    << native(manual_out.string()) << "\"\r\n";
+                    << native_path_spelling(manual_out.string()) << "\"\r\n";
             }
-            const std::string manual_cmd = std::string{"cmd.exe /d /s /c \""}
-                                           + native(manual.string()) + "\"";
+            const std::string manual_cmd =
+                std::string{"cmd.exe /d /s /c \""}
+                + native_path_spelling(manual.string()) + "\"";
             const int         manual_rc = std::system(manual_cmd.c_str());
             const std::string manual_text =
                 cg::util::read_text_file(manual_out.generic_string())
@@ -6479,15 +6592,13 @@ namespace
             return;
         }
         const cc::CompileCommand& cmd = db.front();
-        const auto                has = [&cmd](std::string_view token)
-        { return std::ranges::find(cmd.argv, token) != cmd.argv.end(); };
         cg::test::check(
             r,
-            has("--driver-mode=cl"),
+            std::ranges::find(cmd.argv, "--driver-mode=cl") != cmd.argv.end(),
             "native cdb gains the cl dialect");
         cg::test::check(
             r,
-            has("/X"),
+            std::ranges::find(cmd.argv, "/X") != cmd.argv.end(),
             "foreign cl entry becomes self-contained (/X)");
         bool        has_compat = false;
         std::size_t imsvc = 0;
@@ -6787,6 +6898,29 @@ namespace
 
     // 三环境一致性：自包含 argv 的闭包身份在 纯 shell / 进程 INCLUDE=垃圾 /
     // 进程 INCLUDE=捕获值 三种环境下完全相同。
+    /// 自包含命令表的 PCH 闭包身份（main.cpp 条目；缺席给空串）。
+    [[nodiscard]]
+    auto pch_closure_identity_of(
+        const std::string&                     config_dir,
+        const std::string&                     db_path,
+        const std::vector<cc::CompileCommand>& db,
+        const std::string&                     main_file) -> std::string
+    {
+        cc::PchOptions opt;
+        opt.ccg_config_dir = config_dir;
+        opt.compile_db_path = db_path;
+        opt.force = true; // 前一轮的缓存不得掩盖环境差异
+        const cc::PchPlanResult plan = cc::plan_pch(db, db, opt);
+        for (const cc::CompileCommand& c : plan.commands)
+        {
+            if (c.file == main_file)
+            {
+                return c.pch.identity;
+            }
+        }
+        return std::string{};
+    }
+
     void pch_system_include_env_invariance(R& r)
     {
         namespace fs = std::filesystem;
@@ -6855,30 +6989,17 @@ namespace
         const auto db = cc::load(db_path, {});
 
         const cg::test::EnvScope include_guard{"INCLUDE"};
-        const auto               set_include = [&](const std::string& value)
-        { include_guard.set(value); };
-        const auto identity_for = [&]
-        {
-            cc::PchOptions opt;
-            opt.ccg_config_dir = proj.root + "/.ccg/Debug";
-            opt.compile_db_path = db_path;
-            opt.force = true; // 前一轮的缓存不得掩盖环境差异
-            const cc::PchPlanResult plan = cc::plan_pch(db, db, opt);
-            for (const cc::CompileCommand& c : plan.commands)
-            {
-                if (c.file == proj.root + "/main.cpp")
-                {
-                    return c.pch.identity;
-                }
-            }
-            return std::string{};
-        };
+        const std::string        config_dir = proj.root + "/.ccg/Debug";
+        const std::string        main_file = proj.root + "/main.cpp";
         include_guard.restore();
-        const std::string pure_shell = identity_for();
-        set_include(proj.root + "/bogus-include");
-        const std::string bogus_env = identity_for();
-        set_include(captured.include_env);
-        const std::string captured_env = identity_for();
+        const std::string pure_shell =
+            pch_closure_identity_of(config_dir, db_path, db, main_file);
+        include_guard.set(proj.root + "/bogus-include");
+        const std::string bogus_env =
+            pch_closure_identity_of(config_dir, db_path, db, main_file);
+        include_guard.set(captured.include_env);
+        const std::string captured_env =
+            pch_closure_identity_of(config_dir, db_path, db, main_file);
         include_guard.restore();
         cg::test::check(
             r,
@@ -7057,9 +7178,15 @@ namespace
     const cg::test::Registrar reg_m4cl{
         "clang.m4_cl_dialect",
         &m4_cl_dialect_rules};
+    const cg::test::Registrar reg_import_overlay{
+        "clang.import_rewrite_overlay",
+        &import_rewrite_overlay_cases};
     const cg::test::Registrar reg_msvc_strip{
         "clang.msvc_module_switch_strip",
         &msvc_module_switch_strip};
+    const cg::test::Registrar reg_msvc_ledger{
+        "clang.msvc_module_strip_ledger_invariants",
+        &msvc_module_strip_ledger_invariants};
     const cg::test::Registrar reg_fi_strip{
         "clang.module_forced_include_strip",
         &module_forced_include_strip};
@@ -7091,6 +7218,56 @@ namespace
     // 该旗标只管无 BOM 的字节流——
     // 带 BOM 的文件由其 BOM 决定。字节精确的夹具（不依赖
     // 宿主代码页）钉住全部四格。
+    /// 写一个带给定 BOM 与中文字节的源文件（返回其路径）。
+    [[nodiscard]]
+    auto write_charset_fixture(
+        const std::filesystem::path& dir,
+        const std::string&           name,
+        const std::string&           bom,
+        const std::string&           zh_bytes) -> std::filesystem::path
+    {
+        const std::filesystem::path p = dir / name;
+        std::ofstream               of{p, std::ios::binary | std::ios::trunc};
+        of << bom << "// comment " << zh_bytes << "\n"
+           << "const char* kZh = \"" << zh_bytes << "\";\n"
+           << "int zh_fn();\n";
+        return p;
+    }
+
+    /// 以回退 argv（可选带 -finput-charset=GBK）解析文件。
+    [[nodiscard]]
+    auto parse_with_charset(
+        const cc::Index&             index,
+        const std::filesystem::path& file,
+        bool                         with_charset_flag) -> cc::ParsedTu
+    {
+        std::vector<std::string> argv = cc::fallback_argv();
+        if (with_charset_flag)
+        {
+            argv.emplace_back("-finput-charset=GBK");
+        }
+        return cc::parse(index, file.generic_string(), argv);
+    }
+
+    /// 解析单元里首个字符串字面量的拼写。
+    [[nodiscard]]
+    auto first_string_literal(const cc::ParsedTu& parsed) -> std::string
+    {
+        std::string out;
+        cc::children(
+            parsed.tu.cursor(),
+            [&out](const CXCursor& c)
+            {
+                if (cc::kind(c) == CXCursor_StringLiteral)
+                {
+                    out = cc::spelling(c);
+                    return false;
+                }
+                return true;
+            });
+        return out;
+    }
+
     void source_charset_quadrants(R& r)
     {
         // "中文" as GBK bytes (D6 D0 CE D4) and as UTF-8 bytes.
@@ -7101,51 +7278,14 @@ namespace
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
         std::filesystem::create_directories(dir, ec);
-        const auto write = [&](const std::string& name,
-                               const std::string& bom,
-                               const std::string& zh_bytes)
-        {
-            const std::filesystem::path p = dir / name;
-            std::ofstream of{p, std::ios::binary | std::ios::trunc};
-            of << bom << "// comment " << zh_bytes << "\n"
-               << "const char* kZh = \"" << zh_bytes << "\";\n"
-               << "int zh_fn();\n";
-            return p;
-        };
         const std::filesystem::path gbk_nobom =
-            write("gbk_nobom.cpp", "", zh_gbk);
+            write_charset_fixture(dir, "gbk_nobom.cpp", "", zh_gbk);
         const std::filesystem::path utf8_bom =
-            write("utf8_bom.cpp", "\xEF\xBB\xBF", zh_utf8);
+            write_charset_fixture(dir, "utf8_bom.cpp", "\xEF\xBB\xBF", zh_utf8);
         const std::filesystem::path gbk_bom =
-            write("gbk_bom.cpp", "\xEF\xBB\xBF", zh_gbk);
+            write_charset_fixture(dir, "gbk_bom.cpp", "\xEF\xBB\xBF", zh_gbk);
 
         const cc::Index index;
-        const auto      parse_with =
-            [&](const std::filesystem::path& file, bool with_charset_flag)
-        {
-            std::vector<std::string> argv = cc::fallback_argv();
-            if (with_charset_flag)
-            {
-                argv.emplace_back("-finput-charset=GBK");
-            }
-            return cc::parse(index, file.generic_string(), argv);
-        };
-        const auto literal_spelling = [](const cc::ParsedTu& parsed)
-        {
-            std::string out;
-            cc::children(
-                parsed.tu.cursor(),
-                [&out](const CXCursor& c)
-                {
-                    if (cc::kind(c) == CXCursor_StringLiteral)
-                    {
-                        out = cc::spelling(c);
-                        return false;
-                    }
-                    return true;
-                });
-            return out;
-        };
 
         // 引擎能力探针：构建时没带字符集转换的
         // libclang（今天的 msys2/clang64）拒绝每一个非 UTF-8 字符集值，
@@ -7181,8 +7321,9 @@ namespace
             // 象限 1：GBK 字节、无 BOM、charset=GBK -> 解码成功；
             // 中文跑进字面量拼写（实测大库语料形态：
             // 旗标正是让这些文件变绿的东西）。
-            const cc::ParsedTu parsed = parse_with(gbk_nobom, true);
-            const std::string  lit = literal_spelling(parsed);
+            const cc::ParsedTu parsed =
+                parse_with_charset(index, gbk_nobom, true);
+            const std::string lit = first_string_literal(parsed);
             cg::test::check(
                 r,
                 parsed.errors.empty() && lit.find(zh_utf8) != std::string::npos,
@@ -7190,7 +7331,8 @@ namespace
                 "the CJK literal");
             // 没有该旗标同一文件失败（默认读取器是
             // UTF-8）：追加是必要的，不是装饰。
-            const cc::ParsedTu bare = parse_with(gbk_nobom, false);
+            const cc::ParsedTu bare =
+                parse_with_charset(index, gbk_nobom, false);
             cg::test::check(
                 r,
                 !bare.errors.empty(),
@@ -7199,8 +7341,9 @@ namespace
             // 象限 3：UTF-8 + BOM、charset=GBK -> BOM 获胜，文件
             // 保持正确（旗标不得损坏带 BOM 的文件）。
             {
-                const cc::ParsedTu bom = parse_with(utf8_bom, true);
-                const std::string  bom_lit = literal_spelling(bom);
+                const cc::ParsedTu bom =
+                    parse_with_charset(index, utf8_bom, true);
+                const std::string bom_lit = first_string_literal(bom);
                 cg::test::check(
                     r,
                     bom.errors.empty()
@@ -7213,7 +7356,8 @@ namespace
             // BOM，此文件会按 GBK 解码成功——这个错误
             // 正是 BOM 优先的证据。
             {
-                const cc::ParsedTu bom = parse_with(gbk_bom, true);
+                const cc::ParsedTu bom =
+                    parse_with_charset(index, gbk_bom, true);
                 cg::test::check(
                     r,
                     !bom.errors.empty(),
@@ -7228,8 +7372,9 @@ namespace
             // 该具名 invalid-value 诊断（可归因的诚实失败——
             // 绝不静默吞掉），无旗标象限展示原始
             // UTF-8 读取器行为（BOM 文件干净、GBK 字节被标记）。
-            const cc::ParsedTu flagged = parse_with(gbk_nobom, true);
-            bool               named_reject = false;
+            const cc::ParsedTu flagged =
+                parse_with_charset(index, gbk_nobom, true);
+            bool named_reject = false;
             for (const cc::Diagnostic& d : flagged.errors)
             {
                 named_reject =
@@ -7244,13 +7389,15 @@ namespace
                 "conversion-less engine rejects the charset value with the "
                 "named invalid-value diagnostic (honest failure, no silent "
                 "ignore)");
-            const cc::ParsedTu bom_clean = parse_with(utf8_bom, false);
+            const cc::ParsedTu bom_clean =
+                parse_with_charset(index, utf8_bom, false);
             cg::test::check(
                 r,
                 bom_clean.errors.empty(),
                 "UTF-8 BOM file parses clean without any flag");
-            const cc::ParsedTu gbk_bare = parse_with(gbk_nobom, false);
-            const std::string  bare_lit = literal_spelling(gbk_bare);
+            const cc::ParsedTu gbk_bare =
+                parse_with_charset(index, gbk_nobom, false);
+            const std::string bare_lit = first_string_literal(gbk_bare);
             cg::test::check(
                 r,
                 bare_lit.find(zh_utf8) == std::string::npos,
@@ -7273,6 +7420,28 @@ namespace
     // 重写无物可替换，而喂入丢弃早已
     // 破坏解析（外场反馈形态：不 import std 的模块单元
     // 丢失 std 名字）。
+    /// 记录的 cl 形态 argv（带翻译层追加的 -finput-charset=GBK）。
+    [[nodiscard]]
+    auto recorded_cl_argv(const std::filesystem::path& p)
+        -> std::vector<std::string>
+    {
+        return std::vector<std::string>{
+            "--driver-mode=cl",
+            "/c",
+            "/std:c++20",
+            "-fms-compatibility",
+            "--target=x86_64-pc-windows-msvc",
+            "-finput-charset=GBK",
+            p.string()};
+    }
+
+    /// 模块名的 P1689 require 行。
+    [[nodiscard]]
+    auto require_of(std::string_view n) -> cc::ScanRequire
+    {
+        return cc::ScanRequire{.name = std::string{n}};
+    }
+
     void umbrella_requires_std_gate(R& r)
     {
         std::unordered_map<std::string, cc::detail::BmiNode> nodes;
@@ -7287,45 +7456,47 @@ namespace
             "chain",
             cc::detail::BmiNode{.name = "chain", .direct = {"text_only"}});
         std::unordered_map<std::string, std::vector<std::string>> memo;
-        const auto rq = [](std::string_view n)
-        { return cc::ScanRequire{.name = std::string{n}}; };
-        const auto gate = [&](std::vector<cc::ScanRequire> reqs)
-        { return cc::detail::requires_std(reqs, nodes, memo); };
         cg::test::check(
             r,
-            gate({rq("std")}),
+            cc::detail::requires_std({require_of("std")}, nodes, memo),
             "a direct `import std` requires opens the gate");
         cg::test::check(
             r,
-            gate({rq("std.compat")}),
+            cc::detail::requires_std({require_of("std.compat")}, nodes, memo),
             "`import std.compat` opens the gate too");
         cg::test::check(
             r,
-            gate({rq("a")}),
+            cc::detail::requires_std({require_of("a")}, nodes, memo),
             "a dependency chain a -> b -> std opens the gate "
             "(feeding the pcm transitively loads std.pcm)");
         cg::test::check(
             r,
-            !gate({}),
+            !cc::detail::requires_std({}, nodes, memo),
             "an empty P1689 rule (the stdafx text-include shape, "
             "zero imports) never opens the gate");
         cg::test::check(
             r,
-            !gate({rq("text_only")}),
+            !cc::detail::requires_std({require_of("text_only")}, nodes, memo),
             "a named module whose closure never touches std keeps "
             "the gate closed");
         cg::test::check(
             r,
-            !gate({rq("chain")}),
+            !cc::detail::requires_std({require_of("chain")}, nodes, memo),
             "a chain onto std-free modules stays closed");
         cg::test::check(
             r,
-            !gate({rq(R"("local.h")")}),
+            !cc::detail::requires_std(
+                {require_of(R"("local.h")")},
+                nodes,
+                memo),
             "header-unit requires (a header path spelling) never "
             "open the gate");
         cg::test::check(
             r,
-            !gate({rq(R"("local.h")"), rq("text_only")}),
+            !cc::detail::requires_std(
+                {require_of(R"("local.h")"), require_of("text_only")},
+                nodes,
+                memo),
             "mixed requires keep the gate closed when no leg "
             "reaches std");
     }
@@ -7345,54 +7516,68 @@ namespace
         const std::string bad_pair = "\xF5\xFB";
         const std::string good_pair = "\xB4\xED";
         // ---- 纯函数四象限（与代码页无关）--------------
-        std::size_t       edits = 0;
         const std::string clean = "int ok() { return 0; }\n";
-        cg::test::check(
-            r,
-            cc::detail::scrub_source_encoding(clean, &edits) == clean
-                && edits == 0,
-            "a clean file is returned byte-identical with zero "
-            "edits");
+        {
+            const cc::detail::ScrubOutcome res =
+                cc::detail::scrub_source_encoding(clean);
+            cg::test::check(
+                r,
+                res.text == clean && res.edits == 0,
+                "a clean file is returned byte-identical with zero "
+                "edits");
+        }
         const std::string comment_src =
             "// comment \xF5\xFB bytes\r\nint ok() { return 0; }\r\n";
-        cg::test::check(
-            r,
-            cc::detail::scrub_source_encoding(comment_src, &edits)
-                    == comment_src
-                && edits == 0,
-            "bytes inside a line comment are never touched (clang "
-            "does not decode them)");
+        {
+            const cc::detail::ScrubOutcome res =
+                cc::detail::scrub_source_encoding(comment_src);
+            cg::test::check(
+                r,
+                res.text == comment_src && res.edits == 0,
+                "bytes inside a line comment are never touched (clang "
+                "does not decode them)");
+        }
         const std::string block_src =
             "/* block \xF5\xFB */\r\nint ok() { return 0; }\r\n";
-        cg::test::check(
-            r,
-            cc::detail::scrub_source_encoding(block_src, &edits) == block_src
-                && edits == 0,
-            "bytes inside a block comment are never touched");
+        {
+            const cc::detail::ScrubOutcome res =
+                cc::detail::scrub_source_encoding(block_src);
+            cg::test::check(
+                r,
+                res.text == block_src && res.edits == 0,
+                "bytes inside a block comment are never touched");
+        }
         const std::string raw_src =
             "const wchar_t* s = LR\"x(\xF5\xFB)x\";\r\nint ok() { return 0; "
             "}\r\n";
-        cg::test::check(
-            r,
-            cc::detail::scrub_source_encoding(raw_src, &edits) == raw_src
-                && edits == 0,
-            "bytes inside a raw string are never touched (no "
-            "escape grammar exists there; a rewrite would only "
-            "corrupt the content)");
+        {
+            const cc::detail::ScrubOutcome res =
+                cc::detail::scrub_source_encoding(raw_src);
+            cg::test::check(
+                r,
+                res.text == raw_src && res.edits == 0,
+                "bytes inside a raw string are never touched (no "
+                "escape grammar exists there; a rewrite would only "
+                "corrupt the content)");
+        }
         const std::string esc_src = "const char* s = \"keep \\xF5 tail\";\r\n";
-        cg::test::check(
-            r,
-            cc::detail::scrub_source_encoding(esc_src, &edits) == esc_src
-                && edits == 0,
-            "an authored escape sequence survives verbatim (the "
-            "backslash pair is consumed atomically)");
+        {
+            const cc::detail::ScrubOutcome res =
+                cc::detail::scrub_source_encoding(esc_src);
+            cg::test::check(
+                r,
+                res.text == esc_src && res.edits == 0,
+                "an authored escape sequence survives verbatim (the "
+                "backslash pair is consumed atomically)");
+        }
         // ---- 纯函数四象限（GBK 代码页事实）------------
         if (gbk_system)
         {
             const std::string wide =
                 "const wchar_t* s = L\"a\xF5\xFB b\xB4\xED c\";\r\n";
-            const std::string out =
-                cc::detail::scrub_source_encoding(wide, &edits);
+            const cc::detail::ScrubOutcome wide_res =
+                cc::detail::scrub_source_encoding(wide);
+            const std::string& out = wide_res.text;
             cg::test::check(
                 r,
                 out.find("L\"a\\365\\373 b") != std::string::npos,
@@ -7407,10 +7592,13 @@ namespace
                 "from the system CP936 - one self-consistent "
                 "criterion, and literal contents carry no "
                 "indexing semantics)");
-            cg::test::check(r, edits == 2, "both encoding units were scrubbed");
+            cg::test::check(
+                r,
+                wide_res.edits == 2,
+                "both encoding units were scrubbed");
             const std::string narrow = "const char* s = \"\xF5\xFB\";\r\n";
             const std::string nout =
-                cc::detail::scrub_source_encoding(narrow, &edits);
+                cc::detail::scrub_source_encoding(narrow).text;
             cg::test::check(
                 r,
                 nout.find("\"\\365\\373\"") != std::string::npos,
@@ -7418,7 +7606,7 @@ namespace
                 "machine criterion, no wide/narrow split)");
             const std::string solo = "const char* s = \"\xF5\";\r\n";
             const std::string sout =
-                cc::detail::scrub_source_encoding(solo, &edits);
+                cc::detail::scrub_source_encoding(solo).text;
             cg::test::check(
                 r,
                 sout.find("\"\\365\"") != std::string::npos,
@@ -7426,17 +7614,18 @@ namespace
                 "escapes as a single unit");
             const std::string chr = "const wchar_t c = L'\xF5\xFB';\r\n";
             const std::string cout_ =
-                cc::detail::scrub_source_encoding(chr, &edits);
+                cc::detail::scrub_source_encoding(chr).text;
             cg::test::check(
                 r,
                 cout_.find("L'\\365\\373'") != std::string::npos,
                 "character literals scrub on the same rule");
             const std::string two = "const char* a = \"\xF5\xFB\";\r\n"
                                     "const char* b = \"\xF5\xFB\";\r\n";
-            (void)cc::detail::scrub_source_encoding(two, &edits);
+            const std::size_t two_edits =
+                cc::detail::scrub_source_encoding(two).edits;
             cg::test::check(
                 r,
-                edits == 2,
+                two_edits == 2,
                 "two offending sites count as two encoding units");
         }
         // ---- 引擎四象限（GBK 代码页事实，真实解析）----
@@ -7464,17 +7653,6 @@ namespace
             // 追加的）；引擎前端尊重它
             // （cl 驱动包装器只会警告）——这正是外场
             // 反馈的管线形态。
-            const auto cl_argv = [](const fs::path& p)
-            {
-                return std::vector<std::string>{
-                    "--driver-mode=cl",
-                    "/c",
-                    "/std:c++20",
-                    "-fms-compatibility",
-                    "--target=x86_64-pc-windows-msvc",
-                    "-finput-charset=GBK",
-                    p.string()};
-            };
             // 不可映射的宽字面量：要么内存八进制转义擦洗
             // 让解析变绿（引擎尊重 argv 形态——
             // 真实管线上已证），要么引擎拒绝该 TU
@@ -7486,7 +7664,7 @@ namespace
             try
             {
                 const cc::ParsedTu red_green =
-                    cc::parse(index, bad.string(), cl_argv(bad));
+                    cc::parse(index, bad.string(), recorded_cl_argv(bad));
                 engine_green = red_green.encoding_scrub_applied
                                && red_green.errors.empty();
             }
@@ -7505,7 +7683,7 @@ namespace
             try
             {
                 const cc::ParsedTu no_scrub =
-                    cc::parse(index, good.string(), cl_argv(good));
+                    cc::parse(index, good.string(), recorded_cl_argv(good));
                 no_scrub_trigger = no_scrub.encoding_scrub_applied;
             }
             catch (const cc::ParseError&)
@@ -7525,7 +7703,7 @@ namespace
             bool raw_threw = false;
             try
             {
-                (void)cc::parse(index, raw.string(), cl_argv(raw));
+                (void)cc::parse(index, raw.string(), recorded_cl_argv(raw));
             }
             catch (const cc::ParseError&)
             {
@@ -7785,35 +7963,39 @@ namespace
         "clang.two_stdlib_clash_gating",
         &two_stdlib_clash_gating};
 
+    /// 向节点表加一个 BMI 节点（默认接口单元形态）。
+    void add_bmi_node(
+        std::unordered_map<std::string, cc::detail::BmiNode>& nodes,
+        std::string                                           name,
+        std::vector<std::string>                              direct,
+        bool                                                  interface = true)
+    {
+        cc::detail::BmiNode n;
+        n.name = name;
+        n.source = name + ".ixx";
+        n.interface = interface;
+        n.direct = std::move(direct);
+        nodes.emplace(name, std::move(n));
+    }
+
     // Kahn 分层（BMI 层内并行构建的拓扑依据）：宽图同层、逐依赖加深、
     // 层内名字序、环上节点落选任何层、std 伪节点不进度数——纯函数用例，
     // 无引擎、无文件系统。
     void bmi_topo_layers(R& r)
     {
         std::unordered_map<std::string, cc::detail::BmiNode> nodes;
-        const auto add = [&](std::string              name,
-                             std::vector<std::string> direct,
-                             bool                     interface = true)
-        {
-            cc::detail::BmiNode n;
-            n.name = name;
-            n.source = name + ".ixx";
-            n.interface = interface;
-            n.direct = std::move(direct);
-            nodes.emplace(name, std::move(n));
-        };
         // 宽深混合 DAG：L0{a,b,c,s}（s 只依赖 std 伪节点，度数为零）；
         // L1{d,e}（d←a,b；e←b,c）；L2{f}（f←d,e）；环 g↔h 落选。
-        add("a", {});
-        add("b", {});
-        add("c", {});
-        add("d", {"a", "b"});
-        add("e", {"b", "c"});
-        add("f", {"d", "e"});
-        add("g", {"h"});
-        add("h", {"g"});
-        add("std", {}, false);
-        add("s", {"std"});
+        add_bmi_node(nodes, "a", {});
+        add_bmi_node(nodes, "b", {});
+        add_bmi_node(nodes, "c", {});
+        add_bmi_node(nodes, "d", {"a", "b"});
+        add_bmi_node(nodes, "e", {"b", "c"});
+        add_bmi_node(nodes, "f", {"d", "e"});
+        add_bmi_node(nodes, "g", {"h"});
+        add_bmi_node(nodes, "h", {"g"});
+        add_bmi_node(nodes, "std", {}, false);
+        add_bmi_node(nodes, "s", {"std"});
         const std::vector<std::string>
             names{"a", "b", "c", "d", "e", "f", "g", "h", "s"};
         const std::vector<std::vector<std::string>> layers =

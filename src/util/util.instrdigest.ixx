@@ -35,9 +35,9 @@ export namespace cg::util::instrdigest
      *        对齐）。 */
     struct InstrDigest
     {
-        std::string narrow;       ///< 窄版（产品接线变体）摘要
-        std::string all;          ///< 全指令摘要
-        std::string include_only; ///< 仅 include 摘要
+        std::string  narrow;       ///< 窄版（产品接线变体）摘要
+        std::string  all;          ///< 全指令摘要
+        std::string  include_only; ///< 仅 include 摘要
         std::int64_t n_narrow = 0;
         std::int64_t n_all = 0;
         std::int64_t n_include = 0;
@@ -48,9 +48,17 @@ export namespace cg::util::instrdigest
     inline auto is_narrow_directive(std::string_view name) -> bool
     {
         static constexpr std::string_view SET[] = {
-            "include", "define",     "undef",  "if",     "ifdef",
-            "ifndef",  "elif",       "elifdef", "elifndef",
-            "else",    "endif",
+            "include",
+            "define",
+            "undef",
+            "if",
+            "ifdef",
+            "ifndef",
+            "elif",
+            "elifdef",
+            "elifndef",
+            "else",
+            "endif",
         };
         for (const std::string_view n : SET)
         {
@@ -61,6 +69,41 @@ export namespace cg::util::instrdigest
         }
         return false;
     }
+}
+
+namespace cg::util::instrdigest
+{
+    namespace detail
+    {
+        /** @brief 三变体的保留行累积器（all 恒收、narrow 与 include
+         * 按指令名）。 */
+        struct VariantLines
+        {
+            std::string narrow;
+            std::string all;
+            std::string include_only;
+
+            void append(std::string_view name, std::string_view line)
+            {
+                all += line;
+                all += '\n';
+                if (is_narrow_directive(name))
+                {
+                    narrow += line;
+                    narrow += '\n';
+                }
+                if (name == "include")
+                {
+                    include_only += line;
+                    include_only += '\n';
+                }
+            }
+        };
+    } // namespace detail
+} // namespace cg::util::instrdigest
+
+export namespace cg::util::instrdigest
+{
 
     /**
      * @brief 对文件字节流算三变体摘要。
@@ -72,28 +115,10 @@ export namespace cg::util::instrdigest
     [[nodiscard]]
     inline auto digest_of(std::span<const std::byte> bytes) -> InstrDigest
     {
-        const char*        data = reinterpret_cast<const char*>(bytes.data());
-        const std::size_t  size = bytes.size();
-        std::string        narrow;
-        std::string        all;
-        std::string        include_only;
-        const auto         append_line = [&](std::string_view name,
-                                             std::string_view line)
-        {
-            all += line;
-            all += '\n';
-            if (is_narrow_directive(name))
-            {
-                narrow += line;
-                narrow += '\n';
-            }
-            if (name == "include")
-            {
-                include_only += line;
-                include_only += '\n';
-            }
-        };
-        std::size_t i = 0;
+        const char*          data = reinterpret_cast<const char*>(bytes.data());
+        const std::size_t    size = bytes.size();
+        detail::VariantLines kept;
+        std::size_t          i = 0;
         while (i <= size)
         {
             std::size_t end = i;
@@ -147,8 +172,7 @@ export namespace cg::util::instrdigest
             std::string name{raw.substr(0, n)};
             for (char& c : name)
             {
-                c = static_cast<char>(
-                    c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+                c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
             }
             // 行内注释剥离 + 空白规范化
             std::string line;
@@ -169,8 +193,7 @@ export namespace cg::util::instrdigest
                 }
                 if (c == '/' && p + 1 < raw.size() && raw[p + 1] == '*')
                 {
-                    const std::size_t close =
-                        raw.find("*/", p + 2);
+                    const std::size_t close = raw.find("*/", p + 2);
                     if (close == std::string_view::npos)
                     {
                         break; // 跨行块注释：截断（单行近似）
@@ -195,12 +218,13 @@ export namespace cg::util::instrdigest
             {
                 line.pop_back();
             }
-            append_line(name, line);
+            kept.append(name, line);
         }
         InstrDigest out;
-        out.narrow = sha256_hex(std::as_bytes(std::span{narrow}));
-        out.all = sha256_hex(std::as_bytes(std::span{all}));
-        out.include_only = sha256_hex(std::as_bytes(std::span{include_only}));
+        out.narrow = sha256_hex(std::as_bytes(std::span{kept.narrow}));
+        out.all = sha256_hex(std::as_bytes(std::span{kept.all}));
+        out.include_only =
+            sha256_hex(std::as_bytes(std::span{kept.include_only}));
         return out;
     }
 

@@ -65,15 +65,19 @@ function(_ccg_c2801_run_patcher out_var)
     set(${out_var} "${_token}" PARENT_SCOPE)
 endfunction()
 
-# CMake >= 4.5 路径：影子补丁经 conforming modules.json 进入
-# @cmake_cxx_std 合成目标的 std.ixx/std.compat.ixx 编译。必须在
-# 顶层目录作用域调用（set 的 CMAKE_CXX_STDLIB_MODULES_JSON 要被
-# 生成期的合成目标读取）。
-function(ccg_c2801_wire_synth_std)
+# 两条接线路径共用的判定半边：守卫检查、补丁器调用、失败结局的
+# 分类打印与影子头存在性校验。只在状态令牌为经校验的补丁且影子头
+# 就位时才把令牌经 <out_token> 传出；失败路径不设置它（未定义即
+# 假）。补丁器以 PARENT_SCOPE 写出的 CCG_C2801_WA_ROOT /
+# CCG_C2801_WA_INC 只到本函数一层，必须在这里再向上一层传出，
+# 否则接线动作拿不到补丁产物路径。<std_desc> 是消息里对 std
+# 生产者的称谓：合成目标路径传 "synth std.ixx"，OBJECT 库路径传
+# "std.ixx"。
+function(_ccg_c2801_wire_common out_token std_desc)
     if(NOT CCG_MsvcC2801Workaround)
         message(STATUS
-            "ccg c2801-wa: disabled (CCG_MsvcC2801Workaround=OFF) - synth "
-            "std.ixx compiles against the unpatched toolset header")
+            "ccg c2801-wa: disabled (CCG_MsvcC2801Workaround=OFF) - ${std_desc} "
+            "compiles against the unpatched toolset header")
         return()
     endif()
 
@@ -87,22 +91,45 @@ function(ccg_c2801_wire_synth_std)
                 "ccg c2801-wa: fell-back:pattern-absent - the toolset "
                 "<filesystem> no longer carries the C2801 hidden-friend "
                 "block (possibly fixed upstream after a toolset update, "
-                "which is the normal retirement); synth std.ixx compiles "
+                "which is the normal retirement); ${std_desc} compiles "
                 "against the unpatched header")
-        else()
+        elseif(_token MATCHES "^fell-back:")
             message(WARNING
-                "ccg c2801-wa: ${_token} - workaround not wired, synth "
-                "std.ixx compiles against the unpatched toolset header "
+                "ccg c2801-wa: ${_token} - workaround not applied, "
+                "${std_desc} compiles against the unpatched toolset header "
                 "(details above; logs under ${CCG_C2801_WA_ROOT}/logs/). "
                 "The C2801 failure may resurface.")
+        else()
+            message(WARNING
+                "ccg c2801-wa: unexpected patcher state '${_token}' "
+                "- workaround not applied, ${std_desc} compiles against "
+                "the unpatched toolset header (details above; logs under "
+                "${CCG_C2801_WA_ROOT}/logs/). The C2801 failure may "
+                "resurface.")
         endif()
         return()
     endif()
     if(NOT EXISTS "${CCG_C2801_WA_INC}/filesystem")
         message(WARNING
             "ccg c2801-wa: status '${_token}' but the shadow header is "
-            "missing ('${CCG_C2801_WA_INC}/filesystem') - not applied. "
-            "Synth std.ixx compiles against the unpatched toolset header.")
+            "missing ('${CCG_C2801_WA_INC}/filesystem') - not applied; "
+            "${std_desc} compiles against the unpatched toolset header.")
+        return()
+    endif()
+
+    set(CCG_C2801_WA_ROOT "${CCG_C2801_WA_ROOT}" PARENT_SCOPE)
+    set(CCG_C2801_WA_INC "${CCG_C2801_WA_INC}" PARENT_SCOPE)
+    set(${out_token} "${_token}" PARENT_SCOPE)
+endfunction()
+
+# CMake >= 4.5 路径：影子补丁经 conforming modules.json 进入
+# @cmake_cxx_std 合成目标的 std.ixx/std.compat.ixx 编译。必须在
+# 顶层目录作用域调用（set 的 CMAKE_CXX_STDLIB_MODULES_JSON 要被
+# 生成期的合成目标读取）。守卫与全部失败结局的处理在
+# _ccg_c2801_wire_common；这里只做施加动作与成功播报。
+function(ccg_c2801_wire_synth_std)
+    _ccg_c2801_wire_common(_token "synth std.ixx")
+    if(NOT _token)
         return()
     endif()
 
@@ -142,48 +169,16 @@ endfunction()
 
 # CMake < 4.5 路径：把影子 include 目录接到 <target> 上
 # （预期：cg_std_modules——项目自建的 std.ixx 生产者）。
-# 每种结局都打印一条 STATUS/WARNING 行；只有经校验的补丁才会
-# 改目标的编译属性。
+# 守卫与每种结局的打印在 _ccg_c2801_wire_common；只有经校验的
+# 补丁才会改目标的编译属性。
 function(ccg_c2801_wire_std_module_shadow target)
-    if(NOT CCG_MsvcC2801Workaround)
-        message(STATUS
-            "ccg c2801-wa: disabled (CCG_MsvcC2801Workaround=OFF) - std.ixx "
-            "compiles against the unpatched toolset header")
+    _ccg_c2801_wire_common(_token "std.ixx")
+    if(NOT _token)
         return()
     endif()
 
-    _ccg_c2801_run_patcher(_token)
-
-    if(_token STREQUAL "patched-ok" OR _token STREQUAL "reused-patched-ok")
-        if(NOT EXISTS "${CCG_C2801_WA_INC}/filesystem")
-            message(WARNING
-                "ccg c2801-wa: status '${_token}' but the shadow header is "
-                "missing ('${CCG_C2801_WA_INC}/filesystem') - not applied. "
-                "std.ixx compiles against the unpatched toolset header.")
-            return()
-        endif()
-        target_include_directories(${target} BEFORE PRIVATE "${CCG_C2801_WA_INC}")
-        message(STATUS
-            "ccg c2801-wa: ${_token} - std.ixx compiles against the patched "
-            "<filesystem> shadow (${CCG_C2801_WA_INC})")
-    elseif(_token STREQUAL "fell-back:pattern-absent")
-        # 按设计中立：工具集更新后该块消失，正是上游修复到位时的
-        # 正常退役路径（回退=直接用未打补丁的头文件编译 std.ixx）。
-        message(STATUS
-            "ccg c2801-wa: fell-back:pattern-absent - the toolset "
-            "<filesystem> no longer carries the C2801 hidden-friend block "
-            "(possibly fixed upstream after a toolset update, which is the "
-            "normal retirement); std.ixx compiles against the unpatched "
-            "header")
-    elseif(_token MATCHES "^fell-back:")
-        message(WARNING
-            "ccg c2801-wa: ${_token} - workaround not applied, std.ixx "
-            "compiles against the unpatched toolset header (details above; "
-            "logs under ${CCG_C2801_WA_ROOT}/logs/). The C2801 failure may resurface.")
-    else()
-        message(WARNING
-            "ccg c2801-wa: unexpected patcher state '${_token}' "
-            "- workaround not applied, std.ixx compiles against the "
-            "unpatched toolset header.")
-    endif()
+    target_include_directories(${target} BEFORE PRIVATE "${CCG_C2801_WA_INC}")
+    message(STATUS
+        "ccg c2801-wa: ${_token} - std.ixx compiles against the patched "
+        "<filesystem> shadow (${CCG_C2801_WA_INC})")
 endfunction()

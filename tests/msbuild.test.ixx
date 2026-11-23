@@ -444,20 +444,24 @@ namespace
             "valid /GF- kept");
     }
 
+    /// 以 E:/proj 为工作目录的 cl 适配（测试侧单点）。
+    [[nodiscard]]
+    auto adapt_cl_argv(const std::vector<std::string>& argv)
+        -> std::vector<mb::CdbEntry>
+    {
+        mb::ClInvocation inv;
+        inv.cwd = "E:/proj";
+        inv.argv_utf8 = argv;
+        return mb::adapt_cl(inv);
+    }
+
     // 模板模式等效旗标：MSVC 默认（延迟解析）翻译为 /Zc:twoPhase- 补在
     // 条目末尾、写进 compile_commands.json 可见；工程显式表态过（严格或
     // 延迟）的条目原样保留绝不代言；大小写不敏感。
     void adapt_two_phase_equivalence(R& r)
     {
-        auto adapt_argv = [](const std::vector<std::string>& argv)
-        {
-            mb::ClInvocation inv;
-            inv.cwd = "E:/proj";
-            inv.argv_utf8 = argv;
-            return mb::adapt_cl(inv);
-        };
         const std::vector<mb::CdbEntry> plain =
-            adapt_argv({"cl.exe", "/c", "src\\main.cpp"});
+            adapt_cl_argv({"cl.exe", "/c", "src\\main.cpp"});
         cg::test::check(
             r,
             plain.size() == 1 && !plain.empty()
@@ -472,7 +476,7 @@ namespace
                 "the equivalence flag is the LAST argument");
         }
         const std::vector<mb::CdbEntry> strict1 =
-            adapt_argv({"cl.exe", "/c", "/permissive-", "src\\main.cpp"});
+            adapt_cl_argv({"cl.exe", "/c", "/permissive-", "src\\main.cpp"});
         cg::test::check(
             r,
             strict1.size() == 1
@@ -480,14 +484,14 @@ namespace
             "explicit /permissive- is translated verbatim, no "
             "equivalence append");
         const std::vector<mb::CdbEntry> strict2 =
-            adapt_argv({"cl.exe", "/c", "/Zc:twoPhase", "src\\main.cpp"});
+            adapt_cl_argv({"cl.exe", "/c", "/Zc:twoPhase", "src\\main.cpp"});
         cg::test::check(
             r,
             strict2.size() == 1
                 && !contains(strict2[0].arguments, "/Zc:twoPhase-"),
             "explicit /Zc:twoPhase stays strict, no append");
         const std::vector<mb::CdbEntry> declared =
-            adapt_argv({"cl.exe", "/c", "/Zc:twoPhase-", "src\\main.cpp"});
+            adapt_cl_argv({"cl.exe", "/c", "/Zc:twoPhase-", "src\\main.cpp"});
         if (declared.size() == 1)
         {
             std::size_t n = 0;
@@ -505,7 +509,7 @@ namespace
                 "(no duplicate append)");
         }
         const std::vector<mb::CdbEntry> ci =
-            adapt_argv({"cl.exe", "/c", "/PERMISSIVE-", "src\\main.cpp"});
+            adapt_cl_argv({"cl.exe", "/c", "/PERMISSIVE-", "src\\main.cpp"});
         cg::test::check(
             r,
             ci.size() == 1 && !contains(ci[0].arguments, "/Zc:twoPhase-"),
@@ -719,18 +723,29 @@ namespace
     // clang-cl 自动发现）。插入 `/X` 让进程 INCLUDE 与
     // 自动发现无法掺和。原有 `/X` 意味着 cl 无视
     // INCLUDE——适配器绝不能把那些目录加回来。兼容
+    /// 仅工具集/SDK 的 INCLUDE 捕获串（MSVC 14.51 + Win10 SDK 形态）。
+    constexpr std::string_view k_toolset_include_env =
+        "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\"
+        "Tools\\MSVC\\14.51.36231\\include;;C:\\Program Files\\Microsoft "
+        "Visual Studio\\18\\Community\\VC\\Tools\\MSVC\\"
+        "14.51.36231\\atlmfc\\include;C:\\Program Files\\Microsoft Visual "
+        "Studio\\18\\Community\\VC\\Auxiliary\\VS\\include;C:\\Program "
+        "Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\ucrt;C:\\"
+        "Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\um;"
+        "C:\\Program Files (x86)\\Windows Kits\\NETFXSDK\\4.8\\Include\\um";
+
+    /// 混合 INCLUDE 串（工具集/SDK + 工程专属目录三形态）。
+    [[nodiscard]]
+    auto mixed_include_env() -> std::string
+    {
+        return std::string{k_toolset_include_env}
+               + R"(;my include;E:\vs\DIA SDK\\include;C:/my msvc/include)";
+    }
+
     // 版本来自每次调用的 real_cl 路径。
     void adapt_include_env(R& r)
     {
-        constexpr std::string_view toolset_only =
-            "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\"
-            "Tools\\MSVC\\14.51.36231\\include;;C:\\Program Files\\Microsoft "
-            "Visual Studio\\18\\Community\\VC\\Tools\\MSVC\\"
-            "14.51.36231\\atlmfc\\include;C:\\Program Files\\Microsoft Visual "
-            "Studio\\18\\Community\\VC\\Auxiliary\\VS\\include;C:\\Program "
-            "Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\ucrt;C:\\"
-            "Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\um;"
-            "C:\\Program Files (x86)\\Windows Kits\\NETFXSDK\\4.8\\Include\\um";
+        constexpr std::string_view toolset_only = k_toolset_include_env;
 
         // 仅工具集/SDK 的 INCLUDE：每条都物化；`/X` 让
         // argv 自含。输出必须不同于无 INCLUDE 的情形。
@@ -789,9 +804,7 @@ namespace
         mixed.cwd = "E:/proj";
         mixed.argv_utf8 = {"cl.exe", "/c", "/I", "src", "src\\main.cpp"};
         mixed.real_cl = with_env.real_cl;
-        mixed.include_env =
-            std::string{toolset_only}
-            + R"(;my include;E:\vs\DIA SDK\\include;C:/my msvc/include)";
+        mixed.include_env = mixed_include_env();
         const std::vector<mb::CdbEntry> out = mb::adapt_cl(mixed);
         cg::test::check(r, out.size() == 1, "one TU entry (mixed)");
         if (out.size() != 1)
@@ -878,6 +891,20 @@ namespace
             argv.back() == "/Zc:twoPhase-",
             "undeclared template mode: the equivalence flag is "
             "the final argument");
+    }
+
+    // INCLUDE 与 /X 抑制、多工具集版本与 INCLUDE 对 .sln 级 real_cl 的
+    // 胜出、批内共享目录：全部对着同一捕获串形态。
+    void adapt_include_env_suppression_and_toolsets(R& r)
+    {
+        constexpr std::string_view toolset_only = k_toolset_include_env;
+        mb::ClInvocation           with_env;
+        with_env.cwd = "E:/proj";
+        with_env.argv_utf8 = {"cl.exe", "/c", "/std:c++20", "src\\main.cpp"};
+        with_env.include_env = std::string{toolset_only};
+        with_env.real_cl =
+            "C:/Program Files/Microsoft Visual Studio/18/Community/VC/"
+            "Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe";
 
         // 原有 `/X`：cl 早已无视 INCLUDE，所以任何目录都不得回来
         // （且原旗标不重复）。
@@ -885,7 +912,7 @@ namespace
         ignores.cwd = "E:/proj";
         ignores.argv_utf8 = {"cl.exe", "/c", "/X", "src\\main.cpp"};
         ignores.include_env = std::string{toolset_only};
-        ignores.real_cl = mixed.real_cl;
+        ignores.real_cl = with_env.real_cl;
         const std::vector<mb::CdbEntry> original_x = mb::adapt_cl(ignores);
         cg::test::check(
             r,
@@ -1038,8 +1065,13 @@ namespace
             "INCLUDE toolset version is used when real_cl has no clue");
 
         // 批内 TU 共享同一批 INCLUDE 推导目录。
-        mixed.argv_utf8.emplace_back(R"(src\util.cpp)");
-        const std::vector<mb::CdbEntry> batch = mb::adapt_cl(mixed);
+        mb::ClInvocation batched;
+        batched.cwd = "E:/proj";
+        batched.argv_utf8 =
+            {"cl.exe", "/c", "/I", "src", "src\\main.cpp", R"(src\util.cpp)"};
+        batched.real_cl = with_env.real_cl;
+        batched.include_env = mixed_include_env();
+        const std::vector<mb::CdbEntry> batch = mb::adapt_cl(batched);
         cg::test::check(
             r,
             batch.size() == 2 && batch[0].arguments == batch[1].arguments,
@@ -1528,44 +1560,62 @@ namespace
     }
 
     // ---------------------------------------------------------
+    /// argv 里是否存在（旗标, 值）相邻对。
+    [[nodiscard]]
+    auto argv_has_flag_value(
+        const std::vector<std::string>& argv,
+        std::string_view                flag,
+        std::string_view                value) -> bool
+    {
+        for (std::size_t i = 0; i + 1 < argv.size(); ++i)
+        {
+            if (argv[i] == flag && argv[i + 1] == value)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // 管线 -------
+
+    /// 配置枚举的 Debug/Release|x64 两态断言。
+    void expect_debug_release_configs(
+        R&                                     rr,
+        const std::vector<mb::ConfigPlatform>& got,
+        std::string_view                       label)
+    {
+        cg::test::check(
+            rr,
+            got.size() == 2,
+            std::format("{}: 2 configs, got {}", label, got.size()));
+        if (got.size() == 2)
+        {
+            cg::test::check(
+                rr,
+                got[0].configuration == "Debug" && got[0].platform == "x64",
+                std::format("{}: first is Debug|x64", label));
+            cg::test::check(
+                rr,
+                got[1].configuration == "Release" && got[1].platform == "x64",
+                std::format("{}: second is Release|x64", label));
+        }
+    }
 
     // 已入库研究工作区上的配置枚举：
     // sln 与每个 vcxproj 都恰好声明 {Debug|x64, Release|x64}，
     // 按声明顺序、去重。
     void pipeline_enum_configs(R& r)
     {
-        const auto expect_debug_release =
-            [&](R&                                     rr,
-                const std::vector<mb::ConfigPlatform>& got,
-                std::string_view                       label)
-        {
-            cg::test::check(
-                rr,
-                got.size() == 2,
-                std::format("{}: 2 configs, got {}", label, got.size()));
-            if (got.size() == 2)
-            {
-                cg::test::check(
-                    rr,
-                    got[0].configuration == "Debug" && got[0].platform == "x64",
-                    std::format("{}: first is Debug|x64", label));
-                cg::test::check(
-                    rr,
-                    got[1].configuration == "Release"
-                        && got[1].platform == "x64",
-                    std::format("{}: second is Release|x64", label));
-            }
-        };
-        expect_debug_release(
+        expect_debug_release_configs(
             r,
             mb::enumerate_configs(fixture("DemoSln.sln")),
             "sln");
-        expect_debug_release(
+        expect_debug_release_configs(
             r,
             mb::enumerate_configs(fixture("msbdemo/msbdemo.vcxproj")),
             "msbdemo vcxproj");
-        expect_debug_release(
+        expect_debug_release_configs(
             r,
             mb::enumerate_configs(fixture("mathlib/mathlib/mathlib.vcxproj")),
             "mathlib vcxproj");
@@ -1689,41 +1739,51 @@ still nothing
     // cl 路径）与 pipeline 的 vswhere 兜底挑选（经共用函数取版本键）。
     // 纯文本，所有平台可查。
     //
+    /// 版本四段是否等于期望的逐段值。
+    [[nodiscard]]
+    auto version_list_is(
+        const std::vector<int>&    got,
+        std::initializer_list<int> want) -> bool
+    {
+        return got == std::vector<int>{want};
+    }
+
     void pipeline_msvc_version(R& r)
     {
-        const auto eq =
-            [](const std::vector<int>& got, std::initializer_list<int> want)
-        { return got == std::vector<int>{want}; };
         // ① 全小写钉子（统一生效回归钉）：合并前 pipeline 侧大小写敏感
         //    标记对此形态返回空，是本次行为变更修掉的功能缺失面。
         cg::test::check(
             r,
-            eq(mb::msvc_toolset_version_of(
-                   R"(c:\program files\microsoft visual studio\18\community\vc\tools\msvc\14.51.36231\bin\hostx64\x64\cl.exe)"),
-               {14, 51, 36231}),
+            version_list_is(
+                mb::msvc_toolset_version_of(
+                    R"(c:\program files\microsoft visual studio\18\community\vc\tools\msvc\14.51.36231\bin\hostx64\x64\cl.exe)"),
+                {14, 51, 36231}),
             "fully-lowercase path: folded marker lookup resolves the version");
         // ② 混合大小写（原生反斜杠/正斜杠两个拼写族）。
         cg::test::check(
             r,
-            eq(mb::msvc_toolset_version_of(
-                   R"(C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\HostX86\x64\cl.exe)"),
-               {14, 51, 36231}),
+            version_list_is(
+                mb::msvc_toolset_version_of(
+                    R"(C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\HostX86\x64\cl.exe)"),
+                {14, 51, 36231}),
             "backslash path: version stops at the next separator");
         cg::test::check(
             r,
-            eq(mb::msvc_toolset_version_of(
-                   "C:/VS/VC/Tools/MSVC/14.44.35207/bin/Hostx64/ARM64/cl.exe"),
-               {14, 44, 35207}),
+            version_list_is(
+                mb::msvc_toolset_version_of(
+                    "C:/VS/VC/Tools/MSVC/14.44.35207/bin/Hostx64/ARM64/cl.exe"),
+                {14, 44, 35207}),
             "forward-slash path: same key");
         // ③ 真实磁盘上的混合拼写：段内大小写交错（tools 小写、Hostx64
         //    混合）也必须命中折叠查找。
         cg::test::check(
             r,
-            eq(mb::msvc_toolset_version_of(
-                   "C:/Program Files/Microsoft Visual "
-                   "Studio/18/Community/vc/tools/MSVC/"
-                   "14.51.36231/Bin/Hostx64/x64/cl.exe"),
-               {14, 51, 36231}),
+            version_list_is(
+                mb::msvc_toolset_version_of(
+                    "C:/Program Files/Microsoft Visual "
+                    "Studio/18/Community/vc/tools/MSVC/"
+                    "14.51.36231/Bin/Hostx64/x64/cl.exe"),
+                {14, 51, 36231}),
             "mixed-case segments (hostx64 spelling) resolve the version");
         // ④ 敌意目录：路径里恰有 MSVC 字样但不在 /vc/tools/msvc/ 三连段
         //    位置——必须返回空，绝不产出 {0} 假版本混入 vswhere 的
@@ -1781,11 +1841,12 @@ still nothing
         //    不再经字符串往返）。
         cg::test::check(
             r,
-            eq(mb::detail::include_env_toolset_version(
-                   "D:/SDK10/Include/1.2.3/ucrt;"
-                   "c:/program files/vc/tools/msvc/14.44.35207/include;"
-                   "E:/VS/VC/Tools/MSVC/14.51.36231/atlmfc/include"),
-               {14, 44, 35207}),
+            version_list_is(
+                mb::detail::include_env_toolset_version(
+                    "D:/SDK10/Include/1.2.3/ucrt;"
+                    "c:/program files/vc/tools/msvc/14.44.35207/include;"
+                    "E:/VS/VC/Tools/MSVC/14.51.36231/atlmfc/include"),
+                {14, 44, 35207}),
             "INCLUDE scan: first toolset entry wins over a later one");
         cg::test::check(
             r,
@@ -2090,31 +2151,23 @@ still nothing
             r,
             s_out.size() == 1,
             "scan-pass invocation yields one entry");
-        const auto adjacent_pair = [](
-                                       const std::vector<std::string>& argv,
-                                       std::string_view               flag,
-                                       std::string_view               value)
-        {
-            for (std::size_t i = 0; i + 1 < argv.size(); ++i)
-            {
-                if (argv[i] == flag && argv[i + 1] == value)
-                {
-                    return true;
-                }
-            }
-            return false;
-        };
         if (s_out.size() == 1)
         {
             const std::vector<std::string>& argv = s_out[0].arguments;
             cg::test::check(
                 r,
-                adjacent_pair(argv, "/ifcOutput", "E:\\proj\\int\\mod.ifc"),
+                argv_has_flag_value(
+                    argv,
+                    "/ifcOutput",
+                    "E:\\proj\\int\\mod.ifc"),
                 "/ifcOutput keeps its .ifc value token verbatim "
                 "(recorded spelling, no absolutize)");
             cg::test::check(
                 r,
-                adjacent_pair(argv, "/scanDependencies", "E:\\proj\\int\\"),
+                argv_has_flag_value(
+                    argv,
+                    "/scanDependencies",
+                    "E:\\proj\\int\\"),
                 "/scanDependencies keeps its directory value token");
             cg::test::check(
                 r,
@@ -2149,30 +2202,36 @@ still nothing
             const std::vector<std::string>& argv = c_out[0].arguments;
             cg::test::check(
                 r,
-                adjacent_pair(argv, "/sourceDependencies", "E:\\proj\\int\\"),
+                argv_has_flag_value(
+                    argv,
+                    "/sourceDependencies",
+                    "E:\\proj\\int\\"),
                 "/sourceDependencies keeps its directory value token");
             cg::test::check(
                 r,
-                adjacent_pair(argv, "/ifcSearchDir", "E:\\proj\\ifc"),
+                argv_has_flag_value(argv, "/ifcSearchDir", "E:\\proj\\ifc"),
                 "/ifcSearchDir keeps its directory value token");
             cg::test::check(
                 r,
-                adjacent_pair(argv, "/reference", "mod=E:/proj/int/mod.ifc"),
+                argv_has_flag_value(
+                    argv,
+                    "/reference",
+                    "mod=E:/proj/int/mod.ifc"),
                 "/reference keeps its name=path value token");
             cg::test::check(
                 r,
-                adjacent_pair(argv, "/exportHeader", "E:\\proj\\inc\\units.h"),
+                argv_has_flag_value(
+                    argv,
+                    "/exportHeader",
+                    "E:\\proj\\inc\\units.h"),
                 "/exportHeader keeps its header value token");
         }
 
         // 冒号连写形态：整 token（开关与值同体）逐字保留，不拆不译。
         mb::ClInvocation joined;
         joined.cwd = "E:/proj";
-        joined.argv_utf8 = {
-            "cl.exe",
-            "/c",
-            "/ifcOutput:C:/b/mod.ifc",
-            "mod.ixx"};
+        joined
+            .argv_utf8 = {"cl.exe", "/c", "/ifcOutput:C:/b/mod.ifc", "mod.ixx"};
         const std::vector<mb::CdbEntry> j_out = mb::adapt_cl(joined);
         cg::test::check(
             r,
@@ -2243,10 +2302,8 @@ still nothing
         without_switches.argv_utf8.erase(
             without_switches.argv_utf8.begin() + 4,
             without_switches.argv_utf8.end() - 1);
-        const std::vector<mb::CdbEntry> w_out =
-            mb::adapt_cl(with_switches);
-        const std::vector<mb::CdbEntry> o_out =
-            mb::adapt_cl(without_switches);
+        const std::vector<mb::CdbEntry> w_out = mb::adapt_cl(with_switches);
+        const std::vector<mb::CdbEntry> o_out = mb::adapt_cl(without_switches);
         cg::test::check(
             r,
             w_out.size() == 1 && o_out.size() == 1,
@@ -2328,6 +2385,9 @@ still nothing
     const cg::test::Registrar reg_include_env{
         "msbuild.adapt_include_env",
         &adapt_include_env};
+    const cg::test::Registrar reg_adapt_env_supp{
+        "msbuild.adapt_include_env_suppression_and_toolsets",
+        &adapt_include_env_suppression_and_toolsets};
     const cg::test::Registrar reg_include_env_i{
         "msbuild.adapt_include_env_i_priority",
         &adapt_include_env_i_priority};
@@ -2345,33 +2405,60 @@ still nothing
     void record_stub_roles(R& r)
     {
         using mb::detail::StubRole;
-        const auto role = [](std::string_view name)
-        { return mb::detail::stub_role_of_basename(name); };
-        cg::test::check(r, role("cl.exe") == StubRole::cl, "cl.exe -> cl");
         cg::test::check(
             r,
-            role("clang-cl.exe") == StubRole::cl,
+            mb::detail::stub_role_of_basename("cl.exe") == StubRole::cl,
+            "cl.exe -> cl");
+        cg::test::check(
+            r,
+            mb::detail::stub_role_of_basename("clang-cl.exe") == StubRole::cl,
             "clang-cl.exe -> cl (same stub semantics)");
-        cg::test::check(r, role("link.exe") == StubRole::link, "link.exe");
-        cg::test::check(r, role("lib.exe") == StubRole::lib, "lib.exe");
-        cg::test::check(r, role("rc.exe") == StubRole::rc, "rc.exe");
-        cg::test::check(r, role("mt.exe") == StubRole::mt, "mt.exe");
-        cg::test::check(r, role("ml64.exe") == StubRole::masm, "ml64.exe");
-        cg::test::check(r, role("ml.exe") == StubRole::masm, "ml.exe");
         cg::test::check(
             r,
-            role("marmasm.exe") == StubRole::masm,
+            mb::detail::stub_role_of_basename("link.exe") == StubRole::link,
+            "link.exe");
+        cg::test::check(
+            r,
+            mb::detail::stub_role_of_basename("lib.exe") == StubRole::lib,
+            "lib.exe");
+        cg::test::check(
+            r,
+            mb::detail::stub_role_of_basename("rc.exe") == StubRole::rc,
+            "rc.exe");
+        cg::test::check(
+            r,
+            mb::detail::stub_role_of_basename("mt.exe") == StubRole::mt,
+            "mt.exe");
+        cg::test::check(
+            r,
+            mb::detail::stub_role_of_basename("ml64.exe") == StubRole::masm,
+            "ml64.exe");
+        cg::test::check(
+            r,
+            mb::detail::stub_role_of_basename("ml.exe") == StubRole::masm,
+            "ml.exe");
+        cg::test::check(
+            r,
+            mb::detail::stub_role_of_basename("marmasm.exe") == StubRole::masm,
             "marmasm.exe");
-        cg::test::check(r, role("bscmake.exe") == StubRole::bscmake, "bscmake");
-        cg::test::check(r, role("xdcmake.exe") == StubRole::xdcmake, "xdcmake");
         cg::test::check(
             r,
-            role("ccg.exe") == StubRole::unknown,
+            mb::detail::stub_role_of_basename("bscmake.exe")
+                == StubRole::bscmake,
+            "bscmake");
+        cg::test::check(
+            r,
+            mb::detail::stub_role_of_basename("xdcmake.exe")
+                == StubRole::xdcmake,
+            "xdcmake");
+        cg::test::check(
+            r,
+            mb::detail::stub_role_of_basename("ccg.exe") == StubRole::unknown,
             "ccg.exe -> unknown (full-build wrap, treated as cl)");
         bool all_family = true;
         for (const std::string_view name : mb::detail::stub_tool_family)
         {
-            if (role(name) == StubRole::unknown)
+            if (mb::detail::stub_role_of_basename(name) == StubRole::unknown)
             {
                 all_family = false;
             }
@@ -2382,23 +2469,29 @@ still nothing
     // 零磁盘契约下什么都不写，所以每个工具家族
     // 唯一要查的是捕获 argv 字面上声明了
     // 哪些输出路径——无按源 .obj、无 vc`<ver>`.pdb 或 .ilk 默认名。
+    /** 从字面 argv 收声明输出（cwd 锚定输出路径）。 */
+    [[nodiscard]]
+    auto declared_outputs_of(
+        const std::string&                 cwd,
+        std::initializer_list<std::string> argv) -> std::vector<std::string>
+    {
+        mb::WrapLog      capture;
+        mb::ClInvocation inv;
+        inv.cwd = cwd;
+        inv.argv_utf8 = std::vector<std::string>{argv};
+        capture.invocations.push_back(std::move(inv));
+        return mb::capture_declared_outputs(capture);
+    }
+
     void record_declared_outputs(R& r)
     {
         const std::string cwd = "E:/proj";
-        const auto declared = [&](std::initializer_list<std::string> argv)
-        {
-            mb::WrapLog      capture;
-            mb::ClInvocation inv;
-            inv.cwd = cwd;
-            inv.argv_utf8 = std::vector<std::string>{argv};
-            capture.invocations.push_back(std::move(inv));
-            return mb::capture_declared_outputs(capture);
-        };
         {
             // 零写盘语义：替身不再推导任何缺省名（逐源 .obj、vc`<ver>`.pdb、
             // .ilk 全部退役），只收 argv 里字面写出的输出旗标值——分写 /Fo
             // 目录形式收的是目录本身（金丝雀盯它的修改时间）。
-            const std::vector<std::string> v = declared(
+            const std::vector<std::string> v = declared_outputs_of(
+                cwd,
                 {"cl.exe",
                  "/c",
                  "/Fo",
@@ -2413,7 +2506,8 @@ still nothing
                 "cl separate /Fo dir form declares the directory itself");
         }
         {
-            const std::vector<std::string> v = declared(
+            const std::vector<std::string> v = declared_outputs_of(
+                cwd,
                 {"cl.exe",
                  "/c",
                  "/Fox64/Debug/app.obj",
@@ -2428,7 +2522,8 @@ still nothing
                 "cl exact /Fo + /Fd dir form (both literal)");
         }
         {
-            const std::vector<std::string> v = declared(
+            const std::vector<std::string> v = declared_outputs_of(
+                cwd,
                 {"cl.exe", "/c", "/Fpsolid.pch", "/Ycui.h", "src/a.cpp"});
             cg::test::check(
                 r,
@@ -2438,7 +2533,8 @@ still nothing
                 "/Yc header is an input, not a declared output");
         }
         {
-            const std::vector<std::string> v = declared(
+            const std::vector<std::string> v = declared_outputs_of(
+                cwd,
                 {"link.exe",
                  "/OUT:out/app.exe",
                  "/PDB:out/app.pdb",
@@ -2456,7 +2552,8 @@ still nothing
                 "link OUT/PDB/IMPLIB/MAP (no derived .ilk)");
         }
         {
-            const std::vector<std::string> v = declared(
+            const std::vector<std::string> v = declared_outputs_of(
+                cwd,
                 {"lib.exe", "/OUT:out/libsub.lib", "/NOLOGO", "a.obj"});
             cg::test::check(
                 r,
@@ -2466,7 +2563,8 @@ still nothing
                 "lib /OUT");
         }
         {
-            const std::vector<std::string> v = declared(
+            const std::vector<std::string> v = declared_outputs_of(
+                cwd,
                 {"rc.exe", "/nologo", "/fo", "x64/Debug/app.res", "app.rc"});
             cg::test::check(
                 r,
@@ -2474,8 +2572,9 @@ still nothing
                 "rc /fo (separate form)");
         }
         {
-            const std::vector<std::string> v =
-                declared({"ml64.exe", "/c", "/Foint/mul.obj", "/Tamul.asm"});
+            const std::vector<std::string> v = declared_outputs_of(
+                cwd,
+                {"ml64.exe", "/c", "/Foint/mul.obj", "/Tamul.asm"});
             cg::test::check(
                 r,
                 v
@@ -2484,7 +2583,8 @@ still nothing
                 "masm /Fo");
         }
         {
-            const std::vector<std::string> v = declared(
+            const std::vector<std::string> v = declared_outputs_of(
+                cwd,
                 {"mt.exe", "/manifest", "/outputresource:out/app.exe;#1"});
             cg::test::check(
                 r,
@@ -2494,8 +2594,9 @@ still nothing
                 "mt /outputresource strips ;#id");
         }
         {
-            const std::vector<std::string> v =
-                declared({"bscmake.exe", "/o", "out/app.bsc", "a.sbr"});
+            const std::vector<std::string> v = declared_outputs_of(
+                cwd,
+                {"bscmake.exe", "/o", "out/app.bsc", "a.sbr"});
             cg::test::check(
                 r,
                 v
@@ -2506,8 +2607,9 @@ still nothing
         // 带引号旗标值（响应文件拼写）让目录形态
         //    判定保持诚实：引号被剥、无按源推导。
         {
-            const std::vector<std::string> v =
-                declared({"cl.exe", "/c", "/Fo\"E:/proj/int/\"", "src/a.cpp"});
+            const std::vector<std::string> v = declared_outputs_of(
+                cwd,
+                {"cl.exe", "/c", "/Fo\"E:/proj/int/\"", "src/a.cpp"});
             cg::test::check(
                 r,
                 v == std::vector<std::string>{"E:/proj/int"},
@@ -2939,36 +3041,42 @@ still nothing
     // 追加（带 BOM 的文件不受该旗标影响；该引擎
     // 行为由 clang 侧夹具钉住）。声明过的条目
     // 保持原样。
+    /** argv 里 -finput-charset= 旗标的条数。 */
+    [[nodiscard]]
+    auto input_charset_flag_count(const std::vector<std::string>& argv)
+        -> std::size_t
+    {
+        return static_cast<std::size_t>(std::ranges::count_if(
+            argv,
+            [](const std::string& t)
+            { return t.starts_with("-finput-charset="); }));
+    }
+
+    /** 带追加旗标的 cl 条目适配（E:/proj 工作目录形态）。 */
+    [[nodiscard]]
+    auto charset_probe_entry(const std::vector<std::string>& extra)
+        -> std::vector<mb::CdbEntry>
+    {
+        mb::ClInvocation inv;
+        inv.cwd = "E:/proj";
+        inv.argv_utf8 = {"cl.exe", "/c"};
+        inv.argv_utf8.insert(inv.argv_utf8.end(), extra.begin(), extra.end());
+        inv.argv_utf8.push_back("src\\main.cpp");
+        return mb::adapt_cl(inv);
+    }
+
     void adapt_input_charset(R& r)
     {
         const std::string local = cg::util::platform::ansi_input_charset();
-        const auto        count_flag = [](const std::vector<std::string>& argv)
         {
-            return static_cast<std::size_t>(std::ranges::count_if(
-                argv,
-                [](const std::string& t)
-                { return t.starts_with("-finput-charset="); }));
-        };
-        const auto entry_of = [](const std::vector<std::string>& extra)
-        {
-            mb::ClInvocation inv;
-            inv.cwd = "E:/proj";
-            inv.argv_utf8 = {"cl.exe", "/c"};
-            inv.argv_utf8.insert(
-                inv.argv_utf8.end(),
-                extra.begin(),
-                extra.end());
-            inv.argv_utf8.push_back("src\\main.cpp");
-            return mb::adapt_cl(inv);
-        };
-        {
-            const std::vector<mb::CdbEntry> out = entry_of({});
+            const std::vector<mb::CdbEntry> out = charset_probe_entry({});
             cg::test::check(r, out.size() == 1, "plain entry adapts");
             if (out.size() == 1)
             {
                 cg::test::check(
                     r,
-                    count_flag(out[0].arguments) == (local.empty() ? 0u : 1u),
+                    input_charset_flag_count(out[0].arguments)
+                        == (local.empty() ? 0u : 1u),
                     std::format(
                         "undeclared entry carries the host charset "
                         "append (host '{}')",
@@ -2976,26 +3084,30 @@ still nothing
             }
         }
         {
-            const std::vector<mb::CdbEntry> out = entry_of({"/utf-8"});
+            const std::vector<mb::CdbEntry> out =
+                charset_probe_entry({"/utf-8"});
             cg::test::check(
                 r,
-                out.size() == 1 && count_flag(out[0].arguments) == 0,
+                out.size() == 1
+                    && input_charset_flag_count(out[0].arguments) == 0,
                 "/utf-8 declared - no append");
         }
         {
             const std::vector<mb::CdbEntry> out =
-                entry_of({"/source-charset:GBK"});
+                charset_probe_entry({"/source-charset:GBK"});
             cg::test::check(
                 r,
-                out.size() == 1 && count_flag(out[0].arguments) == 0,
+                out.size() == 1
+                    && input_charset_flag_count(out[0].arguments) == 0,
                 "/source-charset:VALUE declared - no append");
         }
         {
             const std::vector<mb::CdbEntry> out =
-                entry_of({"/source-charset", "GBK"});
+                charset_probe_entry({"/source-charset", "GBK"});
             cg::test::check(
                 r,
-                out.size() == 1 && count_flag(out[0].arguments) == 0,
+                out.size() == 1
+                    && input_charset_flag_count(out[0].arguments) == 0,
                 "separate /source-charset VALUE declared - no append");
         }
     }
@@ -3073,8 +3185,7 @@ still nothing
         cg::test::check(
             r,
             no_build.size() == 1 && no_build[0].name == "projA"
-                && no_build[0].active_cfg == "Debug|x64"
-                && !no_build[0].build,
+                && no_build[0].active_cfg == "Debug|x64" && !no_build[0].build,
             "member without Build.0 stays listed with in-build flag false");
     }
 
@@ -3115,6 +3226,43 @@ still nothing
     // ------------------------------------------- 输入解析 / 环境 / 注册表
     // ------
 
+    /** 操作数解析一次调用的多态结局。 */
+    struct ResolveOutcome
+    {
+        bool                                ok = false;
+        bool                                threw_usage = false;
+        bool                                threw_runtime = false;
+        std::string                         message;
+        std::string                         usage;
+        std::pair<std::string, std::string> value;
+    };
+
+    /** 解析操作数并按异常形态归档结局。 */
+    [[nodiscard]]
+    auto try_resolve_msbuild_input(const std::string& operand, bool list_mode)
+        -> ResolveOutcome
+    {
+        ResolveOutcome o;
+        try
+        {
+            o.value =
+                cg::cli::detail::resolve_msbuild_input(operand, list_mode);
+            o.ok = true;
+        }
+        catch (const cg::cli::UsageError& e)
+        {
+            o.threw_usage = true;
+            o.message = e.what();
+            o.usage = e.usage();
+        }
+        catch (const std::runtime_error& e)
+        {
+            o.threw_runtime = true;
+            o.message = e.what();
+        }
+        return o;
+    }
+
     // ccg msbuild 操作数解析矩阵：extract 模式只接受 .sln
     // （扩展名匹配大小写不敏感）；.vcxproj、目录与其它文件
     // 输入是 UsageError（退出码 2、可操作信息 +
@@ -3125,42 +3273,12 @@ still nothing
     void cli_resolve_msbuild_input(R& r)
     {
         namespace fs = std::filesystem;
-        struct Outcome
-        {
-            bool                                ok = false;
-            bool                                threw_usage = false;
-            bool                                threw_runtime = false;
-            std::string                         message;
-            std::string                         usage;
-            std::pair<std::string, std::string> value;
-        };
-        const auto try_resolve = [](const std::string& operand, bool list_mode)
-        {
-            Outcome o;
-            try
-            {
-                o.value =
-                    cg::cli::detail::resolve_msbuild_input(operand, list_mode);
-                o.ok = true;
-            }
-            catch (const cg::cli::UsageError& e)
-            {
-                o.threw_usage = true;
-                o.message = e.what();
-                o.usage = e.usage();
-            }
-            catch (const std::runtime_error& e)
-            {
-                o.threw_runtime = true;
-                o.message = e.what();
-            }
-            return o;
-        };
+        using Outcome = ResolveOutcome;
 
         // extract 模式：已入库 .sln 被接受为（输入，根）。
         const std::string sln = fixture("DemoSln.sln");
         const fs::path    abs_sln = fs::absolute(fs::path{sln});
-        const Outcome     got = try_resolve(sln, false);
+        const Outcome     got = try_resolve_msbuild_input(sln, false);
         cg::test::check(
             r,
             got.ok,
@@ -3202,7 +3320,8 @@ still nothing
                 std::ios::binary | std::ios::trunc};
             out << "Microsoft Visual Studio Solution File\n";
         }
-        const Outcome upper = try_resolve((dir / "MIXED.SLN").string(), false);
+        const Outcome upper =
+            try_resolve_msbuild_input((dir / "MIXED.SLN").string(), false);
         cg::test::check(
             r,
             upper.ok && upper.value.first.ends_with("/MIXED.SLN"),
@@ -3210,21 +3329,24 @@ still nothing
 
         // extract 模式拒绝是带可操作信息的 UsageError；
         // 操作数路径缺失是运行时错误，绝非用法错误。
-        const Outcome vcx =
-            try_resolve(fixture("msbdemo/msbdemo.vcxproj"), false);
+        const Outcome vcx = try_resolve_msbuild_input(
+            fixture("msbdemo/msbdemo.vcxproj"),
+            false);
         cg::test::check(
             r,
             vcx.threw_usage
                 && vcx.message.find("single-project") != std::string::npos,
             "single .vcxproj input rejected as a usage error");
-        const Outcome directory = try_resolve(fixture("rsp"), false);
+        const Outcome directory =
+            try_resolve_msbuild_input(fixture("rsp"), false);
         cg::test::check(
             r,
             directory.threw_usage
                 && directory.message.find("directory input")
                        != std::string::npos,
             "directory input rejected as a usage error");
-        const Outcome notsln = try_resolve(fixture("rsp/test.rsp"), false);
+        const Outcome notsln =
+            try_resolve_msbuild_input(fixture("rsp/test.rsp"), false);
         cg::test::check(
             r,
             notsln.threw_usage
@@ -3234,7 +3356,8 @@ still nothing
             r,
             vcx.threw_usage && !vcx.usage.empty(),
             "usage error carries the usage block (exit 2 shape)");
-        const Outcome absent = try_resolve(fixture("no-such.sln"), false);
+        const Outcome absent =
+            try_resolve_msbuild_input(fixture("no-such.sln"), false);
         cg::test::check(
             r,
             absent.threw_runtime && !absent.threw_usage
@@ -3243,7 +3366,8 @@ still nothing
 
         // --list 双语义：同操作数、注册表根含义；
         // .vcxproj 拒绝不适用（--list 不发生构建）。
-        const Outcome list_dir = try_resolve(fixture("rsp"), true);
+        const Outcome list_dir =
+            try_resolve_msbuild_input(fixture("rsp"), true);
         cg::test::check(
             r,
             list_dir.ok && list_dir.value.first.empty()
@@ -3253,14 +3377,14 @@ still nothing
                                .lexically_normal()
                                .generic_string()),
             "--list on a directory: root is the directory itself");
-        const Outcome list_file = try_resolve(sln, true);
+        const Outcome list_file = try_resolve_msbuild_input(sln, true);
         cg::test::check(
             r,
             list_file.ok && list_file.value.first.empty()
                 && list_file.value.second == got.value.second,
             "--list on a file: root is the file's parent directory");
         const Outcome list_vcx =
-            try_resolve(fixture("msbdemo/msbdemo.vcxproj"), true);
+            try_resolve_msbuild_input(fixture("msbdemo/msbdemo.vcxproj"), true);
         cg::test::check(
             r,
             list_vcx.ok && list_vcx.value.first.empty()
@@ -3273,6 +3397,63 @@ still nothing
         &cli_resolve_msbuild_input};
 
 #if defined(_WIN32)
+    /** 环境块到 (名, 值) 条目表的走查（畸形条目处停止）。 */
+    [[nodiscard]]
+    auto env_block_entries(const std::wstring& block)
+        -> std::vector<std::pair<std::wstring, std::wstring>>
+    {
+        std::vector<std::pair<std::wstring, std::wstring>> out;
+        std::size_t                                        at = 0;
+        while (at < block.size() && block[at] != L'\0')
+        {
+            const std::size_t eq = block.find(L'=', at);
+            const std::size_t end = block.find(L'\0', at);
+            if (eq == std::wstring::npos || eq > end)
+            {
+                break; // 畸形条目：停止走查（永不自建）
+            }
+            out.emplace_back(
+                block.substr(at, eq - at),
+                block.substr(eq + 1, end - eq - 1));
+            at = end + 1;
+        }
+        return out;
+    }
+
+    /** 宽串转小写（ASCII 段）。 */
+    [[nodiscard]]
+    auto wide_lower(std::wstring s) -> std::wstring
+    {
+        std::ranges::transform(
+            s,
+            s.begin(),
+            [](wchar_t c)
+            {
+                return c >= L'A' && c <= L'Z'
+                           ? static_cast<wchar_t>(c - L'A' + L'a')
+                           : c;
+            });
+        return s;
+    }
+
+    /** 条目表里指定名（小写比对）的条数。 */
+    [[nodiscard]]
+    auto env_entries_named(
+        const std::vector<std::pair<std::wstring, std::wstring>>& entries,
+        const wchar_t* name) -> std::size_t
+    {
+        std::size_t n = 0;
+        for (const auto& [entry_name, value] : entries)
+        {
+            static_cast<void>(value);
+            if (wide_lower(entry_name) == name)
+            {
+                ++n;
+            }
+        }
+        return n;
+    }
+
     // build_child_env：子环境块 = 当前块减去
     // 移除清单减去被覆盖名，再加上新覆盖；名字
     // 匹配大小写不敏感（Windows 环境名语义——进程
@@ -3282,51 +3463,6 @@ still nothing
     // 块（ccg 进程环境不动）。
     void pipeline_child_env(R& r)
     {
-        const auto entries_of = [](const std::wstring& block)
-        {
-            std::vector<std::pair<std::wstring, std::wstring>> out;
-            std::size_t                                        at = 0;
-            while (at < block.size() && block[at] != L'\0')
-            {
-                const std::size_t eq = block.find(L'=', at);
-                const std::size_t end = block.find(L'\0', at);
-                if (eq == std::wstring::npos || eq > end)
-                {
-                    break; // 畸形条目：停止走查（永不自建）
-                }
-                out.emplace_back(
-                    block.substr(at, eq - at),
-                    block.substr(eq + 1, end - eq - 1));
-                at = end + 1;
-            }
-            return out;
-        };
-        const auto lower = [](std::wstring s)
-        {
-            std::ranges::transform(
-                s,
-                s.begin(),
-                [](wchar_t c)
-                {
-                    return c >= L'A' && c <= L'Z'
-                               ? static_cast<wchar_t>(c - L'A' + L'a')
-                               : c;
-                });
-            return s;
-        };
-        const auto count_named = [&](const auto& entries, const wchar_t* name)
-        {
-            std::size_t n = 0;
-            for (const auto& [entry_name, value] : entries)
-            {
-                static_cast<void>(value);
-                if (lower(entry_name) == name)
-                {
-                    ++n;
-                }
-            }
-            return n;
-        };
 
         // 基线块：双 NUL 结尾、按实际拼写恰好携带
         // 进程 PATH 一次。
@@ -3337,8 +3473,8 @@ still nothing
                 && baseline[baseline.size() - 2] == L'\0',
             "env block is double-NUL terminated");
         const std::vector<std::pair<std::wstring, std::wstring>> base =
-            entries_of(baseline);
-        const std::size_t base_paths = count_named(base, L"path");
+            env_block_entries(baseline);
+        const std::size_t base_paths = env_entries_named(base, L"path");
         if (base_paths != 1)
         {
             cg::test::check(
@@ -3351,7 +3487,7 @@ still nothing
         for (const auto& [entry_name, value] : base)
         {
             static_cast<void>(value);
-            if (lower(entry_name) == L"path")
+            if (wide_lower(entry_name) == L"path")
             {
                 path_name = entry_name;
             }
@@ -3371,15 +3507,15 @@ still nothing
         }
         const std::wstring overridden =
             mb::detail::build_child_env({{flipped, L"ccg-child-env-stub"}}, {});
-        const auto over = entries_of(overridden);
+        const auto over = env_block_entries(overridden);
         cg::test::check(
             r,
-            count_named(over, L"path") == 1,
+            env_entries_named(over, L"path") == 1,
             "case-flipped override still replaces PATH (one entry)");
         bool stubbed = false;
         for (const auto& [entry_name, value] : over)
         {
-            if (lower(entry_name) == L"path")
+            if (wide_lower(entry_name) == L"path")
             {
                 stubbed = value == L"ccg-child-env-stub";
             }
@@ -3393,7 +3529,7 @@ still nothing
         const std::wstring removed = mb::detail::build_child_env({}, {flipped});
         cg::test::check(
             r,
-            count_named(entries_of(removed), L"path") == 0,
+            env_entries_named(env_block_entries(removed), L"path") == 0,
             "case-flipped remove name still prunes PATH");
         // 移除只修剪子块；进程环境保住 PATH。
         cg::test::check(
@@ -3405,7 +3541,7 @@ still nothing
         const std::wstring tail = mb::detail::build_child_env(
             {{L"ccg_child_env_one", L"1"}, {L"CCG_CHILD_ENV_TWO", L"2"}},
             {});
-        const auto tail_entries = entries_of(tail);
+        const auto tail_entries = env_block_entries(tail);
         cg::test::check(
             r,
             tail_entries.size() >= 2
@@ -3541,13 +3677,13 @@ still nothing
                 "per-record resolution spelling and empty cl persisted");
             // 披露键：有值逐键写出（false 如实写 false），未知（projC）
             // 键缺席——序列化文本与读回口径一致。
-            const auto d0 = cps->at(0)->get("dir");
-            const auto a0 = cps->at(0)->get("active_cfg");
-            const auto b0 = cps->at(0)->get("in_build");
-            const auto b1 = cps->at(1)->get("in_build");
-            const auto d2 = cps->at(2)->get("dir");
-            const auto a2 = cps->at(2)->get("active_cfg");
-            const auto b2 = cps->at(2)->get("in_build");
+            const auto        d0 = cps->at(0)->get("dir");
+            const auto        a0 = cps->at(0)->get("active_cfg");
+            const auto        b0 = cps->at(0)->get("in_build");
+            const auto        b1 = cps->at(1)->get("in_build");
+            const auto        d2 = cps->at(2)->get("dir");
+            const auto        a2 = cps->at(2)->get("active_cfg");
+            const auto        b2 = cps->at(2)->get("in_build");
             const std::string text = read_file(path);
             cg::test::check(
                 r,
@@ -3555,9 +3691,9 @@ still nothing
                     && *d0->as_string()
                            == std::string_view{"E:/src/DemoSln/projA"}
                     && a0 && a0->is_string()
-                    && *a0->as_string() == std::string_view{"Debug|x64"}
-                    && b0 && b0->is_bool() && *b0->as_bool()
-                    && b1 && b1->is_bool() && !*b1->as_bool(),
+                    && *a0->as_string() == std::string_view{"Debug|x64"} && b0
+                    && b0->is_bool() && *b0->as_bool() && b1 && b1->is_bool()
+                    && !*b1->as_bool(),
                 "disclosure keys dir/active_cfg/in_build persisted "
                 "(false spelled as false)");
             cg::test::check(
@@ -3813,11 +3949,11 @@ still nothing
     /** 对 DemoSln 的一个成员工程做关键字段深度断言（工具集/标准/
      *  defines/TU 清单）。 */
     void expect_project_fields(
-        R&                                r,
-        const ev::EvalProjectOut&         p,
-        std::string_view                  toolset,
-        std::string_view                  lang_std,
-        std::string_view                  define_needle,
+        R&                                 r,
+        const ev::EvalProjectOut&          p,
+        std::string_view                   toolset,
+        std::string_view                   lang_std,
+        std::string_view                   define_needle,
         std::initializer_list<const char*> tu_files)
     {
         cg::test::check(
@@ -3897,8 +4033,7 @@ still nothing
             "主版本段 + .0");
         cg::test::check(
             r,
-            ev::vs_version_of("x:/ccg-fake/vs/2022/BuildTools")
-                == "2022.0",
+            ev::vs_version_of("x:/ccg-fake/vs/2022/BuildTools") == "2022.0",
             "版本段非主版本号形态时按规则原样拼段（已知局限记档）");
         cg::test::check(
             r,
@@ -3919,28 +4054,59 @@ still nothing
                  fixture("DemoSln.sln"),
                  "Debug",
                  "x64")
-                     .has_value()
+                    .has_value()
                 && !ev::build_evaluate_request(
-                       "x:/ccg-fake/msbuild.exe",
-                       "",
-                       "Debug",
-                       "x64")
-                           .has_value(),
+                        "x:/ccg-fake/msbuild.exe",
+                        "",
+                        "Debug",
+                        "x64")
+                        .has_value(),
             "空 msbuild/sln 输入拒绝");
     }
 
     /** 刷新快照：构建（输入集合并/去重/规范化/缺盘记空）、存取往返
      *  与哈希门判定矩阵（纯文件面，跨平台——不依赖 51 线桥）。 */
+    /** 快照哈希门是否判变（非空原因即变）。 */
+    [[nodiscard]]
+    auto snapshot_mismatches(
+        const ev::RefreshSnapshot& s,
+        const std::string&         msbuild,
+        const std::string&         cl,
+        const std::string&         vc_targets) -> bool
+    {
+        return !ev::refresh_snapshot_unchanged(s, msbuild, cl, vc_targets)
+                    .empty();
+    }
+
+    /** 刷新快照里指定路径的文件条目（未命中给空）。 */
+    [[nodiscard]]
+    auto snapshot_file_of(const ev::RefreshSnapshot& snap, const std::string& p)
+        -> const ev::RefreshSnapshotFile*
+    {
+        const auto it = std::ranges::find(
+            snap.files,
+            cg::util::norm_path(p),
+            &ev::RefreshSnapshotFile::path);
+        return it == snap.files.end() ? nullptr : &*it;
+    }
+
+    /** 文本内容的 sha256（十六进制）。 */
+    [[nodiscard]]
+    auto content_sha256(std::string_view text) -> std::string
+    {
+        return cg::util::sha256_hex(std::as_bytes(std::span{text}));
+    }
+
     void eval_snapshot_cases(R& r)
     {
         namespace fs = std::filesystem;
         const cg::test::ScratchDir scratch{
             fs::temp_directory_path() / "ccg-eval-snapshot"};
-        const std::string sln    = path_utf8(scratch.base / "demo.sln");
-        const std::string va     = path_utf8(scratch.base / "a/a.vcxproj");
-        const std::string vb     = path_utf8(scratch.base / "b/b.vcxproj");
+        const std::string sln = path_utf8(scratch.base / "demo.sln");
+        const std::string va = path_utf8(scratch.base / "a/a.vcxproj");
+        const std::string vb = path_utf8(scratch.base / "b/b.vcxproj");
         const std::string shared = path_utf8(scratch.base / "shared.props");
-        const std::string gone   = path_utf8(scratch.base / "gone.props");
+        const std::string gone = path_utf8(scratch.base / "gone.props");
         scratch.put(scratch.base / "demo.sln", "sln-bytes");
         scratch.put(scratch.base / "a/a.vcxproj", "a-bytes");
         scratch.put(scratch.base / "b/b.vcxproj", "b-bytes");
@@ -3953,13 +4119,13 @@ still nothing
         scratch.put(scratch.base / "cl.exe", "cl-bytes");
 
         ev::EvalRequest req;
-        req.solution   = sln;
+        req.solution = sln;
         req.vc_targets = "x:/ccg-fake/VC/v170\\";
         ev::EvalProjectIn in_a;
-        in_a.vcxproj   = va;
+        in_a.vcxproj = va;
         ev::EvalProjectIn in_b;
-        in_b.vcxproj   = vb;
-        req.projects   = {in_a, in_b};
+        in_b.vcxproj = vb;
+        req.projects = {in_a, in_b};
 
         ev::EvalProjectOut out_a;
         ev::EvalProjectOut out_b;
@@ -3976,17 +4142,6 @@ still nothing
             req,
             {out_a, out_b});
 
-        const auto hash_of = [](std::string_view text)
-        { return cg::util::sha256_hex(std::as_bytes(std::span{text})); };
-        const auto entry =
-            [&](const std::string& p) -> const ev::RefreshSnapshotFile*
-        {
-            const auto it = std::ranges::find(
-                snap.files,
-                cg::util::norm_path(p),
-                &ev::RefreshSnapshotFile::path);
-            return it == snap.files.end() ? nullptr : &*it;
-        };
         // 输入集 = sln + 两 vcxproj + shared（两工程闭包去重后一条）+
         // gone = 5 条。
         cg::test::check(
@@ -4005,11 +4160,11 @@ still nothing
                     &ev::RefreshSnapshotFile::path),
                 "文件条目按路径字典序（确定性输出）");
         }
-        if (const ev::RefreshSnapshotFile* f = entry(shared))
+        if (const ev::RefreshSnapshotFile* f = snapshot_file_of(snap, shared))
         {
             cg::test::check(
                 r,
-                f->sha256 == hash_of("shared-bytes"),
+                f->sha256 == content_sha256("shared-bytes"),
                 "shared.props 哈希与内容对齐");
             cg::test::check(
                 r,
@@ -4020,22 +4175,19 @@ still nothing
         {
             cg::test::check(r, false, "shared.props 在快照输入集内");
         }
-        if (const ev::RefreshSnapshotFile* f = entry(gone))
+        if (const ev::RefreshSnapshotFile* f = snapshot_file_of(snap, gone))
         {
-            cg::test::check(
-                r,
-                f->sha256.empty(),
-                "缺盘闭包文件哈希记空串");
+            cg::test::check(r, f->sha256.empty(), "缺盘闭包文件哈希记空串");
         }
         else
         {
             cg::test::check(r, false, "缺盘闭包文件仍入输入集");
         }
-        if (const ev::RefreshSnapshotFile* f = entry(sln))
+        if (const ev::RefreshSnapshotFile* f = snapshot_file_of(snap, sln))
         {
             cg::test::check(
                 r,
-                f->sha256 == hash_of("sln-bytes"),
+                f->sha256 == content_sha256("sln-bytes"),
                 "sln 哈希与内容对齐");
         }
         const std::string live_include =
@@ -4045,25 +4197,21 @@ still nothing
             snap.env.msbuild == cg::util::norm_path(fake_msbuild)
                 && snap.env.cl == cg::util::norm_path(fake_cl)
                 && snap.env.vc_targets == req.vc_targets
-                && snap.env.include == hash_of(live_include),
+                && snap.env.include == content_sha256(live_include),
             "环境身份四元组齐备（INCLUDE 为当前进程哈希）");
         cg::test::check(
             r,
             snap.ccg_version == cg::util::version,
             "ccg 版本入快照");
-        cg::test::check(
-            r,
-            !snap.written_at.empty(),
-            "写出时间戳非空");
+        cg::test::check(r, !snap.written_at.empty(), "写出时间戳非空");
 
         // 路径单点与存取往返。
-        const std::string snapshot_path = ev::refresh_snapshot_path(
-            path_utf8(scratch.base),
-            "Debug-x64");
+        const std::string snapshot_path =
+            ev::refresh_snapshot_path(path_utf8(scratch.base), "Debug-x64");
         cg::test::check(
             r,
             snapshot_path.find("/.ccg/msbuild/Debug-x64/snapshot.json")
-                    != std::string::npos,
+                != std::string::npos,
             std::format("快照路径与捕获日志同区: {}", snapshot_path));
         ev::save_refresh_snapshot(snapshot_path, snap);
         cg::test::check(
@@ -4074,28 +4222,20 @@ still nothing
         bool       roundtrip = loaded.has_value();
         if (loaded)
         {
-            roundtrip = roundtrip
-                        && loaded->files.size() == snap.files.size();
-            for (std::size_t i = 0;
-                 roundtrip && i < snap.files.size();
-                 ++i)
+            roundtrip = roundtrip && loaded->files.size() == snap.files.size();
+            for (std::size_t i = 0; roundtrip && i < snap.files.size(); ++i)
             {
                 roundtrip = loaded->files[i].path == snap.files[i].path
-                            && loaded->files[i].sha256
-                                   == snap.files[i].sha256;
+                            && loaded->files[i].sha256 == snap.files[i].sha256;
             }
-            roundtrip = roundtrip
-                        && loaded->env.include == snap.env.include
+            roundtrip = roundtrip && loaded->env.include == snap.env.include
                         && loaded->env.msbuild == snap.env.msbuild
                         && loaded->env.cl == snap.env.cl
                         && loaded->env.vc_targets == snap.env.vc_targets
                         && loaded->ccg_version == snap.ccg_version
                         && loaded->written_at == snap.written_at;
         }
-        cg::test::check(
-            r,
-            roundtrip,
-            "存取往返逐字段幸存");
+        cg::test::check(r, roundtrip, "存取往返逐字段幸存");
 
         // 哈希门判定矩阵：全等 -> 空；各失配 -> 非空人读原因。
         cg::test::check(
@@ -4107,34 +4247,31 @@ still nothing
                 req.vc_targets)
                 .empty(),
             "全等判定（注册表路径在盘 + 推导一致）");
-        const auto mismatch = [&](const ev::RefreshSnapshot& s) -> bool
-        {
-            return !ev::refresh_snapshot_unchanged(
-                        s,
-                        fake_msbuild,
-                        fake_cl,
-                        req.vc_targets)
-                        .empty();
-        };
         scratch.put(scratch.base / "a/a.vcxproj", "a-bytes-2");
         cg::test::check(
             r,
-            mismatch(snap),
+            snapshot_mismatches(snap, fake_msbuild, fake_cl, req.vc_targets),
             "成员 vcxproj 内容变 -> 判变");
         scratch.put(scratch.base / "a/a.vcxproj", "a-bytes");
         fs::remove(scratch.base / "shared.props", scratch.ec);
         cg::test::check(
             r,
-            mismatch(snap),
+            snapshot_mismatches(snap, fake_msbuild, fake_cl, req.vc_targets),
             "闭包 props 被删 -> 判变（非空记录 vs 缺盘）");
         scratch.put(scratch.base / "shared.props", "shared-bytes");
         ev::RefreshSnapshot bump = snap;
         bump.ccg_version = "0.0.0-sentinel";
-        cg::test::check(r, mismatch(bump), "ccg 版本变 -> 判变");
-        bump                = snap;
-        bump.env.include    = "deadbeef";
-        cg::test::check(r, mismatch(bump), "INCLUDE 哈希变 -> 判变");
-        bump            = snap;
+        cg::test::check(
+            r,
+            snapshot_mismatches(bump, fake_msbuild, fake_cl, req.vc_targets),
+            "ccg 版本变 -> 判变");
+        bump = snap;
+        bump.env.include = "deadbeef";
+        cg::test::check(
+            r,
+            snapshot_mismatches(bump, fake_msbuild, fake_cl, req.vc_targets),
+            "INCLUDE 哈希变 -> 判变");
+        bump = snap;
         bump.env.msbuild = "x:/ccg-fake/other/MSBuild.exe";
         cg::test::check(
             r,
@@ -4172,11 +4309,11 @@ still nothing
                  req.vc_targets + "x")
                  .empty(),
             "VCTargetsPath 推导变 -> 判变");
-        bump              = snap;
+        bump = snap;
         bump.files.clear();
         cg::test::check(
             r,
-            mismatch(bump),
+            snapshot_mismatches(bump, fake_msbuild, fake_cl, req.vc_targets),
             "零文件条目（形坏）-> 判变");
         scratch.put(
             scratch.base / ".ccg/msbuild/Debug-x64/snapshot.json",
@@ -4219,9 +4356,7 @@ still nothing
         cg::test::check(
             r,
             !req->vc_targets.empty() && req->vc_targets.back() == '\\',
-            std::format(
-                "VCTargetsPath 尾反斜杠硬约束: '{}'",
-                req->vc_targets));
+            std::format("VCTargetsPath 尾反斜杠硬约束: '{}'", req->vc_targets));
         cg::test::check(
             r,
             req->projects.size() == 2 && req->projects[0].name == "mathlib"
@@ -4247,9 +4382,7 @@ still nothing
         cg::test::check(
             r,
             out.mismatches == 0,
-            std::format(
-                "回放自检零失配（{} 次校验）",
-                out.tu_field_checks));
+            std::format("回放自检零失配（{} 次校验）", out.tu_field_checks));
         if (out.projects.size() != 2)
         {
             return;
@@ -4402,8 +4535,7 @@ still nothing
                 }
                 cg::test::check(
                     r,
-                    files.count("mod.ixx") == 1
-                        && files.count("use.cpp") == 1,
+                    files.count("mod.ixx") == 1 && files.count("use.cpp") == 1,
                     std::format(
                         "g16mod 模块 TU 清单含 mod.ixx 与 use.cpp: 实值"
                         " {} 条",
@@ -4451,9 +4583,7 @@ still nothing
             r,
             written.find("Project(\"") != std::string::npos
                 && written.find(".ActiveCfg = ") != std::string::npos,
-            std::format(
-                "回读手造 sln 完整（{} 字节）",
-                written.size()));
+            std::format("回读手造 sln 完整（{} 字节）", written.size()));
         const auto req_no_build = ev::build_evaluate_request(
             msbuild,
             path_utf8(scratch.base / "DemoNoBuild.sln"),
@@ -4465,8 +4595,7 @@ still nothing
             std::format(
                 "无 Build.0 行时成员仍在清单（has={} n={} 路径={}）",
                 req_no_build.has_value(),
-                req_no_build.has_value() ? req_no_build->projects.size()
-                                         : 0,
+                req_no_build.has_value() ? req_no_build->projects.size() : 0,
                 path_utf8(scratch.base / "DemoNoBuild.sln")));
         if (req_no_build.has_value() && req_no_build->projects.size() == 2)
         {
@@ -4525,10 +4654,7 @@ still nothing
             fixture("DemoSln.sln"),
             "Debug",
             "x64");
-        cg::test::check(
-            r,
-            req.has_value(),
-            "看门狗用例请求构建成功");
+        cg::test::check(r, req.has_value(), "看门狗用例请求构建成功");
         if (!req.has_value())
         {
             return;
@@ -4553,17 +4679,23 @@ still nothing
     }
 
     const cg::test::Registrar reg_eval_discovery{
-        "msbuild.eval_discovery_text", &eval_discovery_text_cases};
+        "msbuild.eval_discovery_text",
+        &eval_discovery_text_cases};
     const cg::test::Registrar reg_eval_demosln{
-        "msbuild.eval_demosln", &eval_demosln_cases};
+        "msbuild.eval_demosln",
+        &eval_demosln_cases};
     const cg::test::Registrar reg_eval_matrix{
-        "msbuild.eval_matrix", &eval_matrix_cases};
+        "msbuild.eval_matrix",
+        &eval_matrix_cases};
     const cg::test::Registrar reg_eval_build_flags{
-        "msbuild.eval_build_flags", &eval_build_flag_cases};
+        "msbuild.eval_build_flags",
+        &eval_build_flag_cases};
     const cg::test::Registrar reg_eval_watchdog{
-        "msbuild.eval_watchdog", &eval_watchdog_cases};
+        "msbuild.eval_watchdog",
+        &eval_watchdog_cases};
     const cg::test::Registrar reg_eval_snapshot{
-        "msbuild.eval_snapshot", &eval_snapshot_cases};
+        "msbuild.eval_snapshot",
+        &eval_snapshot_cases};
 
     // ------------------------------------------------------------------
     // 组装器（cg.msbuild.compose）：合成载荷的字段级单测（跨平台纯函数）
@@ -4579,9 +4711,9 @@ still nothing
         -> ev::EvalProjectOut
     {
         ev::EvalProjectOut p;
-        p.name             = std::string{name};
+        p.name = std::string{name};
         p.build_in_solution = true;
-        p.raw_json          = json::stringify(std::move(root));
+        p.raw_json = json::stringify(std::move(root));
         return p;
     }
 
@@ -4605,9 +4737,123 @@ still nothing
         return root;
     }
 
-    /** 字段全量合成载荷的 argv 精确断言（拼写/序/连分写/否定形——
-     *  期望值 = 记录通道对 coverfields 夹具的 wrap 捕获真值投影）。 */
-    void compose_field_cases(R& r)
+    /** PCH 三态之一的 argv 断言（/Yc /Yu 连写头名 + /Fp 连写）。 */
+    void compose_pch_case(
+        R&                                r,
+        const std::vector<mb::ProjectCl>& cls,
+        std::string_view                  use,
+        std::string_view                  want_switch)
+    {
+        json::Object itemdef3;
+        itemdef3.set("PrecompiledHeader", std::string{use});
+        itemdef3.set("PrecompiledHeaderFile", "pch.h");
+        itemdef3.set("PrecompiledHeaderOutputFile", "X:/fake/int/pch.pch");
+        itemdef3.set("WarningLevel", "Level3");
+        json::Object tu3;
+        tu3.set("file", "main.cpp");
+        tu3.set("abs", "X:/fake/proj/main.cpp");
+        json::Array tus3;
+        tus3.add(std::move(tu3));
+        std::vector<ev::EvalProjectOut> ps;
+        ps.push_back(make_project(
+            "synthetic",
+            compose_skeleton(
+                "X:/fake/proj",
+                "X:/fake/int/",
+                std::move(itemdef3),
+                std::move(tus3))));
+        const std::vector<mb::ClInvocation> o3 =
+            cp::compose_invocations(ps, cls);
+        const std::vector<std::string> want3 = {
+            "X:/fake/cl.exe",
+            "/W3",
+            std::string{want_switch},
+            "/FpX:/fake/int/pch.pch",
+            "/external:W3",
+            "/TP",
+            "X:/fake/proj/main.cpp",
+        };
+        cg::test::check(
+            r,
+            o3.size() == 1 && o3[0].argv_utf8 == want3,
+            std::format("PCH '{}' 的 argv 相等", use));
+    }
+
+    /** 模块单元判定单分支的 argv 断言（/interface 与 /ifcOutput 拼名）。 */
+    void compose_module_case(
+        R&                                r,
+        const std::vector<mb::ProjectCl>& cls,
+        std::string_view                  compile_as,
+        std::string_view                  file,
+        std::string_view                  want_lang_mode,
+        bool                              want_interface,
+        bool                              want_module_output,
+        std::string_view                  want_fo)
+    {
+        json::Object itemdef5;
+        itemdef5.set("CompileAs", std::string{compile_as});
+        itemdef5.set("ObjectFileName", "X:/fake/int/");
+        itemdef5.set("ModuleOutputFile", "X:/fake/int/");
+        itemdef5.set("AdditionalBMIDirectories", "bmidir");
+        itemdef5.set("AdditionalModuleDependencies", "core=core.ifc");
+        itemdef5.set("TranslateIncludes", "true");
+        itemdef5.set("WarningLevel", "Level3");
+        itemdef5.set("LanguageStandard", "stdcpp20");
+        itemdef5.set("CallingConvention", "Cdecl");
+        json::Object tu5;
+        tu5.set("file", std::string{file});
+        tu5.set("abs", std::string{"X:/fake/proj/"} + std::string{file});
+        json::Array tus5;
+        tus5.add(std::move(tu5));
+        std::vector<ev::EvalProjectOut> ps;
+        ps.push_back(make_project(
+            "synthetic",
+            compose_skeleton(
+                "X:/fake/proj",
+                "X:/fake/int/",
+                std::move(itemdef5),
+                std::move(tus5))));
+        const std::vector<mb::ClInvocation> o5 =
+            cp::compose_invocations(ps, cls);
+        std::vector<std::string> want5 = {
+            "X:/fake/cl.exe",
+            "/ifcSearchDir",
+            "bmidir",
+            "/reference",
+            "core=core.ifc",
+            "/translateInclude",
+            "/W3",
+            "/std:c++20",
+        };
+        if (want_module_output)
+        {
+            want5.emplace_back("/ifcOutput");
+            want5.emplace_back(
+                std::string{"X:/fake/int/"} + std::string{file} + ".ifc");
+        }
+        want5.push_back(std::string{want_fo});
+        want5.emplace_back("/external:W3");
+        want5.emplace_back("/Gd");
+        if (want_interface)
+        {
+            want5.push_back("/interface");
+        }
+        want5.push_back(std::string{want_lang_mode});
+        want5.push_back(std::string{"X:/fake/proj/"} + std::string{file});
+        cg::test::check(
+            r,
+            o5.size() == 1 && o5[0].argv_utf8 == want5,
+            std::format(
+                "模块单元判定分支 CompileAs='{}' file='{}' 的 "
+                "argv 相等（实得 {} 项）",
+                compile_as,
+                file,
+                o5.size() == 1 ? o5[0].argv_utf8.size() : 0));
+    }
+
+    /** coverfields 全量正例的字段装载（40 键逐值设置）。 */
+    [[nodiscard]]
+    auto make_coverfields_itemdef() -> json::Object
     {
         json::Object itemdef;
         itemdef.set("PreprocessorDefinitions", "COV_A=1;COV_B");
@@ -4647,6 +4893,14 @@ still nothing
         itemdef.set("ModuleOutputFile", "");
         itemdef.set("ObjectFileName", "X:/fake/int/");
         itemdef.set("ProgramDataBaseFileName", "X:/fake/int/vc.pdb");
+        return itemdef;
+    }
+
+    /** 字段全量合成载荷的 argv 精确断言（拼写/序/连分写/否定形——
+     *  期望值 = 记录通道对 coverfields 夹具的 wrap 捕获真值投影）。 */
+    void compose_field_cases(R& r)
+    {
+        json::Object itemdef = make_coverfields_itemdef();
 
         json::Object tu;
         tu.set("file", "cov.cpp");
@@ -4663,17 +4917,18 @@ still nothing
                 std::move(itemdef),
                 std::move(tus))));
         std::vector<mb::ProjectCl> cls;
-        cls.push_back(mb::ProjectCl{
-            .project = "synthetic",
-            .dir     = "X:/fake",
-            .cl      = "X:/fake/cl.exe",
-            .resolution = "override"});
+        cls.push_back(
+            mb::ProjectCl{
+                .project = "synthetic",
+                .dir = "X:/fake",
+                .cl = "X:/fake/cl.exe",
+                .resolution = "override"});
 
-        cp::ComposeDiary  diary;
+        cp::ComposeDiary   diary;
         cp::ComposeOptions opts;
         opts.include_env = std::string{"X:/fake/inc1;X:/fake/inc2"};
-        const std::vector<mb::ClInvocation> out = cp::compose_invocations(
-            projects, cls, opts, &diary);
+        const std::vector<mb::ClInvocation> out =
+            cp::compose_invocations(projects, cls, opts, &diary);
         cg::test::check(
             r,
             out.size() == 1,
@@ -4692,8 +4947,10 @@ still nothing
             "/WX",
             "/MP",
             "/Oi",
-            "/D", "COV_A=1",
-            "/D", "COV_B",
+            "/D",
+            "COV_A=1",
+            "/D",
+            "COV_B",
             "/UOLD_THING",
             "/GF",
             "/Gm",
@@ -4728,13 +4985,15 @@ still nothing
                 [&]
                 {
                     std::string s;
-                    for (const auto& a : out[0].argv_utf8) s += a + " ";
+                    for (const auto& a : out[0].argv_utf8)
+                        s += a + " ";
                     return s;
                 }(),
                 [&]
                 {
                     std::string s;
-                    for (const auto& a : want) s += a + " ";
+                    for (const auto& a : want)
+                        s += a + " ";
                     return s;
                 }()));
         cg::test::check(
@@ -4808,10 +5067,21 @@ still nothing
             const std::vector<mb::ClInvocation> o2 =
                 cp::compose_invocations(ps, cls);
             const std::vector<std::string> want2 = {
-                "X:/fake/cl.exe", "/Zi",     "/W1", "/WX-",
-                "/GF-",           "/Gm-",    "/EHsc", "/MD",
-                "/Gy-",           "/Za",     "/Zc:wchar_t-",
-                "/GR-",           "/external:W1", "/Gd", "/TP",
+                "X:/fake/cl.exe",
+                "/Zi",
+                "/W1",
+                "/WX-",
+                "/GF-",
+                "/Gm-",
+                "/EHsc",
+                "/MD",
+                "/Gy-",
+                "/Za",
+                "/Zc:wchar_t-",
+                "/GR-",
+                "/external:W1",
+                "/Gd",
+                "/TP",
                 "X:/fake/proj/cov.cpp",
             };
             cg::test::check(
@@ -4824,49 +5094,8 @@ still nothing
 
         // PCH 三态（pchp 真值投影：/Yc /Yu 连写头名 + /Fp 连写）。
         {
-            auto pch_case = [&](std::string_view use,
-                                std::string_view want_switch)
-            {
-                json::Object itemdef3;
-                itemdef3.set("PrecompiledHeader", std::string{use});
-                itemdef3.set("PrecompiledHeaderFile", "pch.h");
-                itemdef3.set(
-                    "PrecompiledHeaderOutputFile",
-                    "X:/fake/int/pch.pch");
-                itemdef3.set("WarningLevel", "Level3");
-                json::Object tu3;
-                tu3.set("file", "main.cpp");
-                tu3.set("abs", "X:/fake/proj/main.cpp");
-                json::Array tus3;
-                tus3.add(std::move(tu3));
-                std::vector<ev::EvalProjectOut> ps;
-                ps.push_back(make_project(
-                    "synthetic",
-                    compose_skeleton(
-                        "X:/fake/proj",
-                        "X:/fake/int/",
-                        std::move(itemdef3),
-                        std::move(tus3))));
-                const std::vector<mb::ClInvocation> o3 =
-                    cp::compose_invocations(ps, cls);
-                const std::vector<std::string> want3 = {
-                    "X:/fake/cl.exe",
-                    "/W3",
-                    std::string{want_switch},
-                    "/FpX:/fake/int/pch.pch",
-                    "/external:W3",
-                    "/TP",
-                    "X:/fake/proj/main.cpp",
-                };
-                cg::test::check(
-                    r,
-                    o3.size() == 1 && o3[0].argv_utf8 == want3,
-                    std::format(
-                        "PCH '{}' 的 argv 相等",
-                        use));
-            };
-            pch_case("Create", "/Ycpch.h");
-            pch_case("Use", "/Yupch.h");
+            compose_pch_case(r, cls, "Create", "/Ycpch.h");
+            compose_pch_case(r, cls, "Use", "/Yupch.h");
             // NotUsing：/Yc /Yu /Fp 都不出现。
             {
                 json::Object itemdef4;
@@ -4898,88 +5127,20 @@ still nothing
                             [](const std::string& t)
                             {
                                 return t.starts_with("/Y")
-                                    || t.starts_with("/Fp");
+                                       || t.starts_with("/Fp");
                             }),
                     "NotUsing 不发 PCH 族开关");
             }
         }
 
-        // 模块单元判定三分支与 /interface 产物拼名（modmsb / covermod 真值投影）。
+        // 模块单元判定三分支与 /interface 产物拼名（modmsb / covermod
+        // 真值投影）。
         {
-            auto module_case =
-                [&](std::string_view compile_as, std::string_view file,
-                    std::string_view want_lang_mode, bool want_interface,
-                    bool want_module_output, std::string_view want_fo)
-            {
-                    json::Object itemdef5;
-                    itemdef5.set("CompileAs", std::string{compile_as});
-                    itemdef5.set("ObjectFileName", "X:/fake/int/");
-                    itemdef5.set("ModuleOutputFile", "X:/fake/int/");
-                    itemdef5.set("AdditionalBMIDirectories", "bmidir");
-                    itemdef5.set(
-                        "AdditionalModuleDependencies",
-                        "core=core.ifc");
-                    itemdef5.set("TranslateIncludes", "true");
-                    itemdef5.set("WarningLevel", "Level3");
-                    itemdef5.set("LanguageStandard", "stdcpp20");
-                    itemdef5.set("CallingConvention", "Cdecl");
-                    json::Object tu5;
-                    tu5.set("file", std::string{file});
-                    tu5.set(
-                        "abs",
-                        std::string{"X:/fake/proj/"} + std::string{file});
-                    json::Array tus5;
-                    tus5.add(std::move(tu5));
-                    std::vector<ev::EvalProjectOut> ps;
-                    ps.push_back(make_project(
-                        "synthetic",
-                        compose_skeleton(
-                            "X:/fake/proj",
-                            "X:/fake/int/",
-                            std::move(itemdef5),
-                            std::move(tus5))));
-                    const std::vector<mb::ClInvocation> o5 =
-                        cp::compose_invocations(ps, cls);
-                    std::vector<std::string> want5 = {
-                        "X:/fake/cl.exe",
-                        "/ifcSearchDir",
-                        "bmidir",
-                        "/reference",
-                        "core=core.ifc",
-                        "/translateInclude",
-                        "/W3",
-                        "/std:c++20",
-                    };
-                    if (want_module_output)
-                    {
-                        want5.emplace_back("/ifcOutput");
-                        want5.emplace_back(
-                            std::string{"X:/fake/int/"}
-                            + std::string{file} + ".ifc");
-                    }
-                    want5.push_back(std::string{want_fo});
-                    want5.emplace_back("/external:W3");
-                    want5.emplace_back("/Gd");
-                    if (want_interface)
-                    {
-                        want5.push_back("/interface");
-                    }
-                    want5.push_back(std::string{want_lang_mode});
-                    want5.push_back(
-                        std::string{"X:/fake/proj/"} + std::string{file});
-                    cg::test::check(
-                        r,
-                        o5.size() == 1 && o5[0].argv_utf8 == want5,
-                        std::format(
-                            "模块单元判定分支 CompileAs='{}' file='{}' 的 "
-                            "argv 相等（实得 {} 项）",
-                            compile_as,
-                            file,
-                            o5.size() == 1 ? o5[0].argv_utf8.size() : 0));
-            };
             // 显式模块：/interface + /TP 垫尾 + 产物拼全名（工程感知，
             // /ifcOutput 带 .ifc 文件名）。
-            module_case(
+            compose_module_case(
+                r,
+                cls,
                 "CompileAsCppModule",
                 "mod.ixx",
                 "/TP",
@@ -4987,7 +5148,9 @@ still nothing
                 true,
                 "/FoX:/fake/int/mod.ixx.obj");
             // Default + .ixx 扩展名（扩展名分支）同形态。
-            module_case(
+            compose_module_case(
+                r,
+                cls,
                 "Default",
                 "mod.ixx",
                 "/TP",
@@ -4996,7 +5159,9 @@ still nothing
                 "/FoX:/fake/int/mod.ixx.obj");
             // Default + .cpp：无模块 TU 的工程不感知——/ifcOutput 不发、
             // 产物目录原样、/TP 正常位。
-            module_case(
+            compose_module_case(
+                r,
+                cls,
                 "Default",
                 "use.cpp",
                 "/TP",
@@ -5004,7 +5169,9 @@ still nothing
                 false,
                 "/FoX:/fake/int/");
             // Default + .c：/TC。
-            module_case(
+            compose_module_case(
+                r,
+                cls,
                 "Default",
                 "cov.c",
                 "/TC",
@@ -5012,7 +5179,9 @@ still nothing
                 false,
                 "/FoX:/fake/int/");
             // 显式 CompileAsCpp：/TP 正常位（工程仍不感知）。
-            module_case(
+            compose_module_case(
+                r,
+                cls,
                 "CompileAsCpp",
                 "use.cpp",
                 "/TP",
@@ -5020,6 +5189,18 @@ still nothing
                 false,
                 "/FoX:/fake/int/");
         }
+    }
+
+    /** TU 级覆盖、过滤四态与披露、未映射值不代言、字段登记表快照。 */
+    void compose_filter_and_override_cases(R& r)
+    {
+        std::vector<mb::ProjectCl> cls;
+        cls.push_back(
+            mb::ProjectCl{
+                .project = "synthetic",
+                .dir = "X:/fake",
+                .cl = "X:/fake/cl.exe",
+                .resolution = "override"});
 
         // TU 级 diff 覆盖 itemdef 基线（求值 diff 存储的回放）。
         {
@@ -5042,11 +5223,14 @@ still nothing
                     std::move(itemdef6),
                     std::move(tus6))));
             const std::vector<mb::ClInvocation> o6 = cp::compose_invocations(
-                ps, cls, cp::ComposeOptions{std::string{"INC"}});
+                ps,
+                cls,
+                cp::ComposeOptions{std::string{"INC"}});
             const std::vector<std::string> want6 = {
                 "X:/fake/cl.exe",
                 "/W1",
-                "/D", "OVERRIDE=2",
+                "/D",
+                "OVERRIDE=2",
                 // external 档继承的是回放终值（diff 覆盖后的 Level1），
                 // 不是 itemdef 基线——继承语义按 TU 终值走。
                 "/external:W1",
@@ -5091,10 +5275,10 @@ still nothing
             unbound.raw_json = ps[0].raw_json;
             ps.push_back(std::move(unbound));
 
-            std::vector<mb::ProjectCl> no_cls; // 空清单：无 cl 匹配
-            cp::ComposeDiary       diary2;
-            const std::vector<mb::ClInvocation> o7 = cp::compose_invocations(
-                ps, no_cls, {}, &diary2);
+            std::vector<mb::ProjectCl>          no_cls; // 空清单：无 cl 匹配
+            cp::ComposeDiary                    diary2;
+            const std::vector<mb::ClInvocation> o7 =
+                cp::compose_invocations(ps, no_cls, {}, &diary2);
             cg::test::check(
                 r,
                 o7.empty(),
@@ -5102,7 +5286,7 @@ still nothing
                     "error/无 cl/参与位假全跳过（实得 {} 条）",
                     o7.size()));
             bool skip_error = false;
-            bool skip_cl    = false;
+            bool skip_cl = false;
             for (const std::string& n : diary2.notes)
             {
                 if (n.find("eval error") != std::string::npos)
@@ -5120,10 +5304,10 @@ still nothing
                 "error 工程与无 cl 工程披露行在场");
 
             // 正常 cl 下 ExcludedFromBuild 的 TU 级过滤。
-            cp::ComposeDiary diary3;
+            cp::ComposeDiary                diary3;
             std::vector<ev::EvalProjectOut> ps2;
-            json::Object ed8;
-            json::Object t9;
+            json::Object                    ed8;
+            json::Object                    t9;
             t9.set("file", "a.cpp");
             t9.set("abs", "X:/fake/proj/a.cpp");
             json::Object t10;
@@ -5140,8 +5324,8 @@ still nothing
                     "X:/fake/int/",
                     std::move(ed8),
                     std::move(ta))));
-            const std::vector<mb::ClInvocation> o8 = cp::compose_invocations(
-                ps2, cls, {}, &diary3);
+            const std::vector<mb::ClInvocation> o8 =
+                cp::compose_invocations(ps2, cls, {}, &diary3);
             bool excluded_note = false;
             for (const std::string& n : diary3.notes)
             {
@@ -5178,9 +5362,9 @@ still nothing
                     "X:/fake/int/",
                     std::move(itemdef9),
                     std::move(t11s))));
-            cp::ComposeDiary diary4;
-            const std::vector<mb::ClInvocation> o9 = cp::compose_invocations(
-                ps, cls, {}, &diary4);
+            cp::ComposeDiary                    diary4;
+            const std::vector<mb::ClInvocation> o9 =
+                cp::compose_invocations(ps, cls, {}, &diary4);
             std::size_t unmapped = 0;
             for (const std::string& n : diary4.notes)
             {
@@ -5240,12 +5424,22 @@ still nothing
         -> std::vector<std::string>
     {
         static const std::set<std::string> default_family = {
-            "/c",           "/JMC",           "/nologo",
-            "/diagnostics:column",            "/sdl",
-            "/sdl-",        "/Od",            "/O2",
-            "/RTC1",        "/GS",            "/fp:precise",
-            "/Zc:forScope", "/Zc:inline",     "/FC",
-            "/errorReport:queue",             "/FS",
+            "/c",
+            "/JMC",
+            "/nologo",
+            "/diagnostics:column",
+            "/sdl",
+            "/sdl-",
+            "/Od",
+            "/O2",
+            "/RTC1",
+            "/GS",
+            "/fp:precise",
+            "/Zc:forScope",
+            "/Zc:inline",
+            "/FC",
+            "/errorReport:queue",
+            "/FS",
         };
         std::vector<std::string> out;
         for (std::size_t i = 0; i < argv.size(); ++i)
@@ -5265,9 +5459,8 @@ still nothing
                 const std::string& v = argv[++i];
                 out.emplace_back("/ifcOutput");
                 out.push_back(
-                    v.size() >= 4 && v.ends_with(".ifc")
-                        ? "<ifcOutput:file>"
-                        : "<ifcOutput:dir>");
+                    v.size() >= 4 && v.ends_with(".ifc") ? "<ifcOutput:file>"
+                                                         : "<ifcOutput:dir>");
                 continue;
             }
             if (t == "/reference")
@@ -5275,8 +5468,7 @@ still nothing
                 const std::string& v = argv[++i];
                 const std::size_t  eq = v.find('=');
                 out.emplace_back("/reference");
-                out.push_back(
-                    "<reference:" + v.substr(0, eq) + ">");
+                out.push_back("<reference:" + v.substr(0, eq) + ">");
                 continue;
             }
             if (t.starts_with("/Fo"))
@@ -5314,78 +5506,175 @@ still nothing
     {
         const std::map<std::string, std::vector<std::string>> table = {
             {"DemoSln|multiply.cpp",
-             {"/I.", "/Zi", "/W3", "/WX-", "/D", "MATHLIB_SCALE=3",
-              "/Gm-", "/EHsc", "/MDd", "/Zc:wchar_t", "/std:c++17",
-              "<Fo:dir>", "<Fd>", "/external:W3", "/Gd", "/TP"}},
+             {"/I.",
+              "/Zi",
+              "/W3",
+              "/WX-",
+              "/D",
+              "MATHLIB_SCALE=3",
+              "/Gm-",
+              "/EHsc",
+              "/MDd",
+              "/Zc:wchar_t",
+              "/std:c++17",
+              "<Fo:dir>",
+              "<Fd>",
+              "/external:W3",
+              "/Gd",
+              "/TP"}},
             {"DemoSln|scale.cpp",
-             {"/I.", "/Zi", "/W3", "/WX-", "/D", "MATHLIB_SCALE=3",
-              "/Gm-", "/EHsc", "/MDd", "/Zc:wchar_t", "/std:c++17",
-              "<Fo:dir>", "<Fd>", "/external:W3", "/Gd", "/TP"}},
+             {"/I.",
+              "/Zi",
+              "/W3",
+              "/WX-",
+              "/D",
+              "MATHLIB_SCALE=3",
+              "/Gm-",
+              "/EHsc",
+              "/MDd",
+              "/Zc:wchar_t",
+              "/std:c++17",
+              "<Fo:dir>",
+              "<Fd>",
+              "/external:W3",
+              "/Gd",
+              "/TP"}},
             {"DemoSln|main.cpp",
-             {"/Iinclude", "/Isrc", "/Zi", "/W3", "/WX-", "/MP",
-              "/D", "DEMO_DEFINE=42", "/D", "_UNICODE", "/D", "UNICODE",
-              "/Gm-", "/EHsc", "/MDd", "/Zc:wchar_t", "/std:c++20",
-              "/permissive-", "<Fo:dir>", "<Fd>", "/external:W3",
-              "/Gd", "/TP"}},
+             {"/Iinclude",    "/Isrc",        "/Zi",      "/W3",
+              "/WX-",         "/MP",          "/D",       "DEMO_DEFINE=42",
+              "/D",           "_UNICODE",     "/D",       "UNICODE",
+              "/Gm-",         "/EHsc",        "/MDd",     "/Zc:wchar_t",
+              "/std:c++20",   "/permissive-", "<Fo:dir>", "<Fd>",
+              "/external:W3", "/Gd",          "/TP"}},
             {"DemoSln|probe.cpp",
-             {"/Iinclude", "/Isrc", "/Zi", "/W3", "/WX-", "/MP",
-              "/D", "DEMO_DEFINE=42", "/D", "_UNICODE", "/D", "UNICODE",
-              "/Gm-", "/EHsc", "/MDd", "/Zc:wchar_t", "/std:c++20",
-              "/permissive-", "<Fo:dir>", "<Fd>", "/external:W3",
-              "/Gd", "/TP"}},
+             {"/Iinclude",    "/Isrc",        "/Zi",      "/W3",
+              "/WX-",         "/MP",          "/D",       "DEMO_DEFINE=42",
+              "/D",           "_UNICODE",     "/D",       "UNICODE",
+              "/Gm-",         "/EHsc",        "/MDd",     "/Zc:wchar_t",
+              "/std:c++20",   "/permissive-", "<Fo:dir>", "<Fd>",
+              "/external:W3", "/Gd",          "/TP"}},
             {"DemoSln|util.cpp",
-             {"/Iinclude", "/Isrc", "/Zi", "/W3", "/WX-", "/MP",
-              "/D", "DEMO_DEFINE=42", "/D", "_UNICODE", "/D", "UNICODE",
-              "/Gm-", "/EHsc", "/MDd", "/Zc:wchar_t", "/std:c++20",
-              "/permissive-", "<Fo:dir>", "<Fd>", "/external:W3",
-              "/Gd", "/TP"}},
+             {"/Iinclude",    "/Isrc",        "/Zi",      "/W3",
+              "/WX-",         "/MP",          "/D",       "DEMO_DEFINE=42",
+              "/D",           "_UNICODE",     "/D",       "UNICODE",
+              "/Gm-",         "/EHsc",        "/MDd",     "/Zc:wchar_t",
+              "/std:c++20",   "/permissive-", "<Fo:dir>", "<Fd>",
+              "/external:W3", "/Gd",          "/TP"}},
             {"modmsb|mod.ixx",
-             {"/Zi", "/W3", "/WX-", "/Gm-", "/EHsc", "/MD",
-              "/Zc:wchar_t", "/std:c++20", "/ifcOutput",
-              "<ifcOutput:file>", "<Fo:file>", "<Fd>", "/external:W3",
-              "/Gd", "/interface", "/TP"}},
+             {"/Zi",
+              "/W3",
+              "/WX-",
+              "/Gm-",
+              "/EHsc",
+              "/MD",
+              "/Zc:wchar_t",
+              "/std:c++20",
+              "/ifcOutput",
+              "<ifcOutput:file>",
+              "<Fo:file>",
+              "<Fd>",
+              "/external:W3",
+              "/Gd",
+              "/interface",
+              "/TP"}},
             {"modmsb|use.cpp",
-             {"/Zi", "/W3", "/WX-", "/Gm-", "/EHsc", "/MD",
-              "/Zc:wchar_t", "/std:c++20", "/ifcOutput",
-              "<ifcOutput:dir>", "<Fo:dir>", "<Fd>", "/external:W3",
-              "/Gd", "/TP"}},
+             {"/Zi",
+              "/W3",
+              "/WX-",
+              "/Gm-",
+              "/EHsc",
+              "/MD",
+              "/Zc:wchar_t",
+              "/std:c++20",
+              "/ifcOutput",
+              "<ifcOutput:dir>",
+              "<Fo:dir>",
+              "<Fd>",
+              "/external:W3",
+              "/Gd",
+              "/TP"}},
             {"pchp|pch.cpp",
-             {"/ZI", "/W3", "/WX-", "/D", "_UNICODE", "/D", "UNICODE",
-              "/Gm-", "/EHsc", "/MDd", "/Zc:wchar_t", "/std:c++20",
-              "/permissive-", "/Ycpch.h", "<Fp>", "<Fo:dir>", "<Fd>",
-              "/external:W3", "/Gd", "/TP"}},
+             {"/ZI",          "/W3",          "/WX-",        "/D",
+              "_UNICODE",     "/D",           "UNICODE",     "/Gm-",
+              "/EHsc",        "/MDd",         "/Zc:wchar_t", "/std:c++20",
+              "/permissive-", "/Ycpch.h",     "<Fp>",        "<Fo:dir>",
+              "<Fd>",         "/external:W3", "/Gd",         "/TP"}},
             {"pchp|main.cpp",
-             {"/ZI", "/W3", "/WX-", "/D", "_UNICODE", "/D", "UNICODE",
-              "/Gm-", "/EHsc", "/MDd", "/Zc:wchar_t", "/std:c++20",
-              "/permissive-", "/Yupch.h", "<Fp>", "<Fo:dir>", "<Fd>",
-              "/external:W3", "/Gd", "/TP"}},
+             {"/ZI",          "/W3",          "/WX-",        "/D",
+              "_UNICODE",     "/D",           "UNICODE",     "/Gm-",
+              "/EHsc",        "/MDd",         "/Zc:wchar_t", "/std:c++20",
+              "/permissive-", "/Yupch.h",     "<Fp>",        "<Fo:dir>",
+              "<Fd>",         "/external:W3", "/Gd",         "/TP"}},
             {"cover|cov.cpp",
-             {"/Isub", "/Iinc", "/Z7", "/W4", "/WX", "/MP", "/Oi",
-              "/D", "COV_A=1", "/D", "COV_B", "/UOLD_THING", "/GF",
-              "/Gm", "/EHa", "/MT", "/Gy", "/Zc:wchar_t-", "/GR",
-              "/std:c++17", "/permissive-", "<Fo:dir>", "<Fd>",
-              "<FR>", "/external:W1", "/Gv", "/TP", "/wd4267",
-              "/wd4996", "/FIforce.h"}},
+             {"/Isub",        "/Iinc",        "/Z7",   "/W4",
+              "/WX",          "/MP",          "/Oi",   "/D",
+              "COV_A=1",      "/D",           "COV_B", "/UOLD_THING",
+              "/GF",          "/Gm",          "/EHa",  "/MT",
+              "/Gy",          "/Zc:wchar_t-", "/GR",   "/std:c++17",
+              "/permissive-", "<Fo:dir>",     "<Fd>",  "<FR>",
+              "/external:W1", "/Gv",          "/TP",   "/wd4267",
+              "/wd4996",      "/FIforce.h"}},
             {"cover|cov.c",
-             {"/Zi", "/W1", "/WX-", "/Gm-", "/EHsc", "/MD", "/Za",
-              "/Zc:wchar_t", "/std:c17", "<Fo:dir>", "<Fd>",
-              "/external:W1", "/Gd", "/TC"}},
+             {"/Zi",
+              "/W1",
+              "/WX-",
+              "/Gm-",
+              "/EHsc",
+              "/MD",
+              "/Za",
+              "/Zc:wchar_t",
+              "/std:c17",
+              "<Fo:dir>",
+              "<Fd>",
+              "/external:W1",
+              "/Gd",
+              "/TC"}},
             {"cover|mod.ixx",
-             {"/ifcSearchDir", "bmidir", "/reference",
-              "<reference:core>", "/translateInclude", "/Zi", "/W1",
-              "/WX-", "/Gm-", "/EHsc", "/MD", "/Zc:wchar_t",
-              "/std:c++20", "/ifcOutput", "<ifcOutput:file>",
-              "<Fo:file>", "<Fd>", "/external:W1", "/Gd", "/interface",
+             {"/ifcSearchDir",
+              "bmidir",
+              "/reference",
+              "<reference:core>",
+              "/translateInclude",
+              "/Zi",
+              "/W1",
+              "/WX-",
+              "/Gm-",
+              "/EHsc",
+              "/MD",
+              "/Zc:wchar_t",
+              "/std:c++20",
+              "/ifcOutput",
+              "<ifcOutput:file>",
+              "<Fo:file>",
+              "<Fd>",
+              "/external:W1",
+              "/Gd",
+              "/interface",
               "/TP"}},
             {"cover|use.cpp",
-             {"/ifcSearchDir", "bmidir", "/reference",
-              "<reference:core>", "/translateInclude", "/Zi", "/W1",
-              "/WX-", "/Gm-", "/EHsc", "/MD", "/Zc:wchar_t",
-              "/std:c++20", "/ifcOutput", "<ifcOutput:dir>",
-              "<Fo:dir>", "<Fd>", "/external:W1", "/Gd", "/TP"}},
+             {"/ifcSearchDir",
+              "bmidir",
+              "/reference",
+              "<reference:core>",
+              "/translateInclude",
+              "/Zi",
+              "/W1",
+              "/WX-",
+              "/Gm-",
+              "/EHsc",
+              "/MD",
+              "/Zc:wchar_t",
+              "/std:c++20",
+              "/ifcOutput",
+              "<ifcOutput:dir>",
+              "<Fo:dir>",
+              "<Fd>",
+              "/external:W1",
+              "/Gd",
+              "/TP"}},
         };
-        const auto it = table.find(
-            std::string{fixture} + "|" + std::string{tu});
+        const auto it =
+            table.find(std::string{fixture} + "|" + std::string{tu});
         return it != table.end() ? it->second : std::vector<std::string>{};
     }
 
@@ -5417,7 +5706,10 @@ still nothing
         for (const Row& row : rows)
         {
             const auto req = ev::build_evaluate_request(
-                msbuild, fixture(row.sln), "Debug", "x64");
+                msbuild,
+                fixture(row.sln),
+                "Debug",
+                "x64");
             cg::test::check(
                 r,
                 req.has_value(),
@@ -5442,7 +5734,11 @@ still nothing
                 continue;
             }
             const std::vector<mb::ProjectCl> cls = mb::resolve_project_cls(
-                msbuild, fixture(row.sln), "Debug", "x64", "");
+                msbuild,
+                fixture(row.sln),
+                "Debug",
+                "x64",
+                "");
             const std::vector<mb::ClInvocation> composed =
                 cp::compose_invocations(out.projects, cls);
 
@@ -5453,14 +5749,20 @@ still nothing
                 const std::string src = inv.argv_utf8.back();
                 const std::size_t slash = src.find_last_of("/\\");
                 by_base[cg::util::ascii_lower(
-                    slash == std::string::npos
-                        ? src
-                        : src.substr(slash + 1))] = &inv;
+                    slash == std::string::npos ? src : src.substr(slash + 1))] =
+                    &inv;
             }
-            std::size_t matched = 0;
+            std::size_t                           matched = 0;
             static const std::vector<std::string> probe_files = {
-                "multiply.cpp", "scale.cpp", "main.cpp", "probe.cpp",
-                "util.cpp", "mod.ixx", "use.cpp", "pch.cpp", "cov.cpp",
+                "multiply.cpp",
+                "scale.cpp",
+                "main.cpp",
+                "probe.cpp",
+                "util.cpp",
+                "mod.ixx",
+                "use.cpp",
+                "pch.cpp",
+                "cov.cpp",
                 "cov.c",
             };
             for (const std::string& base : probe_files)
@@ -5483,11 +5785,12 @@ still nothing
                             base));
                     continue;
                 }
-                const mb::ClInvocation& inv = *it->second;
+                const mb::ClInvocation&            inv = *it->second;
                 const std::span<const std::string> middle{
-                    inv.argv_utf8.begin() + 1, inv.argv_utf8.end() - 1};
-                const std::vector<std::string> got = project_argv(
-                    {middle.begin(), middle.end()});
+                    inv.argv_utf8.begin() + 1,
+                    inv.argv_utf8.end() - 1};
+                const std::vector<std::string> got =
+                    project_argv({middle.begin(), middle.end()});
                 cg::test::check(
                     r,
                     got == want,
@@ -5499,13 +5802,15 @@ still nothing
                         [&]
                         {
                             std::string s;
-                            for (const auto& a : got) s += a + " ";
+                            for (const auto& a : got)
+                                s += a + " ";
                             return s;
                         }(),
                         [&]
                         {
                             std::string s;
-                            for (const auto& a : want) s += a + " ";
+                            for (const auto& a : want)
+                                s += a + " ";
                             return s;
                         }()));
                 ++matched;
@@ -5521,9 +5826,14 @@ still nothing
     }
 
     const cg::test::Registrar reg_compose_fields{
-        "msbuild.compose_fields", &compose_field_cases};
+        "msbuild.compose_fields",
+        &compose_field_cases};
+    const cg::test::Registrar reg_compose_filter{
+        "msbuild.compose_filter_and_override",
+        &compose_filter_and_override_cases};
     const cg::test::Registrar reg_compose_crosscheck{
-        "msbuild.compose_crosscheck", &compose_crosscheck_cases};
+        "msbuild.compose_crosscheck",
+        &compose_crosscheck_cases};
 
 } // namespace
 

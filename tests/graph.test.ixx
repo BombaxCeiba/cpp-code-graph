@@ -45,6 +45,21 @@ namespace
             {});
     }
 
+    /// 邻居结果中某符号的最短深度（不在结果内给 0）。
+    [[nodiscard]]
+    auto depth_in(const cg::graph::NeighborsResult& res, cg::db::SymId id)
+        -> int
+    {
+        for (const auto& e : res.entries)
+        {
+            if (e.id == id)
+            {
+                return e.depth;
+            }
+        }
+        return 0;
+    }
+
     [[nodiscard]]
     auto make_indexer(cg::db::GraphStore& store, bool force)
         -> cg::graph::Indexer
@@ -560,27 +575,21 @@ namespace
             cg::graph::callers(store, area, 5);
         cg::test::check(r, deep.entries.size() == 4, "four transitive callers");
         cg::test::check(r, !deep.truncated, "depth 5 covers the whole chain");
-        const auto depth_of = [&](cg::db::SymId id)
-        {
-            for (const auto& e : deep.entries)
-            {
-                if (e.id == id)
-                {
-                    return e.depth;
-                }
-            }
-            return 0;
-        };
         cg::test::check(
             r,
-            depth_of(
+            depth_in(
+                deep,
                 find_one(store, "render::Canvas::total_area", r, "total_area"))
                     == 1
-                && depth_of(find_one(store, "app::area_all", r, "area_all"))
+                && depth_in(
+                       deep,
+                       find_one(store, "app::area_all", r, "area_all"))
                        == 2
-                && depth_of(find_one(store, "app::render_all", r, "render_all"))
+                && depth_in(
+                       deep,
+                       find_one(store, "app::render_all", r, "render_all"))
                        == 3
-                && depth_of(main_id) == 4,
+                && depth_in(deep, main_id) == 4,
             "shortest-depth annotation per caller");
 
         // 深度 2 在还有节点未展开时停下：truncated。
@@ -827,6 +836,30 @@ namespace
     }
 
     // 解析池不得改变存进库的东西：同一夹具的两次
+    /// 以给定并发数索引 sample2 语料并断言零失败。
+    [[nodiscard]]
+    auto pooled_index_run(
+        R&                                            r,
+        cg::db::GraphStore&                           store,
+        std::string_view                              dir,
+        int                                           jobs,
+        const std::vector<cg::clang::CompileCommand>& cmds)
+        -> cg::graph::IndexSummary
+    {
+        cg::graph::IndexOptions opt;
+        opt.roots = {cg::util::norm_path(dir)};
+        opt.force = true;
+        opt.progress = false;
+        opt.jobs = jobs;
+        cg::graph::Indexer            indexer{store, std::move(opt)};
+        const cg::graph::IndexSummary sum = indexer.run(cmds);
+        cg::test::check(
+            r,
+            sum.failed == 0,
+            "sample2 indexes clean (no failed TUs)");
+        return sum;
+    }
+
     // 全量运行（池 4 与池 1）产出相同的 symbol/edge/
     // include 行——连 id 也相同——因为工人只做提取；
     // 存储阶段总是按 compile-db 顺序消费提取结果。
@@ -845,26 +878,12 @@ namespace
             return;
         }
 
-        const auto index_into = [&](cg::db::GraphStore& store, int jobs)
-        {
-            cg::graph::IndexOptions opt;
-            opt.roots = {cg::util::norm_path(sample2_dir)};
-            opt.force = true;
-            opt.progress = false;
-            opt.jobs = jobs;
-            cg::graph::Indexer            indexer{store, std::move(opt)};
-            const cg::graph::IndexSummary sum = indexer.run(cmds);
-            cg::test::check(
-                r,
-                sum.failed == 0,
-                "sample2 indexes clean (no failed TUs)");
-            return sum;
-        };
-
         db::GraphStore a{":memory:"}, b{":memory:"}, serial{":memory:"};
-        const cg::graph::IndexSummary pool_a = index_into(a, 4);
-        const cg::graph::IndexSummary pool_b = index_into(b, 4);
-        index_into(serial, 1);
+        const cg::graph::IndexSummary pool_a =
+            pooled_index_run(r, a, sample2_dir, 4, cmds);
+        const cg::graph::IndexSummary pool_b =
+            pooled_index_run(r, b, sample2_dir, 4, cmds);
+        (void)pooled_index_run(r, serial, sample2_dir, 1, cmds);
 
         cg::test::check(
             r,
@@ -900,6 +919,67 @@ namespace
             {});
     }
 
+    /// 影响面直接层是否含限定名子串命中的符号。
+    [[nodiscard]]
+    auto direct_layer_has(
+        cg::db::GraphStore&            store,
+        const cg::graph::ImpactResult& res,
+        std::string_view               q) -> bool
+    {
+        if (res.by_depth.empty())
+        {
+            return false;
+        }
+        for (const cg::db::SymId id : res.by_depth.front().ids)
+        {
+            const auto row = db::get_symbol(store, id);
+            if (row && row->qualified_name.find(q) != std::string::npos)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// 是否存在 from -> to 的 USES 边。
+    [[nodiscard]]
+    auto has_uses_edge_to(
+        cg::db::GraphStore& store,
+        cg::db::SymId       from,
+        cg::db::SymId       to) -> bool
+    {
+        for (const db::EdgeRow& e :
+             db::edges_of(store, from, true, db::EdgeType::Uses))
+        {
+            if (e.dst == to)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// 邻居结果里限定名子串命中的首条入口（无命中给空入口）。
+    [[nodiscard]]
+    auto find_neighbor(
+        const cg::graph::NeighborsResult& res,
+        std::string_view                  q,
+        cg::db::GraphStore&               s) -> cg::graph::NeighborEntry
+    {
+        for (const auto& e : res.entries)
+        {
+            const auto row = db::get_symbol(s, e.id);
+            if (row && row->qualified_name.find(q) != std::string::npos)
+            {
+                return e;
+            }
+        }
+        return cg::graph::NeighborEntry{};
+    }
+
+    /**
+     * @brief uses 夹具的索引器（roots 与 compile-db 指向专用夹具目录）。
+     */
     [[nodiscard]]
     auto make_uses_indexer(cg::db::GraphStore& store) -> cg::graph::Indexer
     {
@@ -963,44 +1043,33 @@ namespace
         }
         const cg::graph::ImpactResult up =
             cg::graph::impact(store, payload, cg::graph::Direction::Up, 2);
-        const auto at_direct = [&](std::string_view q)
-        {
-            if (up.by_depth.empty())
-            {
-                return false;
-            }
-            for (const cg::db::SymId id : up.by_depth.front().ids)
-            {
-                const auto row = db::get_symbol(store, id);
-                if (row && row->qualified_name.find(q) != std::string::npos)
-                {
-                    return true;
-                }
-            }
-            return false;
-        };
         cg::test::check(
             r,
             up.direct >= 6,
             "record up-impact has direct USES hits");
         cg::test::check(
             r,
-            at_direct("Carrier::by_class") && at_direct("Carrier::by_template")
-                && at_direct("Carrier::by_std"),
+            direct_layer_has(store, up, "Carrier::by_class")
+                && direct_layer_has(store, up, "Carrier::by_template")
+                && direct_layer_has(store, up, "Carrier::by_std"),
             "USES-referencing fields impacted (field owns the edge)");
         cg::test::check(
             r,
-            at_direct("uses::echo") && at_direct("uses::echo_tpl")
-                && at_direct("uses::echo_std") && at_direct("main"),
+            direct_layer_has(store, up, "uses::echo")
+                && direct_layer_has(store, up, "uses::echo_tpl")
+                && direct_layer_has(store, up, "uses::echo_std")
+                && direct_layer_has(store, up, "main"),
             "USES-referencing params/returns/locals impacted");
         // 成员指针的类类型与函数类型的模板实参
         // （回调）也引用 record：声明类型遍历
         // 不得在 CXType_MemberPointer 或函数类型处终止。
         cg::test::check(
             r,
-            at_direct("Carrier::by_member_ptr")
-                && at_direct("uses::probe_member") && at_direct("uses::make_cb")
-                && at_direct("uses::run_cb") && at_direct("uses::slot_ref"),
+            direct_layer_has(store, up, "Carrier::by_member_ptr")
+                && direct_layer_has(store, up, "uses::probe_member")
+                && direct_layer_has(store, up, "uses::make_cb")
+                && direct_layer_has(store, up, "uses::run_cb")
+                && direct_layer_has(store, up, "uses::slot_ref"),
             "member-pointer and callback USES surface in record impact");
         cg::test::check(
             r,
@@ -1103,30 +1172,18 @@ namespace
             find_one(store, "uses::probe_member", r, "probe_member");
         const cg::db::SymId run_cb =
             find_one(store, "uses::run_cb", r, "run_cb");
-        const auto uses_payload = [&](cg::db::SymId from)
-        {
-            for (const db::EdgeRow& e :
-                 db::edges_of(store, from, true, db::EdgeType::Uses))
-            {
-                if (e.dst == payload)
-                {
-                    return true;
-                }
-            }
-            return false;
-        };
         if (probe && payload)
         {
             cg::test::check(
                 r,
-                uses_payload(probe),
+                has_uses_edge_to(store, probe, payload),
                 "member-pointer parameter mints a USES edge");
         }
         if (run_cb && payload)
         {
             cg::test::check(
                 r,
-                uses_payload(run_cb),
+                has_uses_edge_to(store, run_cb, payload),
                 "callback function-type argument mints a USES edge");
         }
     }
@@ -1147,30 +1204,16 @@ namespace
             return;
         }
 
-        const auto entry = [](const cg::graph::NeighborsResult& res,
-                              std::string_view                  q,
-                              cg::db::GraphStore&               s)
-        {
-            for (const auto& e : res.entries)
-            {
-                const auto row = db::get_symbol(s, e.id);
-                if (row && row->qualified_name.find(q) != std::string::npos)
-                {
-                    return e;
-                }
-            }
-            return cg::graph::NeighborEntry{};
-        };
-
         // 基类合并后的 callers 含两个重写的
         // 派发点调用者，并标注其来源成员。
         const cg::graph::NeighborsResult base_merged =
             cg::graph::callers(store, base, 1);
         const auto base_call_base =
-            entry(base_merged, "uses::call_base", store);
-        const auto base_mid = entry(base_merged, "uses::call_mid", store);
+            find_neighbor(base_merged, "uses::call_base", store);
+        const auto base_mid =
+            find_neighbor(base_merged, "uses::call_mid", store);
         const auto base_derived =
-            entry(base_merged, "uses::call_derived", store);
+            find_neighbor(base_merged, "uses::call_derived", store);
         // 精确模式把这些调用归到已证明的派发目标，
         // 调用者因此是推断出来的（家族来源记录了该目标）。
         cg::test::check(
@@ -1200,8 +1243,9 @@ namespace
         const cg::graph::NeighborsResult derived_merged =
             cg::graph::callers(store, derived, 1);
         const auto derived_base =
-            entry(derived_merged, "uses::call_base", store);
-        const auto derived_mid = entry(derived_merged, "uses::call_mid", store);
+            find_neighbor(derived_merged, "uses::call_base", store);
+        const auto derived_mid =
+            find_neighbor(derived_merged, "uses::call_mid", store);
         cg::test::check(
             r,
             derived_base.id == 0,
@@ -1271,6 +1315,17 @@ namespace
             "context merges family edges with origin markers");
     }
 
+    [[nodiscard]]
+    auto twin_rows_in(
+        cg::db::GraphStore& store,
+        std::string_view    name,
+        std::string_view    tail)
+        -> std::pair<int, std::pair<cg::db::SymId, cg::db::SymId>>;
+
+    [[nodiscard]]
+    auto call_targets_of(cg::db::GraphStore& store, cg::db::SymId from)
+        -> std::vector<cg::db::SymId>;
+
     // ---------------------------------------------------------------------------
     // 内部链接的每 TU 作用域（外场反馈）：静态与
     // 匿名命名空间孪生——同名、同签名、每 TU
@@ -1311,34 +1366,12 @@ namespace
 
         // 每 TU 孪生行存在：seed_value / dampen / clone_leaf 各两行，
         // 每个定义 .cpp 一行。
-        const auto twin_in = [&](std::string_view name, std::string_view tail)
-        {
-            int           rows = 0;
-            cg::db::SymId in_a = 0;
-            cg::db::SymId in_b = 0;
-            for (const cg::db::IndexRow& row : db::all_symbol_index_rows(store))
-            {
-                if (row.name != name)
-                {
-                    continue;
-                }
-                ++rows;
-                const auto full = db::get_symbol(store, row.id);
-                if (full && full->file.ends_with(tail))
-                {
-                    in_a = row.id;
-                }
-                else if (full)
-                {
-                    in_b = row.id;
-                }
-            }
-            return std::pair{rows, std::pair{in_a, in_b}};
-        };
-
-        const auto [seed_rows, seed_ids] = twin_in("seed_value", "a.cpp");
-        const auto [damp_rows, damp_ids] = twin_in("dampen", "a.cpp");
-        const auto [leaf_rows, leaf_ids] = twin_in("clone_leaf", "a.cpp");
+        const auto [seed_rows, seed_ids] =
+            twin_rows_in(store, "seed_value", "a.cpp");
+        const auto [damp_rows, damp_ids] =
+            twin_rows_in(store, "dampen", "a.cpp");
+        const auto [leaf_rows, leaf_ids] =
+            twin_rows_in(store, "clone_leaf", "a.cpp");
         cg::test::check(
             r,
             seed_rows == 2 && damp_rows == 2 && leaf_rows == 2,
@@ -1360,30 +1393,21 @@ namespace
         // 跨 TU 接线必须不存在：两个入口的调用都不得落在
         // 另一 TU 的孪生上，三种孪生形态（自由静态、匿名
         // 命名空间、静态模板——第三种形态来自外场反馈案例）全如此。
-        const auto calls_to = [&](cg::db::SymId from)
-        {
-            std::vector<cg::db::SymId> dsts;
-            for (const db::EdgeRow& e :
-                 db::edges_of(store, from, true, db::EdgeType::Calls))
-            {
-                dsts.push_back(e.dst);
-            }
-            return dsts;
-        };
-        const auto hits =
-            [](const std::vector<cg::db::SymId>& dsts, cg::db::SymId id)
-        { return std::ranges::count(dsts, id) > 0; };
-        const std::vector<cg::db::SymId> a_out = calls_to(a_entry);
-        const std::vector<cg::db::SymId> b_out = calls_to(b_entry);
+        const std::vector<cg::db::SymId> a_out =
+            call_targets_of(store, a_entry);
+        const std::vector<cg::db::SymId> b_out =
+            call_targets_of(store, b_entry);
         cg::test::check(
             r,
-            !hits(a_out, seed_ids.second) && !hits(a_out, damp_ids.second)
-                && !hits(a_out, leaf_ids.second),
+            !std::ranges::contains(a_out, seed_ids.second)
+                && !std::ranges::contains(a_out, damp_ids.second)
+                && !std::ranges::contains(a_out, leaf_ids.second),
             "a_entry never wires onto b.cpp's twins (no phantom edge)");
         cg::test::check(
             r,
-            !hits(b_out, seed_ids.first) && !hits(b_out, damp_ids.first)
-                && !hits(b_out, leaf_ids.first),
+            !std::ranges::contains(b_out, seed_ids.first)
+                && !std::ranges::contains(b_out, damp_ids.first)
+                && !std::ranges::contains(b_out, leaf_ids.first),
             "b_entry never wires onto a.cpp's twins");
 
         // 同文件解析保持有效：每个入口解析自己 TU 的
@@ -1391,27 +1415,30 @@ namespace
         // 歧义丢弃或跨 TU 乱接）。
         cg::test::check(
             r,
-            hits(a_out, seed_ids.first) && hits(a_out, damp_ids.first)
-                && hits(a_out, leaf_ids.first),
+            std::ranges::contains(a_out, seed_ids.first)
+                && std::ranges::contains(a_out, damp_ids.first)
+                && std::ranges::contains(a_out, leaf_ids.first),
             "a_entry resolves its own TU's twins");
         cg::test::check(
             r,
-            hits(b_out, seed_ids.second) && hits(b_out, damp_ids.second)
-                && hits(b_out, leaf_ids.second),
+            std::ranges::contains(b_out, seed_ids.second)
+                && std::ranges::contains(b_out, damp_ids.second)
+                && std::ranges::contains(b_out, leaf_ids.second),
             "b_entry resolves its own TU's twins");
 
         // 孪生内的同文件调用者：seed_value@A 调 dampen@A（静态
         // 函数调进本文件的匿名命名空间）。
-        const std::vector<cg::db::SymId> seed_a_out = calls_to(seed_ids.first);
+        const std::vector<cg::db::SymId> seed_a_out =
+            call_targets_of(store, seed_ids.first);
         cg::test::check(
             r,
-            hits(seed_a_out, damp_ids.first),
+            std::ranges::contains(seed_a_out, damp_ids.first),
             "static-to-anonymous-ns call within one file resolves");
 
         // 外部对照：共享头文件的 inline 函数保持一行且
         // 从两个 TU 都可达——每 TU 作用域不得越界。
         const auto [scale_rows, scale_ids] =
-            twin_in("shared_scale", "shared.hpp");
+            twin_rows_in(store, "shared_scale", "shared.hpp");
         cg::test::check(
             r,
             scale_rows == 1 && scale_ids.first != 0,
@@ -1420,9 +1447,91 @@ namespace
         {
             cg::test::check(
                 r,
-                hits(a_out, scale_ids.first) && hits(b_out, scale_ids.first),
+                std::ranges::contains(a_out, scale_ids.first)
+                    && std::ranges::contains(b_out, scale_ids.first),
                 "both TUs keep resolving the shared external function");
         }
+    }
+
+    /// 同名孪生行的行数与两个 TU 侧符号号（无孪生时对应位为 0）。
+    [[nodiscard]]
+    auto twin_rows_in(
+        cg::db::GraphStore& store,
+        std::string_view    name,
+        std::string_view    tail)
+        -> std::pair<int, std::pair<cg::db::SymId, cg::db::SymId>>
+    {
+        int           rows = 0;
+        cg::db::SymId in_a = 0;
+        cg::db::SymId in_b = 0;
+        for (const cg::db::IndexRow& row : db::all_symbol_index_rows(store))
+        {
+            if (row.name != name)
+            {
+                continue;
+            }
+            ++rows;
+            const auto full = db::get_symbol(store, row.id);
+            if (full && full->file.ends_with(tail))
+            {
+                in_a = row.id;
+            }
+            else if (full)
+            {
+                in_b = row.id;
+            }
+        }
+        return std::pair{rows, std::pair{in_a, in_b}};
+    }
+
+    /// from 的全部 Calls 边目标。
+    [[nodiscard]]
+    auto call_targets_of(cg::db::GraphStore& store, cg::db::SymId from)
+        -> std::vector<cg::db::SymId>
+    {
+        std::vector<cg::db::SymId> dsts;
+        for (const db::EdgeRow& e :
+             db::edges_of(store, from, true, db::EdgeType::Calls))
+        {
+            dsts.push_back(e.dst);
+        }
+        return dsts;
+    }
+
+    /// 合成语料的函数符号行（唯一键内嵌合成文件名）。
+    [[nodiscard]]
+    auto put_fn_symbol(
+        db::GraphStore&      store,
+        const cg::db::FileId f,
+        const std::string&   file_stem,
+        const std::string&   name,
+        int                  line) -> cg::db::SymId
+    {
+        return store.upsert_symbol(
+            {.unique_key = std::string{"function||"} + name + "|" + file_stem,
+             .kind = db::SymbolKind::Function,
+             .name = name,
+             .ns = "",
+             .sig_hash = std::nullopt,
+             .file_id = f,
+             .line = line,
+             .col = 1});
+    }
+
+    /// 合成语料的 Calls 边。
+    void put_call_edge(
+        db::GraphStore&      store,
+        const cg::db::FileId f,
+        cg::db::SymId        from,
+        cg::db::SymId        to,
+        int                  line)
+    {
+        store.upsert_edge(
+            {.src = from,
+             .dst = to,
+             .type = db::EdgeType::Calls,
+             .site_file = f,
+             .site_line = line});
     }
 
     // 合成边形态上的确定性风险档位：分项
@@ -1431,69 +1540,98 @@ namespace
     {
         db::GraphStore       store{":memory:"};
         const cg::db::FileId f = store.upsert_file("e:/synthetic/risk.cpp");
-
-        const auto fn = [&](const std::string& name, int line)
-        {
-            return store.upsert_symbol(
-                {.unique_key = std::string{"function||"} + name
-                               + "|e:/synthetic/risk.cpp",
-                 .kind = db::SymbolKind::Function,
-                 .name = name,
-                 .ns = "",
-                 .sig_hash = std::nullopt,
-                 .file_id = f,
-                 .line = line,
-                 .col = 1});
-        };
-        const auto link = [&](cg::db::SymId from, cg::db::SymId to, int line)
-        {
-            store.upsert_edge(
-                {.src = from,
-                 .dst = to,
-                 .type = db::EdgeType::Calls,
-                 .site_file = f,
-                 .site_line = line});
-        };
+        const std::string    stem = "e:/synthetic/risk.cpp";
 
         // 一个直接叶子调用者：得分 3 -> LOW。
-        const cg::db::SymId low_t = fn("low_target", 1);
-        link(fn("low_leaf", 2), low_t, 20);
+        const cg::db::SymId low_t =
+            put_fn_symbol(store, f, stem, "low_target", 1);
+        put_call_edge(
+            store,
+            f,
+            put_fn_symbol(store, f, stem, "low_leaf", 2),
+            low_t,
+            20);
 
         // 三个直接叶子调用者：得分 9 -> MEDIUM。
-        const cg::db::SymId med_t = fn("med_target", 10);
+        const cg::db::SymId med_t =
+            put_fn_symbol(store, f, stem, "med_target", 10);
         for (int i = 0; i < 3; ++i)
         {
-            link(fn("med_leaf" + std::to_string(i), 11 + i), med_t, 30 + i);
+            put_call_edge(
+                store,
+                f,
+                put_fn_symbol(
+                    store,
+                    f,
+                    stem,
+                    "med_leaf" + std::to_string(i),
+                    11 + i),
+                med_t,
+                30 + i);
         }
 
         // 枢纽形态：目标 <- 枢纽 <- 三片叶子。direct = 1（枢纽），
         // transitive = 3（深度 2 的叶子），枢纽的 fan-in = 引用
         // 它的 3 片叶子：得分 3*1 + 3 + 3 = 9——三个分项
         // 全非零。
-        const cg::db::SymId hub_t = fn("hub_target", 40);
-        const cg::db::SymId hub = fn("hub", 41);
-        link(hub, hub_t, 50);
+        const cg::db::SymId hub_t =
+            put_fn_symbol(store, f, stem, "hub_target", 40);
+        const cg::db::SymId hub = put_fn_symbol(store, f, stem, "hub", 41);
+        put_call_edge(store, f, hub, hub_t, 50);
         for (int i = 0; i < 3; ++i)
         {
-            link(fn("hub_leaf" + std::to_string(i), 42 + i), hub, 60 + i);
+            put_call_edge(
+                store,
+                f,
+                put_fn_symbol(
+                    store,
+                    f,
+                    stem,
+                    "hub_leaf" + std::to_string(i),
+                    42 + i),
+                hub,
+                60 + i);
         }
 
         // 十一个直接叶子调用者：得分 33 -> HIGH。
-        const cg::db::SymId high_t = fn("high_target", 70);
+        const cg::db::SymId high_t =
+            put_fn_symbol(store, f, stem, "high_target", 70);
         for (int i = 0; i < 11; ++i)
         {
-            link(fn("high_leaf" + std::to_string(i), 71 + i), high_t, 80 + i);
+            put_call_edge(
+                store,
+                f,
+                put_fn_symbol(
+                    store,
+                    f,
+                    stem,
+                    "high_leaf" + std::to_string(i),
+                    71 + i),
+                high_t,
+                80 + i);
         }
 
         // 四十一个直接叶子调用者：得分 123 -> CRITICAL。
-        const cg::db::SymId crit_t = fn("crit_target", 100);
+        const cg::db::SymId crit_t =
+            put_fn_symbol(store, f, stem, "crit_target", 100);
         for (int i = 0; i < 41; ++i)
         {
-            link(fn("crit_leaf" + std::to_string(i), 101 + i), crit_t, 120 + i);
+            put_call_edge(
+                store,
+                f,
+                put_fn_symbol(
+                    store,
+                    f,
+                    stem,
+                    "crit_leaf" + std::to_string(i),
+                    101 + i),
+                crit_t,
+                120 + i);
         }
 
         // 无人调用：UNKNOWN（向上方向）。
-        const cg::db::SymId idle_t = fn("idle_target", 150);
+        const cg::db::SymId idle_t =
+            put_fn_symbol(store, f, stem, "idle_target", 150);
 
         struct Shape
         {
@@ -1561,6 +1699,38 @@ namespace
         }
     }
 
+    /// 路径以后缀定位的文件行（未命中给空行）。
+    [[nodiscard]]
+    auto file_row_with_suffix(cg::db::GraphStore& store, std::string_view tail)
+        -> db::FileRow
+    {
+        for (const db::FileRow& fr : db::all_files(store))
+        {
+            if (fr.path.ends_with(tail))
+            {
+                return fr;
+            }
+        }
+        return {};
+    }
+
+    /// changes 结果里限定名子串命中的消费者（无命中给空）。
+    [[nodiscard]]
+    auto find_consumer(
+        const cg::graph::ChangesResult& res,
+        cg::db::GraphStore&             store,
+        std::string_view                q) -> const cg::graph::ChangesEntry*
+    {
+        for (const cg::graph::ChangesEntry& e : res.consumers)
+        {
+            if (name_of(store, e.id).find(q) != std::string::npos)
+            {
+                return &e;
+            }
+        }
+        return nullptr;
+    }
+
     // sample1 图上的 ccg changes：文件->符号映射、经
     // calls/extends/uses 加重写家族的向上传播、种子绝不
     // 列为消费者、深度封顶截断旗标、确定性摘要。
@@ -1571,18 +1741,7 @@ namespace
         (void)indexer.run(load_commands());
 
         // circle.hpp 映射到它定义的每个符号（record、typedef）。
-        const auto file_of = [&](std::string_view tail) -> db::FileRow
-        {
-            for (const db::FileRow& fr : db::all_files(store))
-            {
-                if (fr.path.ends_with(tail))
-                {
-                    return fr;
-                }
-            }
-            return {};
-        };
-        const db::FileRow circle_h = file_of("circle.hpp");
+        const db::FileRow circle_h = file_row_with_suffix(store, "circle.hpp");
         cg::test::check(
             r,
             !circle_h.path.empty(),
@@ -1611,21 +1770,9 @@ namespace
         const cg::graph::ChangesResult res =
             cg::graph::changes(store, seeds, /*max_depth=*/3);
 
-        const auto find_entry =
-            [&](std::string_view q) -> const cg::graph::ChangesEntry*
-        {
-            for (const cg::graph::ChangesEntry& e : res.consumers)
-            {
-                if (name_of(store, e.id).find(q) != std::string::npos)
-                {
-                    return &e;
-                }
-            }
-            return nullptr;
-        };
         // USES 消费者是直接层（引用 Circle 的 Canvas 字段/形参）。
         const cg::graph::ChangesEntry* field =
-            find_entry("render::Canvas::circles_");
+            find_consumer(res, store, "render::Canvas::circles_");
         cg::test::check(
             r,
             field != nullptr && field->depth == 1,
@@ -1636,13 +1783,13 @@ namespace
             "entries carry the changed symbol their chain came from");
         cg::test::check(
             r,
-            find_entry("app::area_all") != nullptr
-                && find_entry("app::area_all")->depth == 2,
+            find_consumer(res, store, "app::area_all") != nullptr
+                && find_consumer(res, store, "app::area_all")->depth == 2,
             "transitive caller reached at depth 2");
         cg::test::check(
             r,
-            find_entry("app::render_all") != nullptr
-                && find_entry("app::render_all")->depth == 3,
+            find_consumer(res, store, "app::render_all") != nullptr
+                && find_consumer(res, store, "app::render_all")->depth == 3,
             "call chain reaches depth 3");
         cg::test::check(
             r,
@@ -1675,7 +1822,7 @@ namespace
 
         // shape.hpp 种子把重写家族作为直接消费者浮出
         // （改虚函数契约会波及其重写）。
-        const db::FileRow          shape_h = file_of("shape.hpp");
+        const db::FileRow shape_h = file_row_with_suffix(store, "shape.hpp");
         std::vector<cg::db::SymId> shape_seeds;
         for (const db::SymbolRow& s : db::symbols_of_file(store, shape_h.id))
         {
@@ -1701,43 +1848,61 @@ namespace
             "override family members are direct consumers");
     }
 
+    /// 合成包含语料的文件行（合成目录前缀 + 名字）。
+    [[nodiscard]]
+    auto put_syn_file(
+        db::GraphStore&    store,
+        const std::string& dir,
+        const std::string& name) -> cg::db::FileId
+    {
+        return store.upsert_file(dir + name);
+    }
+
+    /// 合成包含语料的 include 行。
+    void put_include_row(
+        db::GraphStore&    store,
+        cg::db::FileId     from,
+        const std::string& target,
+        int                line,
+        bool               angled)
+    {
+        store.upsert_include(
+            {.file = from, .target = target, .line = line, .angled = angled});
+    }
+
     // 合成 includes 表上的包含图环检测（无需解析）：
     // 双文件环、自包含、菱形负例、孤立
     // 文件、未解析目标计数、上限 + 总计的诚实性。
     void include_cycles_scc(R& r)
     {
-        db::GraphStore store{":memory:"};
-        const auto     f = [&](const std::string& name)
-        { return store.upsert_file("e:/synthetic/cyc/" + name); };
-        const cg::db::FileId x1 = f("x1.hpp");
-        const cg::db::FileId x2 = f("x2.hpp");
-        const cg::db::FileId d1 = f("d1.hpp");
-        const cg::db::FileId d2 = f("d2.hpp");
-        const cg::db::FileId d3 = f("d3.hpp");
-        (void)f(
-            "d4.hpp"); // diamond bottom: linked, never an edge endpoint here
-        const cg::db::FileId s1 = f("s1.hpp");
-        (void)f("isolated.hpp"); // counted by files_scanned, links to nothing
+        db::GraphStore       store{":memory:"};
+        const cg::db::FileId x1 =
+            put_syn_file(store, "e:/synthetic/cyc/", "x1.hpp");
+        const cg::db::FileId x2 =
+            put_syn_file(store, "e:/synthetic/cyc/", "x2.hpp");
+        const cg::db::FileId d1 =
+            put_syn_file(store, "e:/synthetic/cyc/", "d1.hpp");
+        const cg::db::FileId d2 =
+            put_syn_file(store, "e:/synthetic/cyc/", "d2.hpp");
+        const cg::db::FileId d3 =
+            put_syn_file(store, "e:/synthetic/cyc/", "d3.hpp");
+        // diamond bottom: linked, never an edge endpoint here
+        (void)put_syn_file(store, "e:/synthetic/cyc/", "d4.hpp");
+        const cg::db::FileId s1 =
+            put_syn_file(store, "e:/synthetic/cyc/", "s1.hpp");
+        // counted by files_scanned, links to nothing
+        (void)put_syn_file(store, "e:/synthetic/cyc/", "isolated.hpp");
 
-        const auto inc =
-            [&](cg::db::FileId from, const std::string& target, int line)
-        {
-            store.upsert_include(
-                {.file = from,
-                 .target = target,
-                 .line = line,
-                 .angled = false});
-        };
         // x1 <-> x2（真环），菱形 d1 -> {d2, d3} -> d4（无环），
         // s1 -> s1（自包含），x1 上一个不可解析目标。
-        inc(x1, "x2.hpp", 1);
-        inc(x2, "x1.hpp", 1);
-        inc(d1, "d2.hpp", 1);
-        inc(d1, "d3.hpp", 2);
-        inc(d2, "d4.hpp", 1);
-        inc(d3, "d4.hpp", 1);
-        inc(s1, "s1.hpp", 1);
-        inc(x1, "nowhere/missing.hpp", 9);
+        put_include_row(store, x1, "x2.hpp", 1, false);
+        put_include_row(store, x2, "x1.hpp", 1, false);
+        put_include_row(store, d1, "d2.hpp", 1, false);
+        put_include_row(store, d1, "d3.hpp", 2, false);
+        put_include_row(store, d2, "d4.hpp", 1, false);
+        put_include_row(store, d3, "d4.hpp", 1, false);
+        put_include_row(store, s1, "s1.hpp", 1, false);
+        put_include_row(store, x1, "nowhere/missing.hpp", 9, false);
 
         const cg::graph::CyclesResult all =
             cg::graph::include_cycles(store, 10);
@@ -1786,21 +1951,19 @@ namespace
             "cap limits the listing, never the totals");
 
         // 纯菱形库：一个分组都没有。
-        db::GraphStore clean{":memory:"};
-        const auto     cf = [&](const std::string& name)
-        { return clean.upsert_file("e:/synthetic/dia/" + name); };
-        const cg::db::FileId a = cf("a.hpp");
-        const cg::db::FileId b = cf("b.hpp");
-        const cg::db::FileId c = cf("c.hpp");
-        (void)cf("d.hpp"); // shared diamond bottom, only a link target
-        clean.upsert_include(
-            {.file = a, .target = "b.hpp", .line = 1, .angled = false});
-        clean.upsert_include(
-            {.file = a, .target = "c.hpp", .line = 2, .angled = false});
-        clean.upsert_include(
-            {.file = b, .target = "d.hpp", .line = 1, .angled = false});
-        clean.upsert_include(
-            {.file = c, .target = "d.hpp", .line = 1, .angled = false});
+        db::GraphStore       clean{":memory:"};
+        const cg::db::FileId a =
+            put_syn_file(clean, "e:/synthetic/dia/", "a.hpp");
+        const cg::db::FileId b =
+            put_syn_file(clean, "e:/synthetic/dia/", "b.hpp");
+        const cg::db::FileId c =
+            put_syn_file(clean, "e:/synthetic/dia/", "c.hpp");
+        // shared diamond bottom, only a link target
+        (void)put_syn_file(clean, "e:/synthetic/dia/", "d.hpp");
+        put_include_row(clean, a, "b.hpp", 1, false);
+        put_include_row(clean, a, "c.hpp", 2, false);
+        put_include_row(clean, b, "d.hpp", 1, false);
+        put_include_row(clean, c, "d.hpp", 1, false);
         const cg::graph::CyclesResult dia =
             cg::graph::include_cycles(clean, 10);
         cg::test::check(
@@ -1814,37 +1977,32 @@ namespace
         // ——仅当恰好一个文件携带它时接受，绝不凭裸
         // 尾段，且匹配多个文件的拼写不产出
         // 边（计为歧义）。
-        db::GraphStore sfx{":memory:"};
-        const auto     sf = [&](const std::string& name)
-        { return sfx.upsert_file("e:/synthetic/sfx/" + name); };
-        const cg::db::FileId main_h = sf("src/main.hpp");
-        const cg::db::FileId real_h = sf("inc/real.hpp");
-        (void)sf("vendor/spdlog/logger.h");
-        const cg::db::FileId core_logger = sf("app/core/logger.h");
-        (void)sf("twin/a/util.hpp");
-        (void)sf("twin/b/util.hpp");
-        const auto sinc =
-            [&](cg::db::FileId from, const std::string& target, bool angled)
-        {
-            sfx.upsert_include(
-                {.file = from, .target = target, .line = 1, .angled = angled});
-        };
+        db::GraphStore       sfx{":memory:"};
+        const cg::db::FileId main_h =
+            put_syn_file(sfx, "e:/synthetic/sfx/", "src/main.hpp");
+        const cg::db::FileId real_h =
+            put_syn_file(sfx, "e:/synthetic/sfx/", "inc/real.hpp");
+        (void)put_syn_file(sfx, "e:/synthetic/sfx/", "vendor/spdlog/logger.h");
+        const cg::db::FileId core_logger =
+            put_syn_file(sfx, "e:/synthetic/sfx/", "app/core/logger.h");
+        (void)put_syn_file(sfx, "e:/synthetic/sfx/", "twin/a/util.hpp");
+        (void)put_syn_file(sfx, "e:/synthetic/sfx/", "twin/b/util.hpp");
         // 真双文件环，两侧都经搜索路径 include
         // （两个目标都不在包含者目录里，精确
         // 拼接落空，只有唯一的全拼写后缀解析成功）。
-        sinc(main_h, "inc/real.hpp", false);
-        sinc(real_h, "main.hpp", false);
+        put_include_row(sfx, main_h, "inc/real.hpp", 1, false);
+        put_include_row(sfx, real_h, "main.hpp", 1, false);
         // 参考语料幻影形态："spdlog/logger.h" 唯一后缀匹配
         // vendored 副本，但其裸尾段 "logger.h" 在保守的
         // 每后缀规则下也会折到 app/core/logger.h——
         // strict 绝不把 core_logger 接进 main 的出边（只有
         // 下方 core_logger -> main 是真的，闭不成环）。
-        sinc(main_h, "spdlog/logger.h", true);
-        sinc(core_logger, "main.hpp", false);
+        put_include_row(sfx, main_h, "spdlog/logger.h", 1, true);
+        put_include_row(sfx, core_logger, "main.hpp", 1, false);
         // 歧义：拼写同时匹配 twin/a/util.hpp 与 twin/b/util.hpp。
-        sinc(real_h, "util.hpp", true);
+        put_include_row(sfx, real_h, "util.hpp", 1, true);
         // 未解析：拼写什么都匹配不上。
-        sinc(real_h, "missing/gone.hpp", true);
+        put_include_row(sfx, real_h, "missing/gone.hpp", 1, true);
 
         const cg::graph::CyclesResult strict =
             cg::graph::include_cycles(sfx, 10);
@@ -2027,6 +2185,18 @@ namespace
     // 所以后续每次尝试算出的依赖闭包都是空的。
     // 失败写入是合并而非覆盖——空快照保住既有
     // 路径（新路径出现则并集）——所以修好被包含的
+    /// 以既定选项跑一轮索引（Indexer 吞选项，每轮拷贝一份）。
+    [[nodiscard]]
+    auto run_index_commands(
+        db::GraphStore&                               store,
+        const cg::graph::IndexOptions&                opt,
+        const std::vector<cg::clang::CompileCommand>& cmds)
+        -> cg::graph::IndexSummary
+    {
+        cg::graph::IndexOptions o = opt;
+        return cg::graph::Indexer{store, std::move(o)}.run(cmds);
+    }
+
     // 头文件仍会把该 TU 拉进 `reached` 并重试。两个连续的
     // 编辑 -> 重试循环钉住保留不是一次性的。
     void failure_deps_retention(R& r)
@@ -2050,12 +2220,6 @@ namespace
         opt.roots = {cg::util::norm_path(base.generic_string())};
         opt.progress = false;
         opt.compile_db_path = cdb;
-        const auto run = [&]
-        {
-            cg::graph::IndexOptions o = opt;
-            return cg::graph::Indexer{store, std::move(o)}.run(commands);
-        };
-        const auto failure_rows = [&] { return db::all_failures(store); };
 
         std::size_t failing_index = commands.size();
         for (std::size_t i = 0; i < commands.size(); ++i)
@@ -2075,7 +2239,8 @@ namespace
         }
         cg::clang::CompileCommand& failing = commands[failing_index];
 
-        const cg::graph::IndexSummary first = run();
+        const cg::graph::IndexSummary first =
+            run_index_commands(store, opt, commands);
         cg::test::check(
             r,
             first.failed == 0,
@@ -2088,7 +2253,8 @@ namespace
         // 记下的 includes，所以其依赖快照非空。
         failing.argv.push_back("-DFAILING_ENTRY=1");
         failing.preordained_failure = "parse-failed: deps retention probe";
-        const cg::graph::IndexSummary second = run();
+        const cg::graph::IndexSummary second =
+            run_index_commands(store, opt, commands);
         cg::test::check(
             r,
             second.failed == 1 && second.stale >= 1,
@@ -2097,7 +2263,7 @@ namespace
                 second.stale,
                 second.failed));
         {
-            const auto rows = failure_rows();
+            const auto rows = db::all_failures(store);
             cg::test::check(
                 r,
                 rows.size() == 1 && !rows.front().deps_json.empty()
@@ -2113,7 +2279,8 @@ namespace
         // 闭包。
         const fs::path dep = base / "canvas.hpp";
         write_text(dep, read_text(dep) + "\n// deps-retention edit 1\n");
-        const cg::graph::IndexSummary third = run();
+        const cg::graph::IndexSummary third =
+            run_index_commands(store, opt, commands);
         cg::test::check(
             r,
             third.failed == 1 && third.stale >= 1,
@@ -2123,7 +2290,7 @@ namespace
                 third.stale,
                 third.failed));
         {
-            const auto rows = failure_rows();
+            const auto rows = db::all_failures(store);
             cg::test::check(
                 r,
                 rows.size() == 1 && !rows.front().deps_json.empty()
@@ -2137,7 +2304,8 @@ namespace
         // 循环 2：第二次内容编辑必须再次重试——保留挺得住
         // 反复失败，而非一次重试后就垮掉。
         write_text(dep, read_text(dep) + "// deps-retention edit 2\n");
-        const cg::graph::IndexSummary fourth = run();
+        const cg::graph::IndexSummary fourth =
+            run_index_commands(store, opt, commands);
         cg::test::check(
             r,
             fourth.failed == 1 && fourth.stale >= 1,
@@ -2147,7 +2315,7 @@ namespace
                 fourth.stale,
                 fourth.failed));
         {
-            const auto rows = failure_rows();
+            const auto rows = db::all_failures(store);
             cg::test::check(
                 r,
                 rows.size() == 1 && !rows.front().deps_json.empty()
@@ -2159,7 +2327,8 @@ namespace
 
         // 不再编辑：保留的闭包在写入时重新 stat 过，
         // 世界未变，条目回落到失败跳过。
-        const cg::graph::IndexSummary fifth = run();
+        const cg::graph::IndexSummary fifth =
+            run_index_commands(store, opt, commands);
         cg::test::check(
             r,
             fifth.stale == 0 && fifth.failed == 1
@@ -2228,6 +2397,64 @@ namespace
             "retry increments attempts");
     }
 
+    /// 合成动态派发语料的方法符号行（键前缀 method）。
+    [[nodiscard]]
+    auto put_method_symbol(
+        db::GraphStore&      store,
+        const cg::db::FileId f,
+        const std::string&   file_stem,
+        const std::string&   name,
+        int                  line,
+        std::uint32_t        flags = 0) -> cg::db::SymId
+    {
+        return store.upsert_symbol(
+            {.unique_key = "method||" + name + "|" + file_stem,
+             .kind = db::SymbolKind::Method,
+             .name = name,
+             .ns = "",
+             .sig_hash = std::nullopt,
+             .file_id = f,
+             .line = line,
+             .col = 1,
+             .flags = flags});
+    }
+
+    /// 合成动态派发语料的调用者函数行（键前缀 function）。
+    [[nodiscard]]
+    auto put_dyn_caller(
+        db::GraphStore&      store,
+        const cg::db::FileId f,
+        const std::string&   file_stem,
+        const std::string&   name,
+        int                  line) -> cg::db::SymId
+    {
+        return store.upsert_symbol(
+            {.unique_key = "function||" + name + "|" + file_stem,
+             .kind = db::SymbolKind::Function,
+             .name = name,
+             .ns = "",
+             .sig_hash = std::nullopt,
+             .file_id = f,
+             .line = line,
+             .col = 1});
+    }
+
+    /// 邻居结果中某符号的派发状态（不在结果内给 None）。
+    [[nodiscard]]
+    auto dispatch_status_of(
+        const cg::graph::NeighborsResult& res,
+        cg::db::SymId                     id) -> cg::graph::DispatchStatus
+    {
+        for (const auto& e : res.entries)
+        {
+            if (e.id == id)
+            {
+                return e.dispatch_status;
+            }
+        }
+        return cg::graph::DispatchStatus::None;
+    }
+
     /**
      * @brief 部分证据：同一站点同时有 >=0.7 与 0.4 目标时，0.4 不得作为证据；
      *        只有 0.4 的站点必须保持 family estimate，且不产生 inferred。
@@ -2236,24 +2463,18 @@ namespace
     {
         db::GraphStore       store{":memory:"};
         const cg::db::FileId f = store.upsert_file("e:/synthetic/dyn.cpp");
-        const auto           method =
-            [&](const std::string& name, int line, std::uint32_t flags = 0)
-        {
-            return store.upsert_symbol(
-                {.unique_key = "method||" + name + "|e:/synthetic/dyn.cpp",
-                 .kind = db::SymbolKind::Method,
-                 .name = name,
-                 .ns = "",
-                 .sig_hash = std::nullopt,
-                 .file_id = f,
-                 .line = line,
-                 .col = 1,
-                 .flags = flags});
-        };
-        const cg::db::SymId base =
-            method("If::f", 1, db::sym_flags::is_pure_virtual);
-        const cg::db::SymId impl_b = method("B::f", 2);
-        const cg::db::SymId impl_c = method("C::f", 3);
+        const std::string    stem = "e:/synthetic/dyn.cpp";
+        const cg::db::SymId  base = put_method_symbol(
+            store,
+            f,
+            stem,
+            "If::f",
+            1,
+            db::sym_flags::is_pure_virtual);
+        const cg::db::SymId impl_b =
+            put_method_symbol(store, f, stem, "B::f", 2);
+        const cg::db::SymId impl_c =
+            put_method_symbol(store, f, stem, "C::f", 3);
         store.upsert_edge(
             {.src = impl_b,
              .dst = base,
@@ -2267,20 +2488,8 @@ namespace
              .site_file = f,
              .site_line = 3});
 
-        const auto caller = [&](const std::string& name, int line)
-        {
-            return store.upsert_symbol(
-                {.unique_key = "function||" + name + "|e:/synthetic/dyn.cpp",
-                 .kind = db::SymbolKind::Function,
-                 .name = name,
-                 .ns = "",
-                 .sig_hash = std::nullopt,
-                 .file_id = f,
-                 .line = line,
-                 .col = 1});
-        };
-        const cg::db::SymId u1 = caller("u1", 10);
-        const cg::db::SymId u2 = caller("u2", 20);
+        const cg::db::SymId u1 = put_dyn_caller(store, f, stem, "u1", 10);
+        const cg::db::SymId u2 = put_dyn_caller(store, f, stem, "u2", 20);
         store.upsert_edge(
             {.src = u1,
              .dst = base,
@@ -2322,28 +2531,18 @@ namespace
              .attrs = db::edge_attrs::dispatch_inferred,
              .confidence = 0.4});
 
-        const auto status_of =
-            [](const cg::graph::NeighborsResult& res, cg::db::SymId id)
-        {
-            for (const auto& e : res.entries)
-            {
-                if (e.id == id)
-                {
-                    return e.dispatch_status;
-                }
-            }
-            return cg::graph::DispatchStatus::None;
-        };
         // 查基类：u1 有 0.7 目标 -> inferred；u2 只有 0.4 -> 家族估算。
         const cg::graph::NeighborsResult base_res =
             cg::graph::callers(store, base, 1);
         cg::test::check(
             r,
-            status_of(base_res, u1) == cg::graph::DispatchStatus::Inferred,
+            dispatch_status_of(base_res, u1)
+                == cg::graph::DispatchStatus::Inferred,
             "0.7 target at a partially proven site is evidence");
         cg::test::check(
             r,
-            status_of(base_res, u2) != cg::graph::DispatchStatus::Inferred,
+            dispatch_status_of(base_res, u2)
+                != cg::graph::DispatchStatus::Inferred,
             "0.4-only site is never inferred");
         // 查具体实现 C：u1 的 0.7 目标指向 B（不是 C）-> 不应拉入；
         // u2 的 0.4 不构成证据 -> 至多 family estimate。
@@ -2351,11 +2550,12 @@ namespace
             cg::graph::callers(store, impl_c, 1);
         cg::test::check(
             r,
-            status_of(c_res, u1) == cg::graph::DispatchStatus::None,
+            dispatch_status_of(c_res, u1) == cg::graph::DispatchStatus::None,
             "caller proven to dispatch elsewhere is not pulled in");
         cg::test::check(
             r,
-            status_of(c_res, u2) != cg::graph::DispatchStatus::Inferred,
+            dispatch_status_of(c_res, u2)
+                != cg::graph::DispatchStatus::Inferred,
             "0.4 target never counts as evidence for its impl");
     }
 
@@ -2491,6 +2691,28 @@ namespace
         "graph.dialect-fixit-stats",
         &dialect_fixit_stats};
 
+    [[nodiscard]]
+    auto plain_cdb_item(const std::string& root, const std::string& file)
+        -> std::string;
+
+    [[nodiscard]]
+    auto tagged_cdb_item(
+        const std::string& root,
+        const std::string& file,
+        const std::string& tag) -> std::string;
+
+    [[nodiscard]]
+    auto flip_fn_in_graph(
+        db::GraphStore&    store,
+        const std::string& root,
+        const std::string& rel_file) -> bool;
+
+    [[nodiscard]]
+    auto commands_with_tag(
+        const std::vector<cg::clang::CompileCommand>& commands,
+        std::size_t                                   idx,
+        const std::string& tag) -> std::vector<cg::clang::CompileCommand>;
+
     // "报错但 AST 完好"的良性错误索引：悬垂引用族（引用成员绑定临时
     // 对象，无旗标可压的硬错误）单独出现时 TU 照常索引（白名单拦截
     // 失败判定）——注记与计数留痕、失败类零记录、符号照常入图；与
@@ -2522,14 +2744,9 @@ namespace
             "    B() : r(7) {}\n"
             "};\n"
             "int main() { return no_such_symbol; }\n");
-        const auto gnu_item = [&](const std::string& file)
-        {
-            return "{\"directory\":" + q(root) + ",\"file\":" + q(file)
-                   + ",\"arguments\":[\"clang++\",\"-I\"," + q(root)
-                   + ",\"-std=c++20\",\"-c\"," + q(file) + "]}";
-        };
-        const std::string db_text = "[" + gnu_item(root + "/dang_ok.cpp") + ","
-                                    + gnu_item(root + "/dang_mixed.cpp") + "]";
+        const std::string db_text =
+            "[" + plain_cdb_item(root, root + "/dang_ok.cpp") + ","
+            + plain_cdb_item(root, root + "/dang_mixed.cpp") + "]";
         scratch.put(base / "compile_commands.json", db_text);
         const std::string cdb = cg::util::norm_path(
             (base / "compile_commands.json").generic_string());
@@ -2649,15 +2866,10 @@ namespace
             "    return x + s.v;\n"
             "}\n"
             "int main() { return flip(1); }\n");
-        const auto item = [&](const std::string& file, const std::string& tag)
-        {
-            return "{\"directory\":" + q(root) + ",\"file\":" + q(file)
-                   + ",\"arguments\":[\"clang++\",\"-I\"," + q(root)
-                   + ",\"-std=c++20\",\"-c\"," + q(file) + ",\"" + tag + "\"]}";
-        };
         const std::string arm_tag = "[" + arm + "] ";
         const std::string db_text =
-            "[" + item(root + "/flip.cpp", "-DVARIANT=1") + "]";
+            "[" + tagged_cdb_item(root, root + "/flip.cpp", "-DVARIANT=1")
+            + "]";
         scratch.put(base / "compile_commands.json", db_text);
         const std::string cdb = cg::util::norm_path(
             (base / "compile_commands.json").generic_string());
@@ -2675,29 +2887,13 @@ namespace
         opt.roots = {root};
         opt.progress = false;
         opt.compile_db_path = cdb;
-        const auto run = [&](std::vector<cc::CompileCommand> cmds)
-        { return cg::graph::Indexer{store, opt}.run(cmds); };
         // 轮 1：正常成功——函数符号入图。
-        const cg::graph::IndexSummary first = run(commands);
+        const cg::graph::IndexSummary first =
+            run_index_commands(store, opt, commands);
         cg::test::check(r, first.failed == 0, arm_tag + "first run is clean");
-        const auto flip_present = [&]()
-        {
-            const db::FindResult found =
-                db::find_symbols(store, "flip", db::SymbolFilter{}, false);
-            for (const db::SymbolRow& row : found.matches)
-            {
-                if (cg::util::norm_path(row.file)
-                        == cg::util::norm_path(root + "/flip.cpp")
-                    && row.kind == db::SymbolKind::Function)
-                {
-                    return true;
-                }
-            }
-            return false;
-        };
         cg::test::check(
             r,
-            flip_present(),
+            flip_fn_in_graph(store, root, "flip.cpp"),
             arm_tag + "the flip function is in the graph after the clean run");
 
         // 轮 2：换 argv（新摘要必然重试）+ 注入失败——文件全败，符号
@@ -2706,14 +2902,15 @@ namespace
         failing[0].argv.push_back("-DFAILING=1");
         failing[0].preordained_failure =
             "parse-failed: fk-recovery probe entry failure";
-        const cg::graph::IndexSummary second = run(failing);
+        const cg::graph::IndexSummary second =
+            run_index_commands(store, opt, failing);
         cg::test::check(
             r,
             second.failed == 1,
             arm_tag + "second run fails the single entry");
         cg::test::check(
             r,
-            !flip_present(),
+            !flip_fn_in_graph(store, root, "flip.cpp"),
             arm_tag + "the all-failed purge clears the file's symbols");
 
         // 轮 3：再换 argv（绕开"世界未变则跳过"）摘除注入——失败残留
@@ -2722,14 +2919,15 @@ namespace
         // 全是新插行——fk-commit-failure-dig 案的触发形状）。
         std::vector<cc::CompileCommand> recovered = commands;
         recovered[0].argv.push_back("-DRECOVERED=1");
-        const cg::graph::IndexSummary third = run(recovered);
+        const cg::graph::IndexSummary third =
+            run_index_commands(store, opt, recovered);
         cg::test::check(
             r,
             third.failed == 0 && third.benign_errored_tus == 0,
             arm_tag + "third run re-indexes the recovered entry cleanly");
         cg::test::check(
             r,
-            flip_present(),
+            flip_fn_in_graph(store, root, "flip.cpp"),
             arm_tag + "the recovered entry's symbols survive the commit");
         cg::test::check(
             r,
@@ -2747,10 +2945,11 @@ namespace
         failing2[0].argv.push_back("-DFAILING2=1");
         failing2[0].preordained_failure =
             "parse-failed: fk-recovery probe second failure";
-        const cg::graph::IndexSummary fourth = run(failing2);
+        const cg::graph::IndexSummary fourth =
+            run_index_commands(store, opt, failing2);
         cg::test::check(
             r,
-            fourth.failed == 1 && !flip_present(),
+            fourth.failed == 1 && !flip_fn_in_graph(store, root, "flip.cpp"),
             arm_tag + "a second all-failed round clears symbols again");
     }
 
@@ -2811,15 +3010,10 @@ namespace
             base / "y.cpp",
             "static int twin() { return 2; }\n"
             "int use_y() { return twin(); }\n");
-        const auto item = [&](const std::string& file, const std::string& tag)
-        {
-            return "{\"directory\":" + q(root) + ",\"file\":" + q(file)
-                   + ",\"arguments\":[\"clang++\",\"-I\"," + q(root)
-                   + ",\"-std=c++20\",\"-c\"," + q(file) + ",\"" + tag + "\"]}";
-        };
-        const std::string db_text = "[" + item(root + "/a.cpp", "-DA=1") + ","
-                                    + item(root + "/x.cpp", "-DX=1") + ","
-                                    + item(root + "/y.cpp", "-DY=1") + "]";
+        const std::string db_text =
+            "[" + tagged_cdb_item(root, root + "/a.cpp", "-DA=1") + ","
+            + tagged_cdb_item(root, root + "/x.cpp", "-DX=1") + ","
+            + tagged_cdb_item(root, root + "/y.cpp", "-DY=1") + "]";
         scratch.put(base / "compile_commands.json", db_text);
         const std::string cdb = cg::util::norm_path(
             (base / "compile_commands.json").generic_string());
@@ -2837,50 +3031,30 @@ namespace
         opt.roots = {root};
         opt.progress = false;
         opt.compile_db_path = cdb;
-        const auto run = [&](std::vector<cc::CompileCommand> cmds)
-        { return cg::graph::Indexer{store, opt}.run(cmds); };
-        const auto with_tag = [&](std::size_t idx, const std::string& tag)
-        {
-            std::vector<cc::CompileCommand> cmds = commands;
-            cmds[idx].argv.push_back(tag);
-            return cmds;
-        };
-        const auto flip_present = [&]()
-        {
-            const db::FindResult found =
-                db::find_symbols(store, "flip", db::SymbolFilter{}, false);
-            for (const db::SymbolRow& row : found.matches)
-            {
-                if (cg::util::norm_path(row.file)
-                        == cg::util::norm_path(root + "/a.cpp")
-                    && row.kind == db::SymbolKind::Function)
-                {
-                    return true;
-                }
-            }
-            return false;
-        };
         // 轮 1：三条目全部干净成功。
-        const cg::graph::IndexSummary first = run(commands);
+        const cg::graph::IndexSummary first =
+            run_index_commands(store, opt, commands);
         cg::test::check(r, first.failed == 0, arm_tag + "first run is clean");
         cg::test::check(
             r,
-            flip_present(),
+            flip_fn_in_graph(store, root, "a.cpp"),
             arm_tag + "flip is in the graph after the clean run");
         // 轮 2：a 换摘要注入失败（世界其余未动）——a 全败、符号被合法
         // 清除、失败记录落库；摘要 A=2 同步获得指纹行（失败条目也写
         // 指纹），下一轮才能走 failure_skip 分支。
-        std::vector<cc::CompileCommand> failing = with_tag(0, "-DA=2");
+        std::vector<cc::CompileCommand> failing =
+            commands_with_tag(commands, 0, "-DA=2");
         failing[0].preordained_failure =
             "parse-failed: stale-lift probe entry failure";
-        const cg::graph::IndexSummary second = run(failing);
+        const cg::graph::IndexSummary second =
+            run_index_commands(store, opt, failing);
         cg::test::check(
             r,
             second.failed == 1,
             arm_tag + "second run fails the flip entry only");
         cg::test::check(
             r,
-            !flip_present(),
+            !flip_fn_in_graph(store, root, "a.cpp"),
             arm_tag + "the all-failed purge clears flip's symbols");
         // 轮 3（层级正交化后的形态）：a 以与失败记录完全相同的摘要 A=2
         // 再次出现、注入摘除（世界对 a 未变 -> failure_skip）；y.cpp 改
@@ -2895,7 +3069,7 @@ namespace
         bool committed = true;
         try
         {
-            (void)run(lifted);
+            (void)run_index_commands(store, opt, lifted);
         }
         catch (const std::exception&)
         {
@@ -2909,7 +3083,7 @@ namespace
                   "rollback");
         cg::test::check(
             r,
-            !flip_present(),
+            !flip_fn_in_graph(store, root, "a.cpp"),
             arm_tag
                 + "the name-bucket lift no longer re-parses the "
                   "failure_skip entry");
@@ -2919,13 +3093,15 @@ namespace
             arm_tag + "the failure row survives until the digest changes");
         //   再换摘要注入失败——合法全败清除必须照常工作（防线不
         // 得过度保护）。
-        std::vector<cc::CompileCommand> failing2 = with_tag(0, "-DA=3");
+        std::vector<cc::CompileCommand> failing2 =
+            commands_with_tag(commands, 0, "-DA=3");
         failing2[0].preordained_failure =
             "parse-failed: stale-lift probe second failure";
-        const cg::graph::IndexSummary fourth = run(failing2);
+        const cg::graph::IndexSummary fourth =
+            run_index_commands(store, opt, failing2);
         cg::test::check(
             r,
-            fourth.failed == 1 && !flip_present(),
+            fourth.failed == 1 && !flip_fn_in_graph(store, root, "a.cpp"),
             arm_tag + "a genuinely all-failed round still purges symbols");
     }
 
@@ -2939,18 +3115,91 @@ namespace
         "graph.name-lift-parse-scope-closed",
         &name_lift_parse_scope_closed};
 
-    // 良性白名单扩容的判定层单测：逐家族的拼写命中（正例文本取自真实
-    // 编译器错误形态）、清单外反例（含硬否决的重载决议失败主
-    // 形态与实体级二义拼写）、以及宽签名家族护栏（全错同形态/条数上
-    // 限/一行多错/类型定义行/Fatal 伴生）。诊断对象全部合成，不经编译。
-    void benign_whitelist_signatures(R& r)
+    /// compile_commands 条目的 JSON 文本（clang++ 直调形态，无附加旗标）。
+    [[nodiscard]]
+    auto plain_cdb_item(const std::string& root, const std::string& file)
+        -> std::string
+    {
+        return "{\"directory\":" + q(root) + ",\"file\":" + q(file)
+               + ",\"arguments\":[\"clang++\",\"-I\"," + q(root)
+               + ",\"-std=c++20\",\"-c\"," + q(file) + "]}";
+    }
+
+    /// compile_commands 条目的 JSON 文本（尾部追加变体标签旗标）。
+    [[nodiscard]]
+    auto tagged_cdb_item(
+        const std::string& root,
+        const std::string& file,
+        const std::string& tag) -> std::string
+    {
+        return "{\"directory\":" + q(root) + ",\"file\":" + q(file)
+               + ",\"arguments\":[\"clang++\",\"-I\"," + q(root)
+               + ",\"-std=c++20\",\"-c\"," + q(file) + ",\"" + tag + "\"]}";
+    }
+
+    /// flip 函数是否在指定文件行上（全败清除/翻绿的观测面）。
+    [[nodiscard]]
+    auto flip_fn_in_graph(
+        db::GraphStore&    store,
+        const std::string& root,
+        const std::string& rel_file) -> bool
+    {
+        const db::FindResult found =
+            db::find_symbols(store, "flip", db::SymbolFilter{}, false);
+        for (const db::SymbolRow& row : found.matches)
+        {
+            if (cg::util::norm_path(row.file)
+                    == cg::util::norm_path(root + "/" + rel_file)
+                && row.kind == db::SymbolKind::Function)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// 命令表副本的第 idx 条追加一个旗标（换摘要重试的载体）。
+    [[nodiscard]]
+    auto commands_with_tag(
+        const std::vector<cg::clang::CompileCommand>& commands,
+        std::size_t                                   idx,
+        const std::string& tag) -> std::vector<cg::clang::CompileCommand>
+    {
+        std::vector<cg::clang::CompileCommand> cmds = commands;
+        cmds[idx].argv.push_back(tag);
+        return cmds;
+    }
+
+    /// 拼写到良性错误家族的判定直连。
+    [[nodiscard]]
+    auto family_of_spelling(std::string_view spelling) -> std::string
+    {
+        return std::string{
+            cg::graph::detail::benign_error_family_of(std::string{spelling})};
+    }
+
+    /// 合成诊断对象（不经编译的判定层输入）。
+    [[nodiscard]]
+    auto make_diag(
+        std::string_view        spelling,
+        unsigned                line,
+        const std::string&      file,
+        cg::clang::DiagSeverity sev) -> cg::clang::Diagnostic
     {
         namespace cc = cg::clang;
-        const auto family_of = [](std::string_view spelling)
-        {
-            return cg::graph::detail::benign_error_family_of(
-                std::string{spelling});
-        };
+        cc::Diagnostic d;
+        d.severity = sev;
+        d.spelling = std::string{spelling};
+        d.location.file = file;
+        d.location.line = line;
+        return d;
+    }
+
+    // 良性白名单扩容的判定层单测（拼写面）：逐家族的拼写命中（正例
+    // 文本取自真实编译器错误形态）与清单外反例（含硬否决的重载决议
+    // 失败主形态与实体级二义拼写）。诊断对象全部合成，不经编译。
+    void benign_whitelist_spelling_hits(R& r)
+    {
         // 正例：拼写取自各家族真实错误形态的诊断文本。
         const std::pair<std::string_view, std::string_view> hits[] = {
             {"reference member '_callback' binds to a temporary object whose "
@@ -3013,7 +3262,7 @@ namespace
         {
             cg::test::check(
                 r,
-                family_of(spelling) == family,
+                family_of_spelling(spelling) == family,
                 std::format("whitelist hit: '{}' -> {}", spelling, family));
         }
         // 反例：清单外拼写必须全部未命中。硬否决边界（重载决议失败的
@@ -3045,23 +3294,17 @@ namespace
         {
             cg::test::check(
                 r,
-                family_of(spelling).empty(),
+                family_of_spelling(spelling).empty(),
                 std::format("whitelist miss preserved: '{}'", spelling));
         }
+    }
 
-        // 护栏：合成的诊断向量（不经编译）。
-        const auto diag = [](std::string_view spelling,
-                             unsigned         line,
-                             std::string_view file,
-                             cc::DiagSeverity sev)
-        {
-            cc::Diagnostic d;
-            d.severity = sev;
-            d.spelling = std::string{spelling};
-            d.location.file = std::string{file};
-            d.location.line = line;
-            return d;
-        };
+    // 良性白名单扩容的判定层单测（批护栏面）：宽签名家族护栏（全错
+    // 同形态/条数上限/一行多错/类型定义行/Fatal 伴生）与多家族混批
+    // 的注记汇总。诊断对象全部合成，不经编译。
+    void benign_whitelist_batch_gates(R& r)
+    {
+        namespace cc = cg::clang;
         const cc::DiagSeverity err = cc::DiagSeverity::Error;
         const std::string      a = "file_a.cpp";
         const std::string      b = "file_b.cpp";
@@ -3077,7 +3320,7 @@ namespace
         std::vector<cc::Diagnostic> six;
         for (unsigned line = 73; line <= 78; ++line)
         {
-            six.push_back(diag(
+            six.push_back(make_diag(
                 "conversion from 'const LONG' (aka 'const long') to "
                 "'Value' is ambiguous",
                 line,
@@ -3092,7 +3335,7 @@ namespace
         std::vector<cc::Diagnostic> seventeen = six;
         for (unsigned line = 79; line <= 89; ++line)
         {
-            seventeen.push_back(diag(
+            seventeen.push_back(make_diag(
                 "conversion from 'const LONG' (aka 'const long') to "
                 "'Value' is ambiguous",
                 line,
@@ -3104,7 +3347,7 @@ namespace
             !cg::graph::detail::all_errors_benign(seventeen),
             "17 conversion-ambiguity errors exceed the per-TU cap (16)");
         std::vector<cc::Diagnostic> solo_mix = six;
-        solo_mix.push_back(diag(
+        solo_mix.push_back(make_diag(
             "reference member '_callback' binds to a temporary object "
             "whose lifetime is shorter than the lifetime of the member",
             512,
@@ -3129,12 +3372,12 @@ namespace
         const std::string lines_path =
             cg::util::norm_path(lines.generic_string());
         std::vector<cc::Diagnostic> two_viable{
-            diag(
+            make_diag(
                 "no viable conversion from 'CAtlString' to 'std::wstring'",
                 54,
                 lines_path,
                 err),
-            diag(
+            make_diag(
                 "no viable conversion from 'CAtlString' to 'std::wstring'",
                 91,
                 lines_path,
@@ -3145,12 +3388,12 @@ namespace
             "two point-wise no-viable-conversion errors on distinct lines "
             "are benign");
         std::vector<cc::Diagnostic> same_line{
-            diag(
+            make_diag(
                 "no viable conversion from 'CAtlString' to 'std::wstring'",
                 54,
                 lines_path,
                 err),
-            diag(
+            make_diag(
                 "no viable conversion from 'CAtlString' to 'std::wstring'",
                 54,
                 lines_path,
@@ -3163,7 +3406,7 @@ namespace
         std::vector<cc::Diagnostic> eleven;
         for (unsigned line = 100; line < 111; ++line)
         {
-            eleven.push_back(diag(
+            eleven.push_back(make_diag(
                 "no viable conversion from 'CW2A' to 'std::string'",
                 line,
                 lines_path,
@@ -3174,7 +3417,7 @@ namespace
             !cg::graph::detail::all_errors_benign(eleven),
             "11 no-viable-conversion errors exceed the per-TU cap (10)");
         std::vector<cc::Diagnostic> with_fatal = two_viable;
-        with_fatal.push_back(diag(
+        with_fatal.push_back(make_diag(
             "too many errors emitted, stopping now",
             0,
             "",
@@ -3203,7 +3446,7 @@ namespace
             cg::util::norm_path(sniff.generic_string());
         cg::test::check(
             r,
-            cg::graph::detail::all_errors_benign({diag(
+            cg::graph::detail::all_errors_benign({make_diag(
                 "no viable conversion from 'CAtlString' to "
                 "'std::wstring'",
                 1,
@@ -3213,7 +3456,7 @@ namespace
             "type-definition-line gate");
         cg::test::check(
             r,
-            !cg::graph::detail::all_errors_benign({diag(
+            !cg::graph::detail::all_errors_benign({make_diag(
                 "no viable conversion from 'CAtlString' to "
                 "'std::wstring'",
                 2,
@@ -3223,7 +3466,7 @@ namespace
             "rejected (entity-level damage shape)");
         cg::test::check(
             r,
-            !cg::graph::detail::all_errors_benign({diag(
+            !cg::graph::detail::all_errors_benign({make_diag(
                 "no viable conversion from 'CAtlString' to "
                 "'std::wstring'",
                 3,
@@ -3233,7 +3476,7 @@ namespace
             "rejected");
         cg::test::check(
             r,
-            !cg::graph::detail::all_errors_benign({diag(
+            !cg::graph::detail::all_errors_benign({make_diag(
                 "no viable conversion from 'CAtlString' to "
                 "'std::wstring'",
                 9,
@@ -3242,7 +3485,7 @@ namespace
             "an out-of-range line is treated as unverifiable and rejected");
         cg::test::check(
             r,
-            !cg::graph::detail::all_errors_benign({diag(
+            !cg::graph::detail::all_errors_benign({make_diag(
                 "no viable conversion from 'CAtlString' to "
                 "'std::wstring'",
                 1,
@@ -3254,19 +3497,19 @@ namespace
         // 多家族混批：全部命中白名单的窄签名家族自由组合；注记汇总
         // 按首现序去重点名每个家族。
         const std::vector<cc::Diagnostic> mixed{
-            diag(
+            make_diag(
                 "reinterpret_cast from rvalue to reference type 'const "
                 "int64_t &' (aka 'const long long &')",
                 6664,
                 b,
                 err),
-            diag(
+            make_diag(
                 "non-const lvalue reference to type 'demo::Widget' "
                 "cannot bind to a temporary of type 'demo::Widget'",
                 80,
                 b,
                 err),
-            diag(
+            make_diag(
                 "reinterpret_cast from rvalue to reference type 'const "
                 "int64_t &' (aka 'const long long &')",
                 6665,
@@ -3285,9 +3528,12 @@ namespace
             "order");
     }
 
-    const cg::test::Registrar reg_benign_signatures{
-        "graph.benign-whitelist-signatures",
-        &benign_whitelist_signatures};
+    const cg::test::Registrar reg_benign_spellings{
+        "graph.benign-whitelist-spelling-hits",
+        &benign_whitelist_spelling_hits};
+    const cg::test::Registrar reg_benign_gates{
+        "graph.benign-whitelist-batch-gates",
+        &benign_whitelist_batch_gates};
 
     // 第二家族的端到端：右值 reinterpret_cast 与非 const 左值引用绑
     // 临时在同一 TU 混批（全部命中白名单）→ TU 照常索引，注记完整
@@ -3302,12 +3548,6 @@ namespace
             / ("ccg-graph-benign2-" + std::to_string(stamp))};
         const fs::path&   base = scratch.base;
         const std::string root = cg::util::norm_path(base.generic_string());
-        const auto        gnu_item = [&](const std::string& file)
-        {
-            return "{\"directory\":" + q(root) + ",\"file\":" + q(file)
-                   + ",\"arguments\":[\"clang++\",\"-I\"," + q(root)
-                   + ",\"-std=c++20\",\"-c\"," + q(file) + "]}";
-        };
         scratch.put(
             base / "mix_ok.cpp",
             "#include <string>\n"
@@ -3319,7 +3559,8 @@ namespace
             "    (void)r;\n"
             "    return 0;\n"
             "}\n");
-        const std::string db_text = "[" + gnu_item(root + "/mix_ok.cpp") + "]";
+        const std::string db_text =
+            "[" + plain_cdb_item(root, root + "/mix_ok.cpp") + "]";
         scratch.put(base / "compile_commands.json", db_text);
         const std::string cdb = cg::util::norm_path(
             (base / "compile_commands.json").generic_string());
@@ -3415,6 +3656,15 @@ namespace
     const cg::test::Registrar reg_changes{"graph.changes", &changes_walk};
     const cg::test::Registrar reg_cycles{"graph.cycles", &include_cycles_scc};
 
+    /// 模块聚合结果是否含指定模块。
+    [[nodiscard]]
+    auto module_graph_has(
+        const cg::graph::ModuleGraph& mg,
+        const std::string&            m) -> bool
+    {
+        return std::ranges::find(mg.modules, m) != mg.modules.end();
+    }
+
     // ccg graph 的数据面：调用闭包（BFS 最短深度、交叉边保留、截断诚实位）
     // 与模块级聚合（文件词干标签、同文件不出图、min-weight 过滤但计数从
     // 不被过滤截断）。
@@ -3508,12 +3758,11 @@ namespace
             "depth 0 = unlimited: full closure, never truncated");
 
         const cg::graph::ModuleGraph mg = cg::graph::module_graph(store, "", 1);
-        const auto                   has_module = [&](const std::string& m)
-        { return std::ranges::find(mg.modules, m) != mg.modules.end(); };
         cg::test::check(
             r,
-            has_module("main") && has_module("canvas") && has_module("circle")
-                && has_module("tmpl"),
+            module_graph_has(mg, "main") && module_graph_has(mg, "canvas")
+                && module_graph_has(mg, "circle")
+                && module_graph_has(mg, "tmpl"),
             "module aggregation groups symbols by file stem");
         bool canvas_to_circle = false;
         bool self_loop_free = true;

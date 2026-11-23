@@ -420,6 +420,27 @@ namespace
         return found.matches.empty() ? 0 : found.matches.front().id;
     }
 
+    /**
+     * @brief 派发结果里按站点 id 找解析站点；找不到给空指针。
+     *
+     * @internal 站点 id 是 call_sites 的主键，派发结果里同 id 至多一条，
+     *           按首个命中返回。
+     */
+    [[nodiscard]]
+    auto resolved_site_of(
+        const cg::analysis::DispatchResult& dispatch,
+        std::int64_t site_id) -> const cg::analysis::ResolvedCallSite*
+    {
+        for (const cg::analysis::ResolvedCallSite& s : dispatch.sites)
+        {
+            if (s.site_id == site_id)
+            {
+                return &s;
+            }
+        }
+        return nullptr;
+    }
+
     /** @brief 动态证据必须只来自对象创建/转型/取地址，绝不来自静态容器元素。 */
     void container_element_is_not_dynamic(R& r)
     {
@@ -759,6 +780,12 @@ namespace
             "non-virtual call has callee_resolved=1, dispatch resolved=0");
     }
 
+    [[nodiscard]]
+    auto neighbor_by_name(
+        const cg::graph::NeighborsResult& result,
+        std::string_view                  name,
+        cg::db::GraphStore& st) -> const cg::graph::NeighborEntry*;
+
     /** @brief --dispatch 走查把同目标的 CALLS 与 dispatch 合并，不丢信息。 */
     void traverse_merges_dispatch(R& r)
     {
@@ -778,23 +805,8 @@ namespace
             1,
             true,
             cg::graph::DispatchMode::Additive);
-        const auto find_entry =
-            [](const cg::graph::NeighborsResult& result,
-               std::string_view                  name,
-               cg::db::GraphStore& st) -> const cg::graph::NeighborEntry*
-        {
-            for (const auto& entry : result.entries)
-            {
-                const auto row = cg::db::get_symbol(st, entry.id);
-                if (row && row->qualified_name == name)
-                {
-                    return &entry;
-                }
-            }
-            return nullptr;
-        };
-        const auto* plain_entry = find_entry(plain, "Base::f", store);
-        const auto* merged = find_entry(dispatched, "Base::f", store);
+        const auto* plain_entry = neighbor_by_name(plain, "Base::f", store);
+        const auto* merged = neighbor_by_name(dispatched, "Base::f", store);
         cg::test::check(
             r,
             plain_entry != nullptr && !plain_entry->has_dispatch,
@@ -829,6 +841,40 @@ namespace
             "context --dispatch exposes fallback attrs");
     }
 
+    /** 邻居结果里限定名精确命中的入口（未命中给空）。 */
+    [[nodiscard]]
+    auto neighbor_by_name(
+        const cg::graph::NeighborsResult& result,
+        std::string_view                  name,
+        cg::db::GraphStore&               st) -> const cg::graph::NeighborEntry*
+    {
+        for (const auto& entry : result.entries)
+        {
+            const auto row = cg::db::get_symbol(st, entry.id);
+            if (row && row->qualified_name == name)
+            {
+                return &entry;
+            }
+        }
+        return nullptr;
+    }
+
+    /** 邻居结果里符号号命中的入口（未命中给空）。 */
+    [[nodiscard]]
+    auto neighbor_by_id(
+        const cg::graph::NeighborsResult& result,
+        cg::db::SymId                     id) -> const cg::graph::NeighborEntry*
+    {
+        for (const auto& entry : result.entries)
+        {
+            if (entry.id == id)
+            {
+                return &entry;
+            }
+        }
+        return nullptr;
+    }
+
     /**
      * @brief 默认 B 精确模式：0.4 双实现候选可见、兄弟目标不互拉、
      *        基类仍保留全部 override 调用者，Off 回到纯静态视图。
@@ -844,19 +890,6 @@ namespace
             r,
             base != 0 && d1 != 0 && d2 != 0,
             "demo3 symbols present");
-        const auto entry_for =
-            [](const cg::graph::NeighborsResult& result,
-               cg::db::SymId id) -> const cg::graph::NeighborEntry*
-        {
-            for (const auto& entry : result.entries)
-            {
-                if (entry.id == id)
-                {
-                    return &entry;
-                }
-            }
-            return nullptr;
-        };
         const cg::db::SymId use = symbol_id(store, "use");
         cg::test::check(r, use != 0, "use symbol present");
 
@@ -866,7 +899,7 @@ namespace
         {
             const cg::graph::NeighborsResult precise =
                 cg::graph::callers(store, impl, 1);
-            const auto* e = entry_for(precise, use);
+            const auto* e = neighbor_by_id(precise, use);
             cg::test::check(
                 r,
                 e != nullptr
@@ -882,7 +915,7 @@ namespace
                 cg::graph::DispatchMode::Off);
             // Off 是家族合并的保守上界：use 仍会经 Base 的静态调用出现，
             // 但没有派发证据，状态必须是 none。
-            const auto* off_entry = entry_for(off, use);
+            const auto* off_entry = neighbor_by_id(off, use);
             cg::test::check(
                 r,
                 off_entry != nullptr
@@ -896,7 +929,7 @@ namespace
         // 不携带派发证据（不是 inferred）。
         const cg::graph::NeighborsResult base_callers =
             cg::graph::callers(store, base, 1);
-        const auto* base_entry = entry_for(base_callers, use);
+        const auto* base_entry = neighbor_by_id(base_callers, use);
         cg::test::check(
             r,
             base_entry != nullptr
@@ -994,38 +1027,41 @@ namespace
             "precise changes finds the dispatch caller at depth 1");
     }
 
+    /** demo3 三符号两深邻居走查的规范化转储。 */
+    [[nodiscard]]
+    auto demo3_walk_dump(cg::db::GraphStore& store) -> std::string
+    {
+        std::string out;
+        for (const cg::db::SymId id :
+             {symbol_id(store, "Base::f"),
+              symbol_id(store, "D1::f"),
+              symbol_id(store, "D2::f")})
+        {
+            const cg::graph::NeighborsResult res =
+                cg::graph::callers(store, id, 2);
+            for (const auto& e : res.entries)
+            {
+                out += std::format(
+                    "{}|{}|{}|{}|{:.2f}|{}\n",
+                    id,
+                    e.id,
+                    e.depth,
+                    static_cast<int>(e.dispatch_status),
+                    e.dispatch_confidence,
+                    e.family_origin);
+            }
+        }
+        return out;
+    }
+
     /** @brief 同一语料两次默认查询逐字段一致（状态与置信度确定）。 */
     void precise_dispatch_deterministic(R& r)
     {
         db::GraphStore store{":memory:"};
         (void)index_fixture(store, "demo3");
-        const auto dump = [&store]()
-        {
-            std::string out;
-            for (const cg::db::SymId id :
-                 {symbol_id(store, "Base::f"),
-                  symbol_id(store, "D1::f"),
-                  symbol_id(store, "D2::f")})
-            {
-                const cg::graph::NeighborsResult res =
-                    cg::graph::callers(store, id, 2);
-                for (const auto& e : res.entries)
-                {
-                    out += std::format(
-                        "{}|{}|{}|{}|{:.2f}|{}\n",
-                        id,
-                        e.id,
-                        e.depth,
-                        static_cast<int>(e.dispatch_status),
-                        e.dispatch_confidence,
-                        e.family_origin);
-                }
-            }
-            return out;
-        };
         cg::test::check(
             r,
-            dump() == dump(),
+            demo3_walk_dump(store) == demo3_walk_dump(store),
             "two precise walks are byte-identical");
     }
 
@@ -1077,6 +1113,23 @@ namespace
             "function-pointer calls never fabricate dispatch edges");
     }
 
+    /** 指定调用者的全部调用点行。 */
+    [[nodiscard]]
+    auto call_site_rows_of(cg::db::GraphStore& store, std::string_view caller)
+        -> std::vector<cg::db::CallSiteRow>
+    {
+        std::vector<cg::db::CallSiteRow> out;
+        for (const cg::db::CallSiteRow& row : store.all_call_sites())
+        {
+            const auto c = cg::db::get_symbol(store, row.caller_id);
+            if (c && c->qualified_name == caller)
+            {
+                out.push_back(row);
+            }
+        }
+        return out;
+    }
+
     /**
      * @brief 被调用表达式本身是调用（容器下标 / 嵌套调用）时必须留间接行。
      *
@@ -1088,24 +1141,12 @@ namespace
     {
         db::GraphStore store{":memory:"};
         (void)index_fixture(store, "fptr_container");
-        const auto rows_for = [&](std::string_view caller)
-        {
-            std::vector<cg::db::CallSiteRow> out;
-            for (const cg::db::CallSiteRow& row : store.all_call_sites())
-            {
-                const auto c = cg::db::get_symbol(store, row.caller_id);
-                if (c && c->qualified_name == caller)
-                {
-                    out.push_back(row);
-                }
-            }
-            return out;
-        };
         for (const std::string_view caller :
              {"use_array", "use_vector", "use_nested"})
         {
             std::size_t indirect = 0;
-            for (const cg::db::CallSiteRow& row : rows_for(caller))
+            for (const cg::db::CallSiteRow& row :
+                 call_site_rows_of(store, caller))
             {
                 if (!row.indirect)
                 {
@@ -1124,7 +1165,8 @@ namespace
                 "nested callee leaves exactly one indirect row");
         }
         bool direct_get = false;
-        for (const cg::db::CallSiteRow& row : rows_for("use_nested"))
+        for (const cg::db::CallSiteRow& row :
+             call_site_rows_of(store, "use_nested"))
         {
             if (!row.indirect && row.callee_name == "get")
             {
@@ -1135,7 +1177,8 @@ namespace
             r,
             direct_get,
             "inner get() keeps its own direct call_sites row");
-        for (const cg::db::CallSiteRow& row : rows_for("use_operator"))
+        for (const cg::db::CallSiteRow& row :
+             call_site_rows_of(store, "use_operator"))
         {
             cg::test::check(
                 r,
@@ -1235,7 +1278,8 @@ namespace
         for (const std::string_view caller :
              {"reinterpret_claim", "static_claim", "cstyle_claim"})
         {
-            const DEdge* e = find_edge(edges, caller, "SwigDirector_IFace::emit");
+            const DEdge* e =
+                find_edge(edges, caller, "SwigDirector_IFace::emit");
             cg::test::check(
                 r,
                 e != nullptr,
@@ -1280,8 +1324,7 @@ namespace
         bool fanin_polluted = false;
         for (const DEdge& e : edges)
         {
-            if (e.src_name == "fanin_guard"
-                && e.dst_name == "PortB::open")
+            if (e.src_name == "fanin_guard" && e.dst_name == "PortB::open")
             {
                 fanin_polluted = true;
             }
@@ -1786,14 +1829,8 @@ namespace
                 cg::analysis::run(store, oracle);
             const cg::analysis::DispatchResult dispatch =
                 cg::analysis::resolve(store, state);
-            const cg::analysis::ResolvedCallSite* union_site = nullptr;
-            for (const cg::analysis::ResolvedCallSite& s : dispatch.sites)
-            {
-                if (s.site_id == union_row->id)
-                {
-                    union_site = &s;
-                }
-            }
+            const cg::analysis::ResolvedCallSite* union_site =
+                resolved_site_of(dispatch, union_row->id);
             cg::test::check(
                 r,
                 union_site != nullptr,
@@ -1938,14 +1975,8 @@ namespace
             cg::analysis::run(store, oracle);
         const cg::analysis::DispatchResult dispatch =
             cg::analysis::resolve(store, state);
-        const cg::analysis::ResolvedCallSite* site = nullptr;
-        for (const cg::analysis::ResolvedCallSite& s : dispatch.sites)
-        {
-            if (s.site_id == row->id)
-            {
-                site = &s;
-            }
-        }
+        const cg::analysis::ResolvedCallSite* site =
+            resolved_site_of(dispatch, row->id);
         cg::test::check(
             r,
             site != nullptr,
@@ -2202,6 +2233,22 @@ namespace
 
     } // namespace criteria_detail
 
+    /** 断言名字恰有一个类模板并取它（空结果给空游标）。 */
+    [[nodiscard]]
+    auto sole_class_template(
+        R&                   r,
+        const cg::clang::Tu& tu,
+        std::string_view     name) -> CXCursor
+    {
+        const std::vector<CXCursor> found =
+            criteria_detail::class_templates_named(tu, name);
+        cg::test::check(
+            r,
+            found.size() == 1,
+            std::string{name} + " has exactly one template");
+        return found.empty() ? CXCursor{} : found.front();
+    }
+
     /** @brief 出参包装判据：正例命中带槽位映射，对抗形态与 libc++ 全拒。 */
     void outparam_wrapper_criterion(R& r)
     {
@@ -2215,19 +2262,9 @@ namespace
             parsed.tu.valid() && parsed.errors.empty(),
             "heuristics fixture parses clean");
         using cg::analysis::collect_detail::Walker;
-        const auto only = [&](std::string_view name) -> CXCursor
-        {
-            const std::vector<CXCursor> found =
-                criteria_detail::class_templates_named(parsed.tu, name);
-            cg::test::check(
-                r,
-                found.size() == 1,
-                std::string{name} + " has exactly one template");
-            return found.empty() ? CXCursor{} : found.front();
-        };
 
-        const auto hit =
-            Walker::is_outparam_wrapper_class(only("HeurOutParam"));
+        const auto hit = Walker::is_outparam_wrapper_class(
+            sole_class_template(r, parsed.tu, "HeurOutParam"));
         cg::test::check(
             r,
             hit.has_value(),
@@ -2240,8 +2277,8 @@ namespace
                     && hit->field == "pp_out_" && hit->writeback == "Set",
                 "hit reports the slot mapping (index/pos/field/method)");
         }
-        const auto writer =
-            Walker::is_outparam_wrapper_class(only("HeurSlotWriter"));
+        const auto writer = Walker::is_outparam_wrapper_class(
+            sole_class_template(r, parsed.tu, "HeurSlotWriter"));
         cg::test::check(
             r,
             writer.has_value() && writer->field == "slot_"
@@ -2297,6 +2334,86 @@ namespace
         }
     }
 
+    /** 取址方法判据的单点判定（类模板名 + 方法名）。 */
+    [[nodiscard]]
+    auto addressof_verdict(
+        R&                   r,
+        const cg::clang::Tu& tu,
+        std::string_view     cls,
+        std::string_view     method)
+    {
+        return cg::analysis::collect_detail::Walker::is_addressof_method(
+            criteria_detail::member_of(
+                sole_class_template(r, tu, cls),
+                method));
+    }
+
+    /** 断言取址方法判据落在 tie 档。 */
+    void expect_addressof_tie(
+        R&                   r,
+        const cg::clang::Tu& tu,
+        const char*          cls,
+        const char*          m)
+    {
+        const auto v = addressof_verdict(r, tu, cls, m);
+        cg::test::check(
+            r,
+            v.has_value()
+                && v->chain
+                       == cg::analysis::collect_detail::AddressofChain::Tie,
+            std::string{cls} + "::" + m
+                + " passes C1-C4 and ties on the arrow slot");
+    }
+
+    /** 断言取址方法判据落在拒档。 */
+    void expect_addressof_reject(
+        R&                   r,
+        const cg::clang::Tu& tu,
+        const char*          cls,
+        const char*          m)
+    {
+        const auto v = addressof_verdict(r, tu, cls, m);
+        cg::test::check(
+            r,
+            v.has_value()
+                && v->chain
+                       == cg::analysis::collect_detail::AddressofChain::Reject,
+            std::string{cls} + "::" + m
+                + " is rejected by the member-chain compare");
+    }
+
+    /** 断言取址方法判据落在存疑降级档。 */
+    void expect_addressof_degrade(
+        R&                   r,
+        const cg::clang::Tu& tu,
+        const char*          cls,
+        const char*          m)
+    {
+        const auto v = addressof_verdict(r, tu, cls, m);
+        cg::test::check(
+            r,
+            v.has_value()
+                && v->chain
+                       == cg::analysis::collect_detail::AddressofChain::
+                           Uncertain,
+            std::string{cls} + "::" + m
+                + " degrades to uncertain (never a tie)");
+    }
+
+    /** 断言取址方法判据四条件不合取（无判定）。 */
+    void expect_addressof_inactive(
+        R&                   r,
+        const cg::clang::Tu& tu,
+        const char*          cls,
+        const char*          m)
+    {
+        const auto v = addressof_verdict(r, tu, cls, m);
+        cg::test::check(
+            r,
+            !v.has_value(),
+            std::string{cls} + "::" + m + " fails C1-C4");
+    }
+
     /** @brief 取址方法判据：四条件合取 + 成员链比对三态。 */
     void addressof_method_criterion(R& r)
     {
@@ -2309,79 +2426,40 @@ namespace
             r,
             parsed.tu.valid() && parsed.errors.empty(),
             "heuristics fixture parses clean");
-        using cg::analysis::collect_detail::AddressofChain;
-        using cg::analysis::collect_detail::Walker;
-        const auto only = [&](std::string_view name) -> CXCursor
-        {
-            const std::vector<CXCursor> found =
-                criteria_detail::class_templates_named(parsed.tu, name);
-            cg::test::check(
-                r,
-                found.size() == 1,
-                std::string{name} + " has exactly one template");
-            return found.empty() ? CXCursor{} : found.front();
-        };
-        const auto verdict = [&](std::string_view cls, std::string_view method)
-        {
-            return Walker::is_addressof_method(
-                criteria_detail::member_of(only(cls), method));
-        };
-        const auto tie = [&](const char* cls, const char* m)
-        {
-            const auto v = verdict(cls, m);
-            cg::test::check(
-                r,
-                v.has_value() && v->chain == AddressofChain::Tie,
-                std::string{cls} + "::" + m
-                    + " passes C1-C4 and ties on the arrow slot");
-        };
-        const auto reject = [&](const char* cls, const char* m)
-        {
-            const auto v = verdict(cls, m);
-            cg::test::check(
-                r,
-                v.has_value() && v->chain == AddressofChain::Reject,
-                std::string{cls} + "::" + m
-                    + " is rejected by the member-chain compare");
-        };
-        const auto degrade = [&](const char* cls, const char* m)
-        {
-            const auto v = verdict(cls, m);
-            cg::test::check(
-                r,
-                v.has_value() && v->chain == AddressofChain::Uncertain,
-                std::string{cls} + "::" + m
-                    + " degrades to uncertain (never a tie)");
-        };
-        const auto inactive = [&](const char* cls, const char* m)
-        {
-            const auto v = verdict(cls, m);
-            cg::test::check(
-                r,
-                !v.has_value(),
-                std::string{cls} + "::" + m + " fails C1-C4");
-        };
 
         // 真取址形态（SamplePtr::Put）：同槽 tie，typedef 返回同槽也 tie。
-        tie("SlotPtr", "put");
-        tie("Cache", "slot");
-        tie("Cache", "alias_slot");
+        expect_addressof_tie(r, parsed.tu, "SlotPtr", "put");
+        expect_addressof_tie(r, parsed.tu, "Cache", "slot");
+        expect_addressof_tie(r, parsed.tu, "Cache", "alias_slot");
         // 成员链比对拒：指向别处的可解析异槽。
-        reject("Cache", "spare");    // 内部数组 spare_ 对箭头槽 cur_
-        reject("TwoSlot", "put");    // 同声明异实例：链基段 a_ 对 b_
-        reject("StaticSlot", "put"); // 静态成员槽 &g_（VarDecl 对 FieldDecl）
+        // 内部数组 spare_ 对箭头槽 cur_
+        expect_addressof_reject(r, parsed.tu, "Cache", "spare");
+        // 同声明异实例：链基段 a_ 对 b_
+        expect_addressof_reject(r, parsed.tu, "TwoSlot", "put");
+        // 静态成员槽 &g_（VarDecl 对 FieldDecl）
+        expect_addressof_reject(r, parsed.tu, "StaticSlot", "put");
         // 成员链比对降级：解析失败（漏收方向，安全）。
-        degrade("SameChain", "put");   // 伪 tie 守卫：两侧 InvalidFile 不判 tie
-        degrade("PtrIndirect", "put"); // 经指针间接（s_->cur_ 的隐式解引用）
-        degrade("ArrSlot", "put");     // 数组下标槽
-        degrade("NoBody", "put");      // 无体
-        degrade("MultiRet", "put");    // 多 return 无单一链
-        degrade("ForwardPut", "put");  // 转发调用（b_.grab()）
+        // 伪 tie 守卫：两侧 InvalidFile 不判 tie
+        expect_addressof_degrade(r, parsed.tu, "SameChain", "put");
+        // 经指针间接（s_->cur_ 的隐式解引用）
+        expect_addressof_degrade(r, parsed.tu, "PtrIndirect", "put");
+        // 数组下标槽
+        expect_addressof_degrade(r, parsed.tu, "ArrSlot", "put");
+        // 无体
+        expect_addressof_degrade(r, parsed.tu, "NoBody", "put");
+        // 多 return 无单一链
+        expect_addressof_degrade(r, parsed.tu, "MultiRet", "put");
+        // 转发调用（b_.grab()）
+        expect_addressof_degrade(r, parsed.tu, "ForwardPut", "put");
         // 四条件各拒收面。
-        inactive("Q", "probe_out");      // 成员模板重编号撞拼写
-        inactive("ConstArrow", "put");   // const 箭头拼写不等
-        inactive("VoidPut", "put_void"); // void** inner 非 TP
-        inactive("HeurOutParam", "Put"); // 单指针返回（Get 形态）
+        // 成员模板重编号撞拼写
+        expect_addressof_inactive(r, parsed.tu, "Q", "probe_out");
+        // const 箭头拼写不等
+        expect_addressof_inactive(r, parsed.tu, "ConstArrow", "put");
+        // void** inner 非 TP
+        expect_addressof_inactive(r, parsed.tu, "VoidPut", "put_void");
+        // 单指针返回（Get 形态）
+        expect_addressof_inactive(r, parsed.tu, "HeurOutParam", "Put");
         // 非模板指针式类（无 type-parameter 标记）。
         const std::vector<CXCursor> conc =
             criteria_detail::records_named(parsed.tu, "ConcPtr");
@@ -2390,7 +2468,7 @@ namespace
         {
             cg::test::check(
                 r,
-                !Walker::is_addressof_method(
+                !cg::analysis::collect_detail::Walker::is_addressof_method(
                      criteria_detail::member_of(c, "put"))
                      .has_value(),
                 "non-template pointer-style class fails C2");
@@ -2412,7 +2490,9 @@ namespace
                 saw_smart_arrow = true;
                 cg::test::check(
                     r,
-                    !Walker::is_addressof_method(arrow).has_value(),
+                    !cg::analysis::collect_detail::Walker::is_addressof_method(
+                         arrow)
+                         .has_value(),
                     std::string{"std::"} + smart
                         + "::operator-> is not an address-of method");
             }
@@ -2523,19 +2603,24 @@ namespace
      * "#addr" 保留槽名（propagate 按槽名跳过）；&obj 对象取址行
      * related_key 恒空，天然不与 #addr 行混淆。
      */
+    /** 库内限定名的首匹配 unique_key（无匹配给空）。 */
+    [[nodiscard]]
+    auto unique_key_of(cg::db::GraphStore& store, std::string_view qualified)
+        -> std::string
+    {
+        const auto found = cg::db::find_symbols(store, qualified, {});
+        return found.matches.empty() ? std::string{}
+                                     : found.matches.front().unique_key;
+    }
+
     void addr_taken_evidence(R& r)
     {
         db::GraphStore store{":memory:"};
         (void)index_fixture(store, "addr_taken");
 
-        const auto key_of = [&](std::string_view qualified)
-        {
-            const auto found = cg::db::find_symbols(store, qualified, {});
-            return found.matches.empty() ? std::string{}
-                                         : found.matches.front().unique_key;
-        };
-        const std::string method_key = key_of("Handler::on_event");
-        const std::string fn_key = key_of("free_step");
+        const std::string method_key =
+            unique_key_of(store, "Handler::on_event");
+        const std::string fn_key = unique_key_of(store, "free_step");
         cg::test::check(
             r,
             !method_key.empty(),
@@ -2693,6 +2778,15 @@ namespace
      *        不发边、hit==0 索引外标注保全家族、非边界接口零污染
      *        （可达性绝不抬升站点置信——全库零推断边）。
      */
+    /** 接口的 #external 行失败原因（无行给空）。 */
+    [[nodiscard]]
+    auto external_reason_of(cg::db::GraphStore& store, std::string_view iface)
+        -> std::string
+    {
+        const auto row = external_row_of(store, iface);
+        return row.has_value() ? row->fallback_reason : std::string{};
+    }
+
     void external_rta_boundaries(R& r)
     {
         db::GraphStore store{":memory:"};
@@ -2703,34 +2797,29 @@ namespace
             sum.external_rta_hints == 3,
             "external scan writes exactly three #external rows");
 
-        const auto reason = [&](std::string_view iface) -> std::string
-        {
-            const auto row = external_row_of(store, iface);
-            return row.has_value() ? row->fallback_reason : std::string{};
-        };
         cg::test::check(
             r,
-            reason("IExt") == "dlopen_boundary",
+            external_reason_of(store, "IExt") == "dlopen_boundary",
             "loader-chain interface marked dlopen_boundary");
         cg::test::check(
             r,
-            reason("IPlain") == "director",
+            external_reason_of(store, "IPlain") == "director",
             "director interface without instantiations still marked");
         cg::test::check(
             r,
-            reason("IDir") == "director",
+            external_reason_of(store, "IDir") == "director",
             "SwigDirector_* base interface marked director");
         cg::test::check(
             r,
-            reason("IReg").empty(),
+            external_reason_of(store, "IReg").empty(),
             "register* heuristic removed: no boundary row");
         cg::test::check(
             r,
-            reason("INoSig").empty(),
+            external_reason_of(store, "INoSig").empty(),
             "unsigned loader cast emits no row (chain broken)");
         cg::test::check(
             r,
-            reason("INeg").empty(),
+            external_reason_of(store, "INeg").empty(),
             "non-boundary interface gets no #external row");
 
         const auto anchored = external_row_of(store, "IExt");
@@ -3220,6 +3309,41 @@ const cg::test::Registrar reg_container_elem{
 
 // ------------------------------------------------ 槽位基础设施 (v13) ------
 
+/** 转发包装登记表里是否有（包装键子串, getter 名, 实参位）行。 */
+[[nodiscard]]
+auto registry_has(
+    const std::vector<cg::db::PassthroughWrapperRow>& rows,
+    std::string_view                                  wrapper,
+    std::string_view                                  getter,
+    int                                               arg) -> bool
+{
+    for (const auto& w : rows)
+    {
+        if (w.wrapper_key.find(wrapper) != std::string::npos
+            && w.getter_name == getter && w.arg_index == arg)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** 转发包装登记表里是否完全没有该包装键的行。 */
+[[nodiscard]]
+auto registry_absent(
+    const std::vector<cg::db::PassthroughWrapperRow>& rows,
+    std::string_view                                  wrapper) -> bool
+{
+    for (const auto& w : rows)
+    {
+        if (w.wrapper_key.find(wrapper) != std::string::npos)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 void passthrough_registry(R& r)
 {
     db::GraphStore store{":memory:"};
@@ -3227,58 +3351,42 @@ void passthrough_registry(R& r)
     const std::vector<cg::db::PassthroughWrapperRow> rows =
         store.all_passthrough_wrappers();
 
-    const auto has =
-        [&](std::string_view wrapper, std::string_view getter, int arg)
-    {
-        for (const auto& w : rows)
-        {
-            if (w.wrapper_key.find(wrapper) != std::string::npos
-                && w.getter_name == getter && w.arg_index == arg)
-            {
-                return true;
-            }
-        }
-        return false;
-    };
-    const auto absent = [&](std::string_view wrapper)
-    {
-        for (const auto& w : rows)
-        {
-            if (w.wrapper_key.find(wrapper) != std::string::npos)
-            {
-                return false;
-            }
-        }
-        return true;
-    };
-
     cg::test::check(
         r,
-        has("WrapAtomic", "load", 0),
+        registry_has(rows, "WrapAtomic", "load", 0),
         "value-form getter (atomic::load shape)");
     cg::test::check(
         r,
-        has("WrapOpt", "value", 0),
+        registry_has(rows, "WrapOpt", "value", 0),
         "value-form getter (optional::value shape)");
     cg::test::check(
         r,
-        has("WrapPtr", "get", 0),
+        registry_has(rows, "WrapPtr", "get", 0),
         "pointer-form getter (shared_ptr::get shape)");
     cg::test::check(
         r,
-        has("WrapDeref", "operator->", 0),
+        registry_has(rows, "WrapDeref", "operator->", 0),
         "operator-> getter (SamplePtr shape)");
     cg::test::check(
         r,
-        has("WrapDeref", "get", 0),
+        registry_has(rows, "WrapDeref", "get", 0),
         "dual getter registers both entries");
     cg::test::check(
         r,
-        has("WrapTwo", "pick", 1),
+        registry_has(rows, "WrapTwo", "pick", 1),
         "second own parameter indexed");
-    cg::test::check(r, absent("NotTemplate"), "non-template rejected");
-    cg::test::check(r, absent("NoGetter"), "non-parameter return rejected");
-    cg::test::check(r, absent("WithArgs"), "parameterized getter rejected");
+    cg::test::check(
+        r,
+        registry_absent(rows, "NotTemplate"),
+        "non-template rejected");
+    cg::test::check(
+        r,
+        registry_absent(rows, "NoGetter"),
+        "non-parameter return rejected");
+    cg::test::check(
+        r,
+        registry_absent(rows, "WithArgs"),
+        "parameterized getter rejected");
 }
 
 void slot_target_cap_bounds(R& r)
@@ -3360,49 +3468,80 @@ const cg::test::Registrar reg_passthrough_registry{
 
 // ------------------------------------------------ 透传壳闸 ----------------
 
+/** 断言 (caller, dst) 推断边在场且置信度恰等（返回边指针）。 */
+const DEdge* expect_conf_edge(
+    R&                        r,
+    const std::vector<DEdge>& edges,
+    std::string_view          caller,
+    std::string_view          dst,
+    double                    want,
+    std::string_view          label)
+{
+    const DEdge* e = find_edge(edges, caller, dst);
+    cg::test::check(r, e != nullptr, "edge exists");
+    cg::test::check(r, e != nullptr && e->confidence == want, label);
+    return e;
+}
+
+/** 断言推断边在场且置信度恰等（在场与置信共用同一标签）。 */
+void expect_conf_edge_labeled(
+    R&                        r,
+    const std::vector<DEdge>& edges,
+    std::string_view          caller,
+    std::string_view          dst,
+    double                    want,
+    std::string_view          label)
+{
+    const DEdge* e = find_edge(edges, caller, dst);
+    cg::test::check(r, e != nullptr, label);
+    cg::test::check(r, e != nullptr && e->confidence == want, label);
+}
+
 /** @brief 断链 1-4 六形态：透传壳闸消费接线后的推断边。 */
 void passthrough_gate_consumption(R& r)
 {
     db::GraphStore store{":memory:"};
     (void)index_fixture(store, "ptgate");
     const std::vector<DEdge> edges = dispatch_edges(store);
-    const auto               conf_edge = [&](std::string_view caller,
-                                             std::string_view dst,
-                                             double           want,
-                                             std::string_view label)
-    {
-        const DEdge* e = find_edge(edges, caller, dst);
-        cg::test::check(r, e != nullptr, "edge exists");
-        cg::test::check(r, e != nullptr && e->confidence == want, label);
-        return e;
-    };
     // 壳字段站点（use()）的边归属方法而非驱动函数：caller 是 use。
-    conf_edge(
+    expect_conf_edge(
+        r,
+        edges,
         "HolderCtor::use",
         "ImplA::virt",
         0.7,
         "ctor-init penetration is medium (0.7)");
-    conf_edge(
+    expect_conf_edge(
+        r,
+        edges,
         "assign_penetration",
         "ImplA::virt",
         0.7,
         "operator=(T*) store penetration is medium (0.7)");
-    conf_edge(
+    expect_conf_edge(
+        r,
+        edges,
         "HolderMove::use",
         "ImplB::virt",
         0.7,
         "shell move transport is medium (0.7)");
-    conf_edge(
+    expect_conf_edge(
+        r,
+        edges,
         "getter_chain_receiver",
         "ImplA::virt",
         1.0,
         "chained getter receiver keeps DirectNew grade (1.0)");
-    conf_edge(
+    expect_conf_edge(
+        r,
+        edges,
         "getter_value_slot",
         "ImplA::virt",
         0.7,
         "getter value slot alias is medium (0.7)");
-    conf_edge(
+    expect_conf_edge(
+        r,
+        edges,
         "plain_getter_chain",
         "ImplB::virt",
         0.7,
@@ -3622,37 +3761,97 @@ auto has_indirect_edge(
     return false;
 }
 
+/** extends 对里是否有（源子串, 目标子串）都命中的边。 */
+[[nodiscard]]
+auto extends_has_edge(
+    const std::vector<std::tuple<std::string, std::string, std::uint32_t>>&
+                     pairs,
+    std::string_view src,
+    std::string_view dst_frag) -> bool
+{
+    for (const auto& [s, d, a] : pairs)
+    {
+        if (s.find(src) != std::string::npos
+            && d.find(dst_frag) != std::string::npos)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** 精确解析唯一符号号（非唯一或缺失给 0；短路档不并低层）。 */
+[[nodiscard]]
+auto exact_symbol_id(cg::db::GraphStore& store, std::string_view q)
+    -> cg::db::SymId
+{
+    const db::FindResult fr = db::find_symbols(
+        store,
+        q,
+        db::SymbolFilter{},
+        /*merge_lower_tiers=*/false);
+    return fr.matches.size() == 1 ? fr.matches.front().id : cg::db::SymId{0};
+}
+
+/** 名字集合里是否有含给定子串的元素。 */
+[[nodiscard]]
+auto name_set_contains(
+    const std::set<std::string>& names,
+    std::string_view             frag) -> bool
+{
+    for (const std::string& t : names)
+    {
+        if (t.find(frag) != std::string::npos)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** 层级摘要与三族层级边计数的读出结果。 */
+struct HierarchyDigest
+{
+    std::optional<std::string> digest;
+    std::int64_t               extends_n = 0;
+    std::int64_t               overrides_n = 0;
+    std::int64_t               specializes_n = 0;
+};
+
+/** 读层级摘要与三族层级边计数。 */
+[[nodiscard]]
+auto digest_and_edge_counts(db::GraphStore& store) -> HierarchyDigest
+{
+    HierarchyDigest snap;
+    snap.digest = store.meta("analysis_hierarchy_digest");
+    const db::Stats st = db::stats(store);
+    snap.extends_n =
+        st.edges_by_type[static_cast<std::size_t>(db::EdgeType::Extends)];
+    snap.overrides_n =
+        st.edges_by_type[static_cast<std::size_t>(db::EdgeType::Overrides)];
+    snap.specializes_n =
+        st.edges_by_type[static_cast<std::size_t>(db::EdgeType::Specializes)];
+    return snap;
+}
+
 void tmpl_inherit_edges(R& r)
 {
     db::GraphStore store{":memory:"};
     (void)index_fixture(store, "tmpl_inherit");
     const auto pairs = extends_pairs(store);
 
-    const auto has_edge = [&](std::string_view src, std::string_view dst_frag)
-    {
-        for (const auto& [s, d, a] : pairs)
-        {
-            if (s.find(src) != std::string::npos
-                && d.find(dst_frag) != std::string::npos)
-            {
-                return true;
-            }
-        }
-        return false;
-    };
-
     // 三形态：extends 直指实例（不再折叠回主模板）。
     cg::test::check(
         r,
-        has_edge("|Derived", "Base<Derived>"),
+        extends_has_edge(pairs, "|Derived", "Base<Derived>"),
         "CRTP extends points at specialization");
     cg::test::check(
         r,
-        has_edge("|UsesSpec", "Multi<int>"),
+        extends_has_edge(pairs, "|UsesSpec", "Multi<int>"),
         "explicit specialization base");
     cg::test::check(
         r,
-        has_edge("|User", "traits<"),
+        extends_has_edge(pairs, "|User", "traits<"),
         "partial specialization instance base");
     // dependent 基类：指主模板本尊 + is_template_base 位（0x08）。
     bool dependent_ok = false;
@@ -3671,7 +3870,7 @@ void tmpl_inherit_edges(R& r)
     // 非模板基红线：Plain 继承不受影响。
     cg::test::check(
         r,
-        has_edge("|P2", "|Plain|"),
+        extends_has_edge(pairs, "|P2", "|Plain|"),
         "non-template base unchanged");
     // 实例符号登记：隐式实例（使用点）与显式全特化（声明处）都在。
     bool has_crtp_sym = false;
@@ -3750,27 +3949,8 @@ void spec_digest_flip(R& r)
                "}\n]\n";
     }
 
-    const auto digest_and_edges = [](db::GraphStore&             store,
-                                     std::optional<std::string>& digest,
-                                     std::int64_t&               extends_n,
-                                     std::int64_t&               overrides_n,
-                                     std::int64_t&               specializes_n)
-    {
-        digest = store.meta("analysis_hierarchy_digest");
-        const db::Stats st = db::stats(store);
-        extends_n =
-            st.edges_by_type[static_cast<std::size_t>(db::EdgeType::Extends)];
-        overrides_n =
-            st.edges_by_type[static_cast<std::size_t>(db::EdgeType::Overrides)];
-        specializes_n = st.edges_by_type[static_cast<std::size_t>(
-            db::EdgeType::Specializes)];
-    };
-
     const std::filesystem::path db_file = scratch.base / "spec.db";
-    std::optional<std::string>  digest_full;
-    std::int64_t                extends_full = 0;
-    std::int64_t                overrides_full = 0;
-    std::int64_t                specializes_full = 0;
+    HierarchyDigest             snap_full;
     {
         db::GraphStore          store{db_file.string()};
         cg::graph::IndexOptions opt;
@@ -3785,19 +3965,14 @@ void spec_digest_flip(R& r)
             r,
             first.mode == "full" && first.failed == 0,
             "spec-digest-flip baseline indexes full and clean");
-        digest_and_edges(
-            store,
-            digest_full,
-            extends_full,
-            overrides_full,
-            specializes_full);
+        snap_full = digest_and_edge_counts(store);
         cg::test::check(
             r,
-            digest_full.has_value() && specializes_full > 0,
+            snap_full.digest.has_value() && snap_full.specializes_n > 0,
             std::format(
                 "baseline digest present and specialization edge emitted "
                 "(specializes {})",
-                specializes_full));
+                snap_full.specializes_n));
     }
 
     // 编辑：追加一个显式全特化（Box<char> 无基类——extends/overrides 边
@@ -3811,10 +3986,7 @@ void spec_digest_flip(R& r)
                 " return box.describe();\n}\n}  // namespace\n";
     }
 
-    std::optional<std::string> digest_inc;
-    std::int64_t               extends_inc = 0;
-    std::int64_t               overrides_inc = 0;
-    std::int64_t               specializes_inc = 0;
+    HierarchyDigest snap_inc;
     {
         db::GraphStore          store{db_file.string()};
         cg::graph::IndexOptions opt;
@@ -3834,36 +4006,32 @@ void spec_digest_flip(R& r)
                 "(mode {}, failed {})",
                 second.mode,
                 second.failed));
-        digest_and_edges(
-            store,
-            digest_inc,
-            extends_inc,
-            overrides_inc,
-            specializes_inc);
+        snap_inc = digest_and_edge_counts(store);
     }
 
     // 语料形态自证：extends/overrides 边集逐数不变、特化边净增。
     cg::test::check(
         r,
-        extends_inc == extends_full && overrides_inc == overrides_full,
+        snap_inc.extends_n == snap_full.extends_n
+            && snap_inc.overrides_n == snap_full.overrides_n,
         std::format(
             "edit keeps extends/overrides counts ({}/{} -> {}/{})",
-            extends_full,
-            overrides_full,
-            extends_inc,
-            overrides_inc));
+            snap_full.extends_n,
+            snap_full.overrides_n,
+            snap_inc.extends_n,
+            snap_inc.overrides_n));
     cg::test::check(
         r,
-        specializes_inc > specializes_full,
+        snap_inc.specializes_n > snap_full.specializes_n,
         std::format(
             "edit adds a net specialization edge ({} -> {})",
-            specializes_full,
-            specializes_inc));
+            snap_full.specializes_n,
+            snap_inc.specializes_n));
     // 红绿核心：特化净变且 extends/overrides 不变时摘要必须翻转。
     cg::test::check(
         r,
-        digest_full.has_value() && digest_inc.has_value()
-            && *digest_full != *digest_inc,
+        snap_full.digest.has_value() && snap_inc.digest.has_value()
+            && *snap_full.digest != *snap_inc.digest,
         "hierarchy digest flips on net specialization change");
 }
 
@@ -3892,31 +4060,29 @@ void callback_reg_edges(R& r)
             }
         }
     }
-    const auto registered = [&](std::string_view name)
-    {
-        for (const std::string& t : targets)
-        {
-            if (t.find(name) != std::string::npos)
-            {
-                return true;
-            }
-        }
-        return false;
-    };
     cg::test::check(
         r,
-        registered("|begin_fn"),
+        name_set_contains(targets, "|begin_fn"),
         "_beginthread slot 1 addr-of target");
     cg::test::check(
         r,
-        registered("|thread_fn"),
+        name_set_contains(targets, "|thread_fn"),
         "_beginthreadex/CreateThread slot 3 implicit target");
-    cg::test::check(r, registered("|cmp"), "qsort slot 4 target");
-    cg::test::check(r, registered("|enum_fn"), "EnumWindows slot 1");
-    cg::test::check(r, registered("|hook_fn"), "SetWindowsHookExW slot 2");
     cg::test::check(
         r,
-        !registered("|unused_cb"),
+        name_set_contains(targets, "|cmp"),
+        "qsort slot 4 target");
+    cg::test::check(
+        r,
+        name_set_contains(targets, "|enum_fn"),
+        "EnumWindows slot 1");
+    cg::test::check(
+        r,
+        name_set_contains(targets, "|hook_fn"),
+        "SetWindowsHookExW slot 2");
+    cg::test::check(
+        r,
+        !name_set_contains(targets, "|unused_cb"),
         "non-list API gets no contract edge");
     cg::test::check(
         r,
@@ -4116,18 +4282,8 @@ void overload_arg_dep_resolution(R& r)
         r,
         plain.has_value() && tmpl.has_value(),
         "one plain + one template overload");
-    const auto sym_of = [&](std::string_view q) -> cg::db::SymId
-    {
-        const db::FindResult fr = db::find_symbols(
-            store,
-            q,
-            db::SymbolFilter{},
-            /*merge_lower_tiers=*/false);
-        return fr.matches.size() == 1 ? fr.matches.front().id
-                                      : cg::db::SymId{0};
-    };
-    const cg::db::SymId host_t = sym_of("host_t");
-    const cg::db::SymId host_c = sym_of("host_c");
+    const cg::db::SymId host_t = exact_symbol_id(store, "host_t");
+    const cg::db::SymId host_c = exact_symbol_id(store, "host_c");
     cg::test::check(r, host_t != 0 && host_c != 0, "both hosts are symbols");
     if (host_t && host_c && plain && tmpl)
     {
@@ -4784,14 +4940,8 @@ void dispatch_static_face_reads_static_column(R& r)
         cg::analysis::run(store, oracle);
     const cg::analysis::DispatchResult dispatch =
         cg::analysis::resolve(store, state);
-    const cg::analysis::ResolvedCallSite* site = nullptr;
-    for (const cg::analysis::ResolvedCallSite& s : dispatch.sites)
-    {
-        if (s.site_id == polluted->id)
-        {
-            site = &s;
-        }
-    }
+    const cg::analysis::ResolvedCallSite* site =
+        resolved_site_of(dispatch, polluted->id);
     bool has_tone = false;
     bool narrowed = false;
     if (site != nullptr)
@@ -4951,21 +5101,10 @@ void receiver_declared_root(R& r)
         cg::analysis::run(store, oracle);
     const cg::analysis::DispatchResult dispatch =
         cg::analysis::resolve(store, state);
-    const auto by_id =
-        [&](std::int64_t id) -> const cg::analysis::ResolvedCallSite*
-    {
-        for (const cg::analysis::ResolvedCallSite& s : dispatch.sites)
-        {
-            if (s.site_id == id)
-            {
-                return &s;
-            }
-        }
-        return nullptr;
-    };
     // 正例：叶子声明（Declared 行静态面=[Leaf]）补根 → 家族唯一覆盖
     // 唯一决议，reason 区分声明面来源。
-    const cg::analysis::ResolvedCallSite* leaf = by_id(leaf_site->id);
+    const cg::analysis::ResolvedCallSite* leaf =
+        resolved_site_of(dispatch, leaf_site->id);
     cg::test::check(
         r,
         leaf != nullptr && leaf->resolved && leaf->candidates.size() == 1
@@ -4973,7 +5112,8 @@ void receiver_declared_root(R& r)
         "declared leaf root resolves uniquely via receiver_declared_"
         "unique");
     // 负例：多实现接口声明补根后仍降档不猜（不 resolved，不发推断边）。
-    const cg::analysis::ResolvedCallSite* multi = by_id(multi_site->id);
+    const cg::analysis::ResolvedCallSite* multi =
+        resolved_site_of(dispatch, multi_site->id);
     cg::test::check(
         r,
         multi != nullptr && !multi->resolved,
@@ -4982,7 +5122,8 @@ void receiver_declared_root(R& r)
     // 负例（形参域）：形参声明行同样带静态面（Declared 行 type_set 非
     // 空）且定位域落在调用方函数域——补根照常发生，但接口多实现降档
     // 收窄不猜（不 resolved，fallback 仍是动态证据缺失档）。
-    const cg::analysis::ResolvedCallSite* param = by_id(param_site->id);
+    const cg::analysis::ResolvedCallSite* param =
+        resolved_site_of(dispatch, param_site->id);
     cg::test::check(
         r,
         param != nullptr && !param->resolved
@@ -5112,6 +5253,165 @@ const cg::test::Registrar reg_warm_preloaded_equivalence{
  *           但槽序=保留序+重建序，轮数不断言）。负例（seq 失配/坏头
  *           弃快照走全表）在快照格式往返 case 内覆盖。
  */
+/** 传播态槽内提示按 (owner_key, var_name) 排序的指针视图。 */
+[[nodiscard]]
+auto hints_sorted_by_key(const cg::analysis::PropagationState& s)
+    -> std::vector<const cg::analysis::PropagatedHint*>
+{
+    std::vector<const cg::analysis::PropagatedHint*> v;
+    v.reserve(s.hints.size());
+    for (const cg::analysis::PropagatedHint& h : s.hints)
+    {
+        v.push_back(&h);
+    }
+    std::ranges::sort(
+        v,
+        [](const cg::analysis::PropagatedHint* x,
+           const cg::analysis::PropagatedHint* y)
+        {
+            return std::tie(x->owner_key, x->var_name)
+                   < std::tie(y->owner_key, y->var_name);
+        });
+    return v;
+}
+
+/** 槽 (owner 子串, 槽名) 的类型集是否含实现类。 */
+[[nodiscard]]
+auto slot_has_impl_type(
+    cg::db::GraphStore& store,
+    std::string_view    domain,
+    std::string_view    var) -> bool
+{
+    for (const cg::db::AnalysisSlotRow& row : store.all_analysis_slots())
+    {
+        if (row.owner_key.find(domain) != std::string::npos
+            && row.var_name == var)
+        {
+            return row.type_set.find("ImplFoo") != std::string::npos;
+        }
+    }
+    return false;
+}
+
+/** 类型提示行 owner 符号的限定名（解析不出给空）。 */
+[[nodiscard]]
+auto hint_owner_name(cg::db::GraphStore& store, const cg::db::TypeHintRow& row)
+    -> std::string
+{
+    const auto s = cg::db::get_symbol(store, row.owner_id);
+    return s ? s->qualified_name : std::string{};
+}
+
+/** 按模式生成对齐字组（0=全 0、1=全 1、2=伪随机稠密、3=稀疏位）。 */
+[[nodiscard]]
+auto make_bit_words(std::mt19937_64& rng, std::size_t n, unsigned kind)
+    -> cg::analysis::propagate_detail::AlignedWords
+{
+    cg::analysis::propagate_detail::AlignedWords v(n, 0);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        if (kind == 1)
+        {
+            v[i] = ~0ULL;
+        }
+        else if (kind == 2)
+        {
+            v[i] = rng();
+        }
+        else if (kind == 3)
+        {
+            v[i] = (1ULL << (rng() % 64)) | (1ULL << (rng() % 64));
+        }
+    }
+    return v;
+}
+
+/** 传播态里 (owner 子串, 槽名) 命中的首条提示（未命中给空）。 */
+[[nodiscard]]
+auto propagated_hint_of(
+    const cg::analysis::PropagationState& s,
+    std::string_view                      fn,
+    std::string_view var) -> const cg::analysis::PropagatedHint*
+{
+    for (const cg::analysis::PropagatedHint& h : s.hints)
+    {
+        if (h.owner_key.find(fn) != std::string::npos && h.var_name == var)
+        {
+            return &h;
+        }
+    }
+    return nullptr;
+}
+
+/** 两传播态按键序逐项相等（集合语义；脏批恢复路径用）。 */
+[[nodiscard]]
+auto hints_equal_by_key(
+    const cg::analysis::PropagationState& a,
+    const cg::analysis::PropagationState& b) -> bool
+{
+    if (a.hints.size() != b.hints.size() || a.sites.size() != b.sites.size())
+    {
+        return false;
+    }
+    const auto va = hints_sorted_by_key(a);
+    const auto vb = hints_sorted_by_key(b);
+    for (std::size_t i = 0; i < va.size(); ++i)
+    {
+        if (!propagated_hint_equal(*va[i], *vb[i]))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** 两传播态逐槽相等（失败携带首差异说明；同槽序路径用）。 */
+[[nodiscard]]
+auto hints_equal_in_order(
+    const cg::analysis::PropagationState& a,
+    const cg::analysis::PropagationState& b) -> std::expected<void, std::string>
+{
+    if (a.hints.size() != b.hints.size() || a.sites.size() != b.sites.size())
+    {
+        return std::unexpected(
+            std::format(
+                "counts hints {} vs {} sites {} vs {}",
+                a.hints.size(),
+                b.hints.size(),
+                a.sites.size(),
+                b.sites.size()));
+    }
+    for (std::size_t i = 0; i < a.hints.size(); ++i)
+    {
+        if (!propagated_hint_equal(a.hints[i], b.hints[i]))
+        {
+            return std::unexpected(
+                std::format(
+                    "slot#{} {}::{} types{} [{}] vs [{}] "
+                    "static{}conf{}src{}"
+                    "reason{}trunc{}alias{}ret{}warm{}",
+                    i,
+                    a.hints[i].owner_key,
+                    a.hints[i].var_name,
+                    a.hints[i].types == b.hints[i].types ? "=" : "!",
+                    a.hints[i].types.size(),
+                    b.hints[i].types.size(),
+                    a.hints[i].static_types == b.hints[i].static_types ? "="
+                                                                       : "!",
+                    a.hints[i].confidence == b.hints[i].confidence ? "=" : "!",
+                    a.hints[i].source == b.hints[i].source ? "=" : "!",
+                    a.hints[i].reason == b.hints[i].reason ? "=" : "!",
+                    a.hints[i].truncated_here == b.hints[i].truncated_here
+                        ? "="
+                        : "!",
+                    a.hints[i].alias_src == b.hints[i].alias_src ? "=" : "!",
+                    a.hints[i].ret_src == b.hints[i].ret_src ? "=" : "!",
+                    a.hints[i].from_warm == b.hints[i].from_warm ? "=" : "!"));
+        }
+    }
+    return {};
+}
+
 void snapshot_roundtrip_equivalence(R& r)
 {
     db::GraphStore                store{":memory:"};
@@ -5125,97 +5425,6 @@ void snapshot_roundtrip_equivalence(R& r)
         return;
     }
     const cg::analysis::StubTypeOracle oracle;
-    std::string                        first_diff_;
-    // 逐下标比对（同槽序路径用：无脏恢复与失配回退的槽序都与装载序一
-    // 致）；键序比对（脏批恢复路径用：剔除重建槽挪到槽序尾部，集合语
-    // 义等价）。
-    const auto hints_equal_in_order =
-        [&](const cg::analysis::PropagationState& a,
-            const cg::analysis::PropagationState& b)
-    {
-        if (a.hints.size() != b.hints.size()
-            || a.sites.size() != b.sites.size())
-        {
-            first_diff_.assign(
-                std::format(
-                    "counts hints {} vs {} sites {} vs {}",
-                    a.hints.size(),
-                    b.hints.size(),
-                    a.sites.size(),
-                    b.sites.size()));
-            return false;
-        }
-        for (std::size_t i = 0; i < a.hints.size(); ++i)
-        {
-            if (!propagated_hint_equal(a.hints[i], b.hints[i]))
-            {
-                first_diff_.assign(
-                    std::format(
-                        "slot#{} {}::{} types{} [{}] vs [{}] static{}conf{}src{}"
-                        "reason{}trunc{}alias{}ret{}warm{}",
-                        i,
-                        a.hints[i].owner_key,
-                        a.hints[i].var_name,
-                        a.hints[i].types == b.hints[i].types ? "=" : "!",
-                        a.hints[i].types.size(),
-                        b.hints[i].types.size(),
-                        a.hints[i].static_types == b.hints[i].static_types
-                            ? "="
-                            : "!",
-                        a.hints[i].confidence == b.hints[i].confidence ? "="
-                                                                       : "!",
-                        a.hints[i].source == b.hints[i].source ? "=" : "!",
-                        a.hints[i].reason == b.hints[i].reason ? "=" : "!",
-                        a.hints[i].truncated_here == b.hints[i].truncated_here
-                            ? "="
-                            : "!",
-                        a.hints[i].alias_src == b.hints[i].alias_src ? "="
-                                                                     : "!",
-                        a.hints[i].ret_src == b.hints[i].ret_src ? "=" : "!",
-                        a.hints[i].from_warm == b.hints[i].from_warm ? "="
-                                                                     : "!"));
-                return false;
-            }
-        }
-        return true;
-    };
-    const auto hints_equal_by_key = [&](const cg::analysis::PropagationState& a,
-                                        const cg::analysis::PropagationState& b)
-    {
-        if (a.hints.size() != b.hints.size()
-            || a.sites.size() != b.sites.size())
-        {
-            return false;
-        }
-        const auto by_key = [](const cg::analysis::PropagationState& s)
-        {
-            std::vector<const cg::analysis::PropagatedHint*> v;
-            v.reserve(s.hints.size());
-            for (const cg::analysis::PropagatedHint& h : s.hints)
-            {
-                v.push_back(&h);
-            }
-            std::ranges::sort(
-                v,
-                [](const cg::analysis::PropagatedHint* x,
-                   const cg::analysis::PropagatedHint* y)
-                {
-                    return std::tie(x->owner_key, x->var_name)
-                           < std::tie(y->owner_key, y->var_name);
-                });
-            return v;
-        };
-        const auto va = by_key(a);
-        const auto vb = by_key(b);
-        for (std::size_t i = 0; i < va.size(); ++i)
-        {
-            if (!propagated_hint_equal(*va[i], *vb[i]))
-            {
-                return false;
-            }
-        }
-        return true;
-    };
 
     // 基准：全表装载 + 快照装配（模拟 dispatch_commit 的写侧语义，
     // seq=1、指纹基线=提交后的全表终态）。
@@ -5269,12 +5478,13 @@ void snapshot_roundtrip_equivalence(R& r)
         r,
         state_b.incremental && !plan_b.degraded,
         "clean restored run converges");
-    bool equal_b = hints_equal_in_order(state_a, state_b);
+    const std::expected<void, std::string> equal_b =
+        hints_equal_in_order(state_a, state_b);
     cg::test::check(
         r,
-        equal_b,
+        equal_b.has_value(),
         "clean restored run matches the table-scan path"
-            + (equal_b ? std::string{} : " | " + first_diff_));
+            + (equal_b ? std::string{} : " | " + equal_b.error()));
     cg::test::check(
         r,
         state_a.rounds == state_b.rounds,
@@ -5346,7 +5556,7 @@ void snapshot_roundtrip_equivalence(R& r)
         "stale seq rejects the snapshot");
     cg::test::check(
         r,
-        hints_equal_in_order(state_a, state_d),
+        hints_equal_in_order(state_a, state_d).has_value(),
         "rejected snapshot falls back to the table-scan path");
     std::error_code ec;
     std::filesystem::remove(snap_path, ec);
@@ -5372,7 +5582,7 @@ const cg::test::Registrar reg_snapshot_roundtrip{
  */
 void cast_claim_incremental_equivalence(R& r)
 {
-    db::GraphStore store{":memory:"};
+    db::GraphStore                store{":memory:"};
     const cg::graph::IndexSummary sum =
         index_fixture(store, "cast_claim_chain");
     cg::test::check(r, sum.failed == 0, "cast_claim_chain indexes cleanly");
@@ -5409,7 +5619,7 @@ void cast_claim_incremental_equivalence(R& r)
     plan_a.dirty_files = &no_dirty;
     cg::analysis::snap::SnapshotData dump;
     plan_a.snap_dump = &dump;
-    const cg::analysis::StubTypeOracle oracle;
+    const cg::analysis::StubTypeOracle   oracle;
     const cg::analysis::PropagationState state_a =
         cg::analysis::run(store, oracle, nullptr, &plan_a);
     cg::test::check(
@@ -5418,7 +5628,7 @@ void cast_claim_incremental_equivalence(R& r)
         "baseline incremental run converges");
     dump.snapshot_seq = 1;
     dump.fingerprints = cg::db::all_fingerprints(store);
-    const std::string bytes = cg::analysis::snap::serialize(dump);
+    const std::string           bytes = cg::analysis::snap::serialize(dump);
     const std::filesystem::path snap_path =
         cg::util::platform::unique_temp_path(
             std::filesystem::temp_directory_path()
@@ -5467,29 +5677,16 @@ void cast_claim_incremental_equivalence(R& r)
         "claim-chain incremental run converges (degraded="
             + plan_b.degrade_reason + ")");
     // 两个声称槽（别名链 p / 返回链 q）：闭包重算后声称面逐项保持。
-    const auto find_hint = [](const cg::analysis::PropagationState& s,
-                              std::string_view fn,
-                              std::string_view var)
-    {
-        const cg::analysis::PropagatedHint* found = nullptr;
-        for (const cg::analysis::PropagatedHint& h : s.hints)
-        {
-            if (h.owner_key.find(fn) != std::string::npos
-                && h.var_name == var)
-            {
-                found = &h;
-                break;
-            }
-        }
-        return found;
-    };
     for (const auto& [fn, var] :
          {std::pair<std::string_view, std::string_view>{
-              "consume_claim_via_alias", "p"},
+              "consume_claim_via_alias",
+              "p"},
           {"consume_claim_via_ret", "q"}})
     {
-        const cg::analysis::PropagatedHint* base = find_hint(state_a, fn, var);
-        const cg::analysis::PropagatedHint* delta = find_hint(state_b, fn, var);
+        const cg::analysis::PropagatedHint* base =
+            propagated_hint_of(state_a, fn, var);
+        const cg::analysis::PropagatedHint* delta =
+            propagated_hint_of(state_b, fn, var);
         cg::test::check(
             r,
             base != nullptr && delta != nullptr,
@@ -5500,8 +5697,8 @@ void cast_claim_incremental_equivalence(R& r)
         }
         cg::test::check(
             r,
-            !base->types.empty() && base->source
-                                        == cg::analysis::HintSource::CastTarget,
+            !base->types.empty()
+                && base->source == cg::analysis::HintSource::CastTarget,
             std::string{fn} + " baseline slot carries the claim face");
         cg::test::check(
             r,
@@ -5806,37 +6003,17 @@ void symbits_tier_bit_equivalence(R& r)
     std::mt19937_64   rng{0x5EED5EED5EED5EEDULL};
     const std::size_t lengths[] = {0,  1,  2,  3,  4,  5,  7,   8,   9,   15,
                                    16, 31, 32, 63, 64, 65, 127, 128, 129, 137};
-    const auto        make_words = [&](std::size_t n, unsigned kind)
-    {
-        pd::AlignedWords v(n, 0);
-        for (std::size_t i = 0; i < n; ++i)
-        {
-            if (kind == 1)
-            {
-                v[i] = ~0ULL;
-            }
-            else if (kind == 2)
-            {
-                v[i] = rng();
-            }
-            else if (kind == 3)
-            {
-                v[i] = (1ULL << (rng() % 64)) | (1ULL << (rng() % 64));
-            }
-        }
-        return v;
-    };
-    bool all_equal = true;
-    bool avx2_ran = false;
-    bool avx512_ran = false;
+    bool              all_equal = true;
+    bool              avx2_ran = false;
+    bool              avx512_ran = false;
     for (const std::size_t n : lengths)
     {
         for (unsigned dst_kind = 0; dst_kind < 4; ++dst_kind)
         {
             for (unsigned src_kind = 0; src_kind < 4; ++src_kind)
             {
-                const pd::AlignedWords dst = make_words(n, dst_kind);
-                const pd::AlignedWords src = make_words(n, src_kind);
+                const pd::AlignedWords dst = make_bit_words(rng, n, dst_kind);
+                const pd::AlignedWords src = make_bit_words(rng, n, src_kind);
                 pd::AlignedWords       out_scalar = dst;
                 pd::or_words_scalar(out_scalar.data(), src.data(), n);
                 if (tier >= BitsTier::Avx2)
@@ -5988,11 +6165,6 @@ void ctorinit_plain_field_arm(R& r)
     db::GraphStore store{":memory:"};
     const auto     sum = index_fixture(store, "ctorinit");
     cg::test::check(r, sum.failed == 0, "ctor-init fixture indexes cleanly");
-    const auto owner_of = [&](const cg::db::TypeHintRow& row)
-    {
-        const auto s = cg::db::get_symbol(store, row.owner_id);
-        return s ? s->qualified_name : std::string{};
-    };
     // 正例：alias 行逐 (记录, 字段) 断言——related_var 带 @fnv（构造函
     // 数域）且类型通道为空（纯传播边）。
     const struct AliasCase
@@ -6018,7 +6190,8 @@ void ctorinit_plain_field_arm(R& r)
             if (row.source
                     != static_cast<int>(cg::analysis::HintSource::FieldFlow)
                 || row.fallback_reason != "ctor_init_flow"
-                || owner_of(row) != cs.owner || row.var_name != cs.var)
+                || hint_owner_name(store, row) != cs.owner
+                || row.var_name != cs.var)
             {
                 continue;
             }
@@ -6043,7 +6216,8 @@ void ctorinit_plain_field_arm(R& r)
     for (const cg::db::TypeHintRow& row : store.all_type_hints())
     {
         if (row.fallback_reason == "ctor_init_flow"
-            && owner_of(row) == "ShadowHolder" && row.var_name == "image_")
+            && hint_owner_name(store, row) == "ShadowHolder"
+            && row.var_name == "image_")
         {
             cg::test::check(
                 r,
@@ -6060,7 +6234,7 @@ void ctorinit_plain_field_arm(R& r)
         {
             continue;
         }
-        const std::string owner = owner_of(row);
+        const std::string owner = hint_owner_name(store, row);
         cg::test::check(
             r,
             !(owner == "OpaqueHolder"
@@ -6077,7 +6251,8 @@ void ctorinit_plain_field_arm(R& r)
     for (const cg::db::TypeHintRow& row : store.all_type_hints())
     {
         if (row.fallback_reason == "ctor_init_flow"
-            && owner_of(row) == "MultiArgHolder" && row.var_name == "v_")
+            && hint_owner_name(store, row) == "MultiArgHolder"
+            && row.var_name == "v_")
         {
             multi_type_row = true;
             cg::test::check(
@@ -6097,41 +6272,44 @@ void ctorinit_plain_field_arm(R& r)
         "multi-arg value field emits one whole-RHS row");
     // 派发边：单源字段站点 Medium 连通；双写字段并集双候选低置信。
     const std::vector<DEdge> edges = dispatch_edges(store);
-    const auto               conf_edge = [&](std::string_view caller,
-                                             std::string_view dst,
-                                             double           want,
-                                             std::string_view label)
-    {
-        const DEdge* e = find_edge(edges, caller, dst);
-        cg::test::check(r, e != nullptr, label);
-        cg::test::check(r, e != nullptr && e->confidence == want, label);
-    };
-    conf_edge(
+    expect_conf_edge_labeled(
+        r,
+        edges,
         "PlainHolder::use",
         "RealDev::poke",
         0.7,
         "plain pointer ctor-init connects at medium");
-    conf_edge(
+    expect_conf_edge_labeled(
+        r,
+        edges,
         "RefHolder::use",
         "RealDev::poke",
         0.7,
         "reference member ctor-init connects at medium");
-    conf_edge(
+    expect_conf_edge_labeled(
+        r,
+        edges,
         "ConstBraceHolder::use",
         "RealDev::poke",
         0.7,
         "const/brace ctor-init connects at medium");
-    conf_edge(
+    expect_conf_edge_labeled(
+        r,
+        edges,
         "ShadowHolder::use",
         "RealDev::poke",
         0.7,
         "shadowed-name ctor-init connects at medium");
-    conf_edge(
+    expect_conf_edge_labeled(
+        r,
+        edges,
         "DualWriteHolder::use",
         "RealDev::poke",
         0.4,
         "dual-write keeps candidate one low");
-    conf_edge(
+    expect_conf_edge_labeled(
+        r,
+        edges,
         "DualWriteHolder::use",
         "LocalDev::poke",
         0.4,
@@ -6330,11 +6508,6 @@ void attachshell_factory_penetration(R& r)
     db::GraphStore store{":memory:"};
     const auto     sum = index_fixture(store, "attachshell");
     cg::test::check(r, sum.failed == 0, "attach-shell fixture indexes cleanly");
-    const auto owner_of = [&](const cg::db::TypeHintRow& row)
-    {
-        const auto s = cg::db::get_symbol(store, row.owner_id);
-        return s ? s->qualified_name : std::string{};
-    };
     // 穿透行形态：related_var 恰是 T* 位实参（局部/返回槽直名，字段写
     // 侧 @fnv 域别名）——判据命中的直接物证。
     bool c1_row = false;
@@ -6345,7 +6518,7 @@ void attachshell_factory_penetration(R& r)
     bool c6_row = false;
     for (const cg::db::TypeHintRow& row : store.all_type_hints())
     {
-        const std::string owner = owner_of(row);
+        const std::string owner = hint_owner_name(store, row);
         if (owner == "attach_shell_host" && row.var_name == "s")
         {
             c1_row = row.related_var == "raw";
@@ -6413,44 +6586,31 @@ void attachshell_factory_penetration(R& r)
         c2_receiver,
         "C2 chained factory receiver resolves to the argument");
     // 槽终态：正例槽拿实现类；负例槽零实现类混入。
-    const auto slot_has_impl =
-        [&](std::string_view domain, std::string_view var)
-    {
-        for (const cg::db::AnalysisSlotRow& row : store.all_analysis_slots())
-        {
-            if (row.owner_key.find(domain) != std::string::npos
-                && row.var_name == var)
-            {
-                return row.type_set.find("ImplFoo") != std::string::npos;
-            }
-        }
-        return false;
-    };
     cg::test::check(
         r,
-        slot_has_impl("attach_shell_host", "s"),
+        slot_has_impl_type(store, "attach_shell_host", "s"),
         "C1 slot reaches the implementation");
     cg::test::check(
         r,
-        slot_has_impl("attach_shell_host", "t"),
+        slot_has_impl_type(store, "attach_shell_host", "t"),
         "C3 slot reaches the implementation");
     cg::test::check(
         r,
-        slot_has_impl("attach_shell_host", "u"),
+        slot_has_impl_type(store, "attach_shell_host", "u"),
         "B1 slot reaches the implementation");
     cg::test::check(
         r,
-        slot_has_impl("ret_shell", "#ret"),
+        slot_has_impl_type(store, "ret_shell", "#ret"),
         "C4 return slot reaches the implementation");
     cg::test::check(
         r,
-        slot_has_impl("Holder", "f_"),
+        slot_has_impl_type(store, "Holder", "f_"),
         "C5/C6 field slot reaches the implementation");
     for (const std::string_view neg : {"tp", "fo", "fv", "cloned"})
     {
         cg::test::check(
             r,
-            !slot_has_impl("attach_shell_host", neg),
+            !slot_has_impl_type(store, "attach_shell_host", neg),
             "negative factory slot stays free of the "
             "implementation");
     }
@@ -6459,8 +6619,8 @@ void attachshell_factory_penetration(R& r)
     bool mb_penetrated = false;
     for (const cg::db::TypeHintRow& row : store.all_type_hints())
     {
-        if (owner_of(row) == "attach_shell_host" && row.var_name == "mb"
-            && row.related_var == "raw")
+        if (hint_owner_name(store, row) == "attach_shell_host"
+            && row.var_name == "mb" && row.related_var == "raw")
         {
             mb_penetrated = true;
         }
@@ -7153,6 +7313,26 @@ const cg::test::Registrar reg_recvfail_guard{
  *           家族级证明面 High 直连、final 具体类接收者走既有第一优
  *           先）——直连不消费槽证据，与证据行熔断不冲突。
  */
+/** 类型提示表是否有 (owner 精确名, 槽名, 原因) 行。 */
+[[nodiscard]]
+auto type_hint_row_exists(
+    cg::db::GraphStore& store,
+    std::string_view    owner,
+    std::string_view    var,
+    std::string_view    reason) -> bool
+{
+    for (const cg::db::TypeHintRow& row : store.all_type_hints())
+    {
+        const auto own = cg::db::get_symbol(store, row.owner_id);
+        if (own && own->qualified_name == owner && row.var_name == var
+            && row.fallback_reason == reason)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 void iid_lock_write_through(R& r)
 {
     db::GraphStore store{":memory:"};
@@ -7163,34 +7343,18 @@ void iid_lock_write_through(R& r)
         "iid-lock-write-through indexes cleanly");
     const std::vector<DEdge> edges = dispatch_edges(store);
 
-    const auto row_of = [&](std::string_view owner,
-                            std::string_view var,
-                            std::string_view reason) -> bool
-    {
-        for (const cg::db::TypeHintRow& row : store.all_type_hints())
-        {
-            const auto own = cg::db::get_symbol(store, row.owner_id);
-            if (own && own->qualified_name == owner && row.var_name == var
-                && row.fallback_reason == reason)
-            {
-                return true;
-            }
-        }
-        return false;
-    };
-
     // 熔断守恒：三种形态全部零证据行。
     cg::test::check(
         r,
-        !row_of("ConsumeQI", "p_backend", "qi_iid_lock"),
+        !type_hint_row_exists(store, "ConsumeQI", "p_backend", "qi_iid_lock"),
         "the QI out slot stays row-free under the fused emission");
     cg::test::check(
         r,
-        !row_of("ConsumeWideQI", "p_wide", "qi_iid_lock"),
+        !type_hint_row_exists(store, "ConsumeWideQI", "p_wide", "qi_iid_lock"),
         "the wide QI out slot stays row-free under the fused emission");
     cg::test::check(
         r,
-        !row_of("ConsumeAs", "backend", "qi_iid_ret"),
+        !type_hint_row_exists(store, "ConsumeAs", "backend", "qi_iid_ret"),
         "the As result slot stays row-free under the fused emission");
 
     // 单实现接口：熔断下零证据行（上方三条守恒断言），消费方站点不再
@@ -7253,11 +7417,19 @@ void iid_lock_write_through(R& r)
     // 负形：非令牌实参与具体类模板实参闸门依旧闭合。
     cg::test::check(
         r,
-        !row_of("ConsumeNoToken", "p_backend", "qi_iid_lock"),
+        !type_hint_row_exists(
+            store,
+            "ConsumeNoToken",
+            "p_backend",
+            "qi_iid_lock"),
         "a non-token argument keeps the QI gate closed");
     cg::test::check(
         r,
-        !row_of("ConsumeAsConcrete", "backend", "qi_iid_ret"),
+        !type_hint_row_exists(
+            store,
+            "ConsumeAsConcrete",
+            "backend",
+            "qi_iid_ret"),
         "a concrete template argument keeps the As gate closed");
     const auto no_tok = site_for(store, "ConsumeNoToken", "Mat", true);
     cg::test::check(

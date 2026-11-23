@@ -71,22 +71,39 @@ namespace
         return {};
     }
 
+    /// 矩阵用例断言标签（用例号 + 事项 + 原始命令）。
+    [[nodiscard]]
+    auto case_label(const mx::MatrixCase& c, std::string_view what)
+        -> std::string
+    {
+        return std::format("[{}] {} cmd={}", c.id, what, c.cmd);
+    }
+
+    /// 矩阵用例内单条请求的断言标签（在用例标签上追加请求下标）。
+    [[nodiscard]]
+    auto request_label(
+        const mx::MatrixCase& c,
+        std::size_t           i,
+        std::string_view      what) -> std::string
+    {
+        return case_label(c, std::format("请求[{}] {}", i, what));
+    }
+
     /// 一条矩阵用例与实际产出的逐字段比对。
     void expect_case(
         R&                               r,
         const mx::MatrixCase&            c,
         const scan::ShellExtractOutcome& got)
     {
-        const auto label = [&](std::string_view what)
-        { return std::format("[{}] {} cmd={}", c.id, what, c.cmd); };
         cg::test::check(
             r,
             got.skip == c.skip,
-            label(std::format("skip '{}' vs '{}'", got.skip, c.skip)));
+            case_label(c, std::format("skip '{}' vs '{}'", got.skip, c.skip)));
         cg::test::check(
             r,
             got.skip_all == c.skip_all,
-            label(
+            case_label(
+                c,
                 std::format(
                     "skip_all '{}' vs '{}'",
                     got.skip_all,
@@ -94,7 +111,8 @@ namespace
         cg::test::check(
             r,
             got.requests.size() == c.requests.size(),
-            label(
+            case_label(
+                c,
                 std::format(
                     "请求数 {} vs 期望 {}",
                     got.requests.size(),
@@ -105,31 +123,50 @@ namespace
         {
             const scan::ShellRequest& actual = got.requests[i];
             const mx::ExpectRequest&  want = c.requests[i];
-            const auto                req = [&](std::string_view what)
-            { return label(std::format("请求[{}] {}", i, what)); };
             cg::test::check(
                 r,
                 engine_name(actual.engine) == want.engine,
-                req(std::format("engine '{}'", engine_name(actual.engine))));
+                request_label(
+                    c,
+                    i,
+                    std::format("engine '{}'", engine_name(actual.engine))));
             cg::test::check(
                 r,
                 actual.patterns == want.patterns,
-                req("patterns"));
-            cg::test::check(r, actual.single == want.single, req("single"));
-            cg::test::check(r, actual.fixed == want.fixed, req("fixed"));
-            cg::test::check(r, actual.paths == want.paths, req("paths"));
-            cg::test::check(r, actual.globs == want.globs, req("globs"));
-            cg::test::check(r, actual.types == want.types, req("types"));
+                request_label(c, i, "patterns"));
+            cg::test::check(
+                r,
+                actual.single == want.single,
+                request_label(c, i, "single"));
+            cg::test::check(
+                r,
+                actual.fixed == want.fixed,
+                request_label(c, i, "fixed"));
+            cg::test::check(
+                r,
+                actual.paths == want.paths,
+                request_label(c, i, "paths"));
+            cg::test::check(
+                r,
+                actual.globs == want.globs,
+                request_label(c, i, "globs"));
+            cg::test::check(
+                r,
+                actual.types == want.types,
+                request_label(c, i, "types"));
             cg::test::check(
                 r,
                 path_kind_name(actual.path_kind) == want.path_kind,
-                req(std::format(
-                    "path_kind '{}'",
-                    path_kind_name(actual.path_kind))));
+                request_label(
+                    c,
+                    i,
+                    std::format(
+                        "path_kind '{}'",
+                        path_kind_name(actual.path_kind))));
             cg::test::check(
                 r,
                 actual.cwd_hint == want.cwd_hint,
-                req("cwd_hint"));
+                request_label(c, i, "cwd_hint"));
         }
     }
 
@@ -170,17 +207,20 @@ namespace
         }
     }
 
+    /// Search 工具载荷 JSON 到提取产出的直读解析。
+    [[nodiscard]]
+    auto search_outcome_of(std::string_view json) -> scan::ShellExtractOutcome
+    {
+        const cg::util::json::Document doc =
+            cg::util::json::Document::parse(json);
+        return scan::search_tool_queries(doc.root());
+    }
+
     void search_field_cases(R& r)
     {
-        const auto run = [](std::string_view json)
-        {
-            const cg::util::json::Document doc =
-                cg::util::json::Document::parse(json);
-            return scan::search_tool_queries(doc.root());
-        };
         {
             // 三候选字段按序取第一个存在的字符串值。
-            const auto out = run(R"({"query":"foo"})");
+            const auto out = search_outcome_of(R"({"query":"foo"})");
             cg::test::check(r, out.requests.size() == 1, "query 命中");
             cg::test::check(
                 r,
@@ -195,7 +235,7 @@ namespace
                 "engine=search");
         }
         {
-            const auto out = run(R"({"pattern":"bar"})");
+            const auto out = search_outcome_of(R"({"pattern":"bar"})");
             cg::test::check(
                 r,
                 out.requests.size() == 1
@@ -204,7 +244,7 @@ namespace
                 "pattern 兜底命中");
         }
         {
-            const auto out = run(R"({"q":"baz"})");
+            const auto out = search_outcome_of(R"({"q":"baz"})");
             cg::test::check(
                 r,
                 out.requests.size() == 1
@@ -214,7 +254,8 @@ namespace
         }
         {
             // 非字符串 query 让位给后续候选字段。
-            const auto out = run(R"({"query":123,"pattern":"real"})");
+            const auto out =
+                search_outcome_of(R"({"query":123,"pattern":"real"})");
             cg::test::check(
                 r,
                 out.requests.size() == 1
@@ -223,24 +264,24 @@ namespace
                 "非字符串跳过");
         }
         {
-            const auto out = run(R"({"other":1})");
+            const auto out = search_outcome_of(R"({"other":1})");
             cg::test::check(
                 r,
                 out.requests.empty() && out.skip.empty(),
                 "无候选字段静默");
         }
         {
-            const auto out = run(R"({"query":""})");
+            const auto out = search_outcome_of(R"({"query":""})");
             cg::test::check(r, out.skip == "no-pattern", "空文本 no-pattern");
         }
         {
             std::string long_json =
                 R"({"query":")" + std::string(257, 'a') + R"("})";
-            const auto out = run(long_json);
+            const auto out = search_outcome_of(long_json);
             cg::test::check(r, out.skip == "too-long", "超长 too-long");
         }
         {
-            const auto out = run("{\"query\":\"a\\nb\"}");
+            const auto out = search_outcome_of("{\"query\":\"a\\nb\"}");
             cg::test::check(
                 r,
                 out.skip == "control-char",
@@ -248,7 +289,7 @@ namespace
         }
         {
             // 载荷不是对象：静默空手。
-            const auto out = run(R"(["query"])");
+            const auto out = search_outcome_of(R"(["query"])");
             cg::test::check(
                 r,
                 out.requests.empty() && out.skip.empty(),
@@ -546,8 +587,7 @@ namespace
 
     /// 命名实参表的便捷构造（ObjCall 的 "script" 实参）。
     [[nodiscard]]
-    auto script_argv(std::string_view script)
-        -> std::vector<host::ObjArg>
+    auto script_argv(std::string_view script) -> std::vector<host::ObjArg>
     {
         return {{"script", script}};
     }
@@ -582,8 +622,7 @@ namespace
             const auto out = host::obj_call(face, cls, token, "Extract", argv);
             cg::test::check(
                 r,
-                out.ok() && out.payload.find("requests")
-                    != std::string::npos,
+                out.ok() && out.payload.find("requests") != std::string::npos,
                 std::format("Extract 成功: rc={}", out.rc));
             cg::test::check(
                 r,
@@ -607,8 +646,7 @@ namespace
         // 引用计数语义：拷贝持活（析构一份不拆），最后一份析构才拆。
         {
             std::optional<host::CsRef> ref = host::open_select_string();
-            cg::test::check(
-                r, ref.has_value() && ref->valid(), "会话句柄有效");
+            cg::test::check(r, ref.has_value() && ref->valid(), "会话句柄有效");
             if (ref.has_value())
             {
                 const std::int32_t token = ref->token();
@@ -620,9 +658,7 @@ namespace
                 cg::test::check(
                     r,
                     alive.ok(),
-                    std::format(
-                        "计数未归零句柄仍活: rc={}",
-                        alive.rc));
+                    std::format("计数未归零句柄仍活: rc={}", alive.rc));
                 ref.reset(); // 归零 → 拆除
                 const auto dead =
                     host::obj_call(face, cls, token, "Extract", argv);
@@ -655,9 +691,7 @@ namespace
                 cg::test::check(
                     r,
                     orphan.ok(),
-                    std::format(
-                        "孤儿路径垫片侧未拆除: rc={}",
-                        orphan.rc));
+                    std::format("孤儿路径垫片侧未拆除: rc={}", orphan.rc));
                 cg::test::check(
                     r,
                     host::obj_destroy(face, token)
@@ -689,7 +723,8 @@ namespace
                 }
             }
             cg::test::check(r, all_live, "槽复用循环 1100 次全活");
-            const auto relic = host::obj_call(face, cls, first, "Extract", argv);
+            const auto relic =
+                host::obj_call(face, cls, first, "Extract", argv);
             cg::test::check(
                 r,
                 relic.rc
@@ -781,7 +816,10 @@ namespace
         if (token > 0)
         {
             const auto out = host::obj_call(face, cls, token, "Extract", argv);
-            cg::test::check(r, out.ok(), std::format("7 线 Extract: {}", out.rc));
+            cg::test::check(
+                r,
+                out.ok(),
+                std::format("7 线 Extract: {}", out.rc));
             cg::test::check(
                 r,
                 host::obj_destroy(face, token)
@@ -819,11 +857,11 @@ namespace
             host::reset_for_tests();
             return;
         }
-        const auto argv = script_argv("Select-String -Pattern foo");
+        const auto       argv = script_argv("Select-String -Pattern foo");
         std::atomic<int> failures{0};
         std::vector<std::thread> workers;
         constexpr int            kThreads = 8;
-        constexpr int            kRounds  = 30;
+        constexpr int            kRounds = 30;
         for (int w = 0; w < kThreads; ++w)
         {
             workers.emplace_back(

@@ -146,6 +146,16 @@ namespace
             "only genuinely new strings are stored");
     }
 
+    /// 整文件二进制读入字符串（原子替换断言的对照读取）。
+    [[nodiscard]]
+    auto read_file_text(const std::filesystem::path& p) -> std::string
+    {
+        std::ifstream      in{p, std::ios::binary};
+        std::ostringstream buffer;
+        buffer << in.rdbuf();
+        return buffer.str();
+    }
+
     void atomic_replace_cases(R& r)
     {
         namespace fs = std::filesystem;
@@ -157,13 +167,6 @@ namespace
         std::error_code ec;
         fs::create_directories(dir, ec);
         const fs::path final_path = dir / "payload.bin";
-        const auto     read = [](const fs::path& p)
-        {
-            std::ifstream      in{p, std::ios::binary};
-            std::ostringstream buffer;
-            buffer << in.rdbuf();
-            return buffer.str();
-        };
         {
             std::ofstream out{final_path, std::ios::binary};
             out << "old";
@@ -194,7 +197,7 @@ namespace
             "atomic replace succeeds");
         cg::test::check(
             r,
-            !fs::exists(tmp, ec) && read(final_path) == "new",
+            !fs::exists(tmp, ec) && read_file_text(final_path) == "new",
             "final holds the replacement and tmp is gone");
 
         // 缺 tmp：直接失败，不碰目标。
@@ -204,7 +207,7 @@ namespace
             "missing tmp reports failure");
         cg::test::check(
             r,
-            read(final_path) == "new",
+            read_file_text(final_path) == "new",
             "failed replace keeps the old final");
 
         // 目标被占用打开：Windows 拒绝替换并保住旧
@@ -225,7 +228,7 @@ namespace
             cg::test::check(r, !replaced, "open target blocks replacement");
             cg::test::check(
                 r,
-                read(final_path) == "held",
+                read_file_text(final_path) == "held",
                 "failed replacement preserves the old bytes");
             cg::test::check(
                 r,
@@ -239,7 +242,7 @@ namespace
                 "POSIX rename replaces while a reader is open");
             cg::test::check(
                 r,
-                read(final_path) == "replacement",
+                read_file_text(final_path) == "replacement",
                 "POSIX reader sees the new bytes");
 #endif
         }
@@ -252,7 +255,7 @@ namespace
             "atomic write succeeds");
         cg::test::check(
             r,
-            read(manifest) == "{\"a\":1}",
+            read_file_text(manifest) == "{\"a\":1}",
             "atomic write lands the complete payload");
         fs::remove_all(dir, ec);
     }
@@ -323,6 +326,15 @@ namespace
         fs::remove_all(base, ec);
     }
 
+    /// 覆写锁文件内容（FileLock 用例构造预设持有者状态的半边）。
+    void write_lock_file(
+        const std::filesystem::path& lock,
+        const std::string&           text)
+    {
+        std::ofstream out{lock, std::ios::binary | std::ios::trunc};
+        out << text;
+    }
+
     // FileLock：独占创建、活持有者排斥，与孤儿
     // 恢复。CREATE_NEW 与第一次 WriteFile 之间崩溃会留下
     // 零字节锁；恢复绝不依赖从未写出的内容，
@@ -344,11 +356,6 @@ namespace
             return;
         }
         const fs::path lock = dir / "flush.lock";
-        const auto     write_lock = [&](const std::string& text)
-        {
-            std::ofstream out{lock, std::ios::binary | std::ios::trunc};
-            out << text;
-        };
         // 锁内容时间戳与被测锁实现同源：cg::util::cstd::epoch_ms 单点。
 
         {
@@ -365,9 +372,9 @@ namespace
             !fs::exists(lock, ec),
             "release removes the lock file");
 
-        write_lock(std::format(
-            "999999999\n{}\nstale\n",
-            cg::util::cstd::epoch_ms()));
+        write_lock_file(
+            lock,
+            std::format("999999999\n{}\nstale\n", cg::util::cstd::epoch_ms()));
         {
             const auto dead = try_acquire_file_lock(lock, "dead", 60'000);
             cg::test::check(
@@ -380,7 +387,8 @@ namespace
             !fs::exists(lock, ec),
             "reclaimed lock is re-released");
 
-        write_lock(
+        write_lock_file(
+            lock,
             std::format(
                 "{}\n{}\nlive\n",
                 platform::current_pid(),
@@ -395,9 +403,9 @@ namespace
         platform::remove_file(lock);
 
         // pid 不可解析但时间戳可解析且已过期。
-        write_lock(std::format(
-            "\n{}\nage\n",
-            cg::util::cstd::epoch_ms() - 120'000));
+        write_lock_file(
+            lock,
+            std::format("\n{}\nage\n", cg::util::cstd::epoch_ms() - 120'000));
         {
             const auto aged = try_acquire_file_lock(lock, "aged", 60'000);
             cg::test::check(
@@ -409,7 +417,7 @@ namespace
 
         // 空锁：CREATE_NEW / WriteFile 崩溃窗口。把 mtime
         // 回拨同时也覆盖 POSIX 的保守分支。
-        write_lock("");
+        write_lock_file(lock, "");
         fs::last_write_time(
             lock,
             fs::file_time_type::clock::now() - std::chrono::seconds{120},
@@ -430,7 +438,7 @@ namespace
 #if !defined(_WIN32)
         // POSIX：新出现的空锁可能正处在一个活
         // 创建者的创建/写入窗口（无共享屏障），所以只靠 mtime 守。
-        write_lock("");
+        write_lock_file(lock, "");
         {
             auto fresh = try_acquire_file_lock(lock, "fresh", 60'000);
             cg::test::check(
@@ -492,6 +500,13 @@ namespace
     const cg::test::Registrar reg_file_lock{"util.file_lock", &file_lock_cases};
     const cg::test::Registrar reg_fnv{"util.fnv1a64", &fnv1a64_known_vectors};
 
+    /// 文本视图按字节形态求 sha256（十六进制拼写）。
+    [[nodiscard]]
+    auto sha256_hex_of(std::string_view s) -> std::string
+    {
+        return cg::util::sha256_hex(std::as_bytes(std::span{s}));
+    }
+
     /**
      * @brief sha256_hex/sha256_file_hex 的已知向量对照与文件形态一致性。
      *
@@ -501,21 +516,20 @@ namespace
      */
     void sha256_known_vectors(R& r)
     {
-        const auto hex_of = [](std::string_view s)
-        { return cg::util::sha256_hex(std::as_bytes(std::span{s})); };
         cg::test::check(
             r,
-            hex_of("")
+            sha256_hex_of("")
                 == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "sha256 of the empty string");
         cg::test::check(
             r,
-            hex_of("abc")
+            sha256_hex_of("abc")
                 == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
             "sha256 of abc");
         cg::test::check(
             r,
-            hex_of("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")
+            sha256_hex_of(
+                "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")
                 == "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
             "sha256 of the 448-bit message block message");
         // 文件封装：同一字节（含内嵌 NUL 与高位字节）经磁盘往返后哈希一致。
@@ -533,7 +547,7 @@ namespace
         }
         cg::test::check(
             r,
-            cg::util::sha256_file_hex(tmp.string()) == hex_of(payload),
+            cg::util::sha256_file_hex(tmp.string()) == sha256_hex_of(payload),
             "sha256_file_hex matches the in-memory hash");
         std::error_code ec;
         std::filesystem::remove(tmp, ec);
@@ -811,6 +825,19 @@ namespace
 
     const cg::test::Registrar reg_timed{"util.timed_exec", &timed_exec_cases};
 
+#if defined(_WIN32)
+    /// 向 UNICODE 环境块追加一条 NAME=VALUE（变量缺失时整条跳过）。
+    void append_env_var(std::wstring& block, const char* name)
+    {
+        if (const auto v = cg::util::cstd::get_env(name))
+        {
+            block +=
+                cg::util::platform::widen_utf8(std::string{name} + "=" + *v);
+            block.push_back(L'\0');
+        }
+    }
+#endif
+
     // 配置化子进程捕获原语 run_child 的行为测试。合一前的四份
     // 骨架（驱动器讯问、vswhere 讯问、被包装 Rebuild、wrap 透传）全部
     // 刻意差异参数化进了这一个原语；本套件按四种配置逐路钉行为——
@@ -917,16 +944,8 @@ namespace
         // msys64/clang64/bin 装载）。
         {
             std::wstring block;
-            const auto   append_var = [&](const char* name)
-            {
-                if (const auto v = cg::util::cstd::get_env(name))
-                {
-                    block += platform::widen_utf8(std::string{name} + "=" + *v);
-                    block.push_back(L'\0');
-                }
-            };
-            append_var("SystemRoot");
-            append_var("PATH");
+            append_env_var(block, "SystemRoot");
+            append_env_var(block, "PATH");
             block += L"CCG_RUN_CHILD_PROBE=delivered-by-block";
             block.push_back(L'\0');
             block.push_back(L'\0'); // 双 NUL 结尾的 UNICODE 环境块
@@ -988,20 +1007,17 @@ namespace
         const fs::path  marker = fs::path{"ccg-handle-isolation-marker.txt"};
         std::error_code ec;
         fs::remove(marker, ec);
-        std::string out;
-        int         code = -1;
-        const auto  start = std::chrono::steady_clock::now();
-        const bool  ran = platform::capture_exec(
+        const auto start = std::chrono::steady_clock::now();
+        const auto ran = platform::capture_exec(
             exe,
-            {"--ccg-test-spawn-sleeper", "1500", marker.generic_string()},
-            out,
-            code);
+            {"--ccg-test-spawn-sleeper", "1500", marker.generic_string()});
         const auto elapsed =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start);
         cg::test::check(
             r,
-            ran && code == 0 && out.find("host-ok") != std::string::npos,
+            ran.has_value() && ran->exit_code == 0
+                && ran->out.find("host-ok") != std::string::npos,
             "the host helper runs to completion");
         cg::test::check(
             r,
@@ -1595,44 +1611,50 @@ namespace
     void source_class_cases(R& r)
     {
         using C = cg::util::SourceFileClass;
-        const auto cls = [](std::string_view p)
-        { return cg::util::classify_source_path(p); };
+        using cg::util::classify_source_path;
         // 分类逐值：折叠对完整路径与裸 token 都成立。
         cg::test::check(
             r,
-            cls("e:/src/a.cpp") == C::CppSource,
+            classify_source_path("e:/src/a.cpp") == C::CppSource,
             "cpp class for a full path");
         cg::test::check(
             r,
-            cls("a.CC") == C::CppSource,
+            classify_source_path("a.CC") == C::CppSource,
             "folding covers uppercase extensions");
         cg::test::check(
             r,
-            cls("a.c++") == C::CppSource,
+            classify_source_path("a.c++") == C::CppSource,
             "c++ spelling folds to the cpp class");
-        cg::test::check(r, cls("a.C") == C::CSource, "c folds to the c class");
         cg::test::check(
             r,
-            cls("a.ixx") == C::ModuleUnit && cls("a.CPPM") == C::ModuleUnit
-                && cls("a.mpp") == C::ModuleUnit
-                && cls("a.mxx") == C::ModuleUnit
-                && cls("a.c++m") == C::ModuleUnit,
+            classify_source_path("a.C") == C::CSource,
+            "c folds to the c class");
+        cg::test::check(
+            r,
+            classify_source_path("a.ixx") == C::ModuleUnit
+                && classify_source_path("a.CPPM") == C::ModuleUnit
+                && classify_source_path("a.mpp") == C::ModuleUnit
+                && classify_source_path("a.mxx") == C::ModuleUnit
+                && classify_source_path("a.c++m") == C::ModuleUnit,
             "module unit class covers all six spellings");
         cg::test::check(
             r,
-            cls("a.h") == C::Header && cls("a.HPP") == C::Header,
+            classify_source_path("a.h") == C::Header
+                && classify_source_path("a.HPP") == C::Header,
             "header class folds");
         cg::test::check(
             r,
-            cls("a.inc") == C::ForcedInclude,
+            classify_source_path("a.inc") == C::ForcedInclude,
             "forced-include stub is its own class");
         cg::test::check(
             r,
-            cls("a.tlh") == C::ComGenerated && cls("a.tli") == C::ComGenerated,
+            classify_source_path("a.tlh") == C::ComGenerated
+                && classify_source_path("a.tli") == C::ComGenerated,
             "com-generated headers are their own class");
         cg::test::check(
             r,
-            cls("a.cpp.txt") == C::None && cls("Makefile") == C::None,
+            classify_source_path("a.cpp.txt") == C::None
+                && classify_source_path("Makefile") == C::None,
             "non-source tails classify as none");
         // 具名子集的精确集合（各历史表的原集合钉死）。
         cg::test::check(

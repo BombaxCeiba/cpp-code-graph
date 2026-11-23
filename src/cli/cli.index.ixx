@@ -36,6 +36,18 @@ export namespace cg::cli
     {
         namespace fs = std::filesystem;
 
+        /** @brief 是常规文件时给其规范化字符串路径，否则空。 */
+        [[nodiscard]]
+        auto regular_file_path(const fs::path& p) -> std::optional<std::string>
+        {
+            std::error_code ec;
+            if (fs::is_regular_file(p, ec))
+            {
+                return p.lexically_normal().generic_string();
+            }
+            return std::nullopt;
+        }
+
         /**
          * @brief 在一个根下搜索 compile_commands.json：根本身、然后
          * root/build、 再做一层浅扫描。
@@ -44,22 +56,13 @@ export namespace cg::cli
         auto find_compile_db(const std::string& root)
             -> std::optional<std::string>
         {
-            const auto try_file =
-                [](const fs::path& p) -> std::optional<std::string>
-            {
-                std::error_code ec;
-                if (fs::is_regular_file(p, ec))
-                {
-                    return p.lexically_normal().generic_string();
-                }
-                return std::nullopt;
-            };
             const fs::path base{root};
-            if (auto f = try_file(base / "compile_commands.json"))
+            if (auto f = regular_file_path(base / "compile_commands.json"))
             {
                 return f;
             }
-            if (auto f = try_file(base / "build" / "compile_commands.json"))
+            if (auto f =
+                    regular_file_path(base / "build" / "compile_commands.json"))
             {
                 return f;
             }
@@ -71,7 +74,8 @@ export namespace cg::cli
                 {
                     continue;
                 }
-                if (auto f = try_file(entry.path() / "compile_commands.json"))
+                if (auto f = regular_file_path(
+                        entry.path() / "compile_commands.json"))
                 {
                     return f;
                 }
@@ -307,6 +311,69 @@ export namespace cg::cli
             layout::save_profile(config_dir, profile);
         }
 
+        /** @brief 解析结果为空时抛用法错误（库下无条目是可行动输入错）。 */
+        void require_commands_non_empty(
+            const ResolvedCommands&         resolved,
+            const std::vector<std::string>& roots)
+        {
+            if (resolved.commands.empty())
+            {
+                throw UsageError{
+                    std::format(
+                        "no compile database entries under {} (looked for "
+                        "compile_commands.json in the root, root/build, one "
+                        "level deep; pass --compile-commands F)",
+                        roots.front()),
+                    usage_for(Invocation::Cmd::Index)};
+            }
+        }
+
+        /** @brief 按配置名派生一配置一份的调用（db/根随配置目录）。 */
+        [[nodiscard]]
+        auto config_scoped_invocation(
+            const Invocation&  effective,
+            const LayoutChoice layout,
+            const std::string& config_name) -> Invocation
+        {
+            Invocation per = effective;
+            per.config_name = config_name;
+            per.layout_root = layout.root;
+            per.db_path = layout::db_under(
+                layout::config_dir_under(layout.root, config_name));
+            return per;
+        }
+
+        /**
+         * @brief 一份配置分片的命令解析。
+         *
+         * @internal 干跑解析捷径：--dry-run 不走 resolve_loaded_commands
+         * （引擎加载、模块自建扫描、影子 PCH 规划都是重活，实测大仓
+         * 27 分钟无输出），原始加载的命令直接构成计划输入（resolve 的
+         * 旗标注入对干跑计划无贡献——计划只看库内指纹与命令摘要）。
+         */
+        [[nodiscard]]
+        auto resolve_part_commands(
+            const Invocation&                             inv,
+            const std::vector<std::string>&               roots,
+            const std::vector<cg::clang::CompileCommand>& loaded,
+            const std::string&                            db_file,
+            const Invocation&                             per,
+            std::vector<cg::clang::CompileCommand> part) -> ResolvedCommands
+        {
+            if (inv.dry_run)
+            {
+                ResolvedCommands out;
+                out.commands = std::move(part);
+                return out;
+            }
+            return resolve_loaded_commands(
+                per,
+                roots,
+                std::move(part),
+                loaded,
+                db_file);
+        }
+
         inline auto run_index(const Invocation& inv) -> int
         {
             const LayoutChoice layout = layout::resolve_index_layout(inv);
@@ -386,57 +453,12 @@ export namespace cg::cli
                     usage_for(Invocation::Cmd::Index)};
             }
 
-            const auto require_non_empty = [&](const ResolvedCommands& resolved)
-            {
-                if (resolved.commands.empty())
-                {
-                    throw UsageError{
-                        std::format(
-                            "no compile database entries under {} (looked for "
-                            "compile_commands.json in the root, root/build, one "
-                            "level deep; pass --compile-commands F)",
-                            roots.front()),
-                        usage_for(Invocation::Cmd::Index)};
-                }
-            };
             // 解析前就把 db 路径挂到本配置的调用上：BMI 自建锚
             // （SelfBuildOptions.ccg_config_dir）从 inv.db_path
             // 推导，命令路由期 （resolve_*）就得定。
-            const auto config_inv = [&](const std::string& config_name)
-            {
-                Invocation per = effective;
-                per.config_name = config_name;
-                per.layout_root = layout.root;
-                per.db_path = layout::db_under(
-                    layout::config_dir_under(layout.root, config_name));
-                return per;
-            };
-
             const std::vector<cg::clang::CompileCommand> loaded =
                 cg::clang::load(db_file, roots);
             const ConfigSplit split = split_by_build_config(loaded);
-            // 干跑解析捷径：--dry-run 不走 resolve_loaded_commands（引擎加载、
-            // 模块自建扫描、影子 PCH 规划都是重活，实测大仓 27 分钟无输出），
-            // 原始加载的命令直接构成计划输入（resolve 的旗标注入对干跑计划无
-            // 贡献——计划只看库内指纹与命令摘要）。
-            const auto resolve_for =
-                [&](const Invocation&                      per,
-                    std::vector<cg::clang::CompileCommand> part)
-                -> ResolvedCommands
-            {
-                if (inv.dry_run)
-                {
-                    ResolvedCommands out;
-                    out.commands = std::move(part);
-                    return out;
-                }
-                return resolve_loaded_commands(
-                    per,
-                    roots,
-                    std::move(part),
-                    loaded,
-                    db_file);
-            };
             if (!split.split)
             {
                 if (!split.unsplit_signatures.empty())
@@ -460,9 +482,16 @@ export namespace cg::cli
                         split.unsplit_signatures.size(),
                         names);
                 }
-                const Invocation       per = config_inv(layout.config);
-                const ResolvedCommands resolved = resolve_for(per, loaded);
-                require_non_empty(resolved);
+                const Invocation per =
+                    config_scoped_invocation(effective, layout, layout.config);
+                const ResolvedCommands resolved = resolve_part_commands(
+                    inv,
+                    roots,
+                    loaded,
+                    db_file,
+                    per,
+                    loaded);
+                require_commands_non_empty(resolved, roots);
                 index_into(
                     per,
                     roots,
@@ -495,10 +524,16 @@ export namespace cg::cli
                 inv.config_name);
             for (auto& [name, part] : split.parts)
             {
-                const Invocation       per = config_inv(name);
-                const ResolvedCommands resolved =
-                    resolve_for(per, std::move(part));
-                require_non_empty(resolved);
+                const Invocation per =
+                    config_scoped_invocation(effective, layout, name);
+                const ResolvedCommands resolved = resolve_part_commands(
+                    inv,
+                    roots,
+                    loaded,
+                    db_file,
+                    per,
+                    std::move(part));
+                require_commands_non_empty(resolved, roots);
                 index_into(per, roots, db_file, resolved, name, effective);
             }
             return 0;

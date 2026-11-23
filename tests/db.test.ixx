@@ -1443,7 +1443,7 @@ namespace
             "partition names intern verbatim (colon spelling)");
 
         // 按文件替换：清空 a.fa 不保留任何行，然后重新加回一条。
-        m.store.purge_file(m.fa, {});
+        m.store.purge_file(m.fa);
         cg::test::check(
             r,
             cg::db::stats(m.store).imports == 1,
@@ -1521,12 +1521,9 @@ namespace
         // 重抽取文件 a：站点属主边/包含随 purge 清理；符号行的生死自
         // schema v18 起由贡献票数仲裁——键失配（obsolete）不再被 purge
         // 直接删除，撤票+归零（与图构建器同一记账流程）才删行。
-        const auto keep = std::array{
-            m.store.find_str("function||caller|e:/src/a.cpp").value(),
-            m.store.find_str("method|render|draw|e:/src/a.cpp|p1").value()};
         {
             auto tx = m.store.begin_tx();
-            m.store.purge_file(m.fa, keep);
+            m.store.purge_file(m.fa);
             // 记账流程的 store 原语直接演练：该文件条目重解析后的新票
             // 集不含 obsolete——差集撤票，归零仲裁判死，删行。
             const auto old_votes =
@@ -1955,31 +1952,54 @@ namespace
             "a 50-row batch commits atomically");
     }
 
+    /// 命中面 #external 行的装载（行/列与载荷按用例注入）。
+    void upsert_external_hit(
+        Mini&            m,
+        int              line,
+        int              col,
+        std::string_view type_set,
+        int              confidence,
+        std::string_view fallback)
+    {
+        m.store.upsert_type_hint(
+            {.owner_id = m.caller,
+             .var_name = "#external",
+             .file_id = m.fa,
+             .line = line,
+             .col = col,
+             .type_set = type_set,
+             .source = 12,
+             .confidence = confidence,
+             .fallback_reason = fallback,
+             .param_index = -1});
+    }
+
+    /// 干扰面邻值行的装载（槽名/来源/位置按用例注入）。
+    void upsert_near_row(Mini& m, std::string_view var, int source, int line)
+    {
+        m.store.upsert_type_hint(
+            {.owner_id = m.caller,
+             .var_name = var,
+             .file_id = m.fa,
+             .line = line,
+             .col = 5,
+             .type_set = R"(["record|Near"])",
+             .source = source});
+    }
+
     void type_hint_source_projection(R& r)
     {
         Mini m;
         // 命中面：四个 (owner,file,line,col) 组合的 #external 行，type_set/
         // confidence/fallback 等载荷各不相同（行内容全字段参与等价比对）。
-        const auto hit = [&](int              line,
-                             int              col,
-                             std::string_view type_set,
-                             int              confidence,
-                             std::string_view fallback)
-        {
-            m.store.upsert_type_hint(
-                {.owner_id = m.caller,
-                 .var_name = "#external",
-                 .file_id = m.fa,
-                 .line = line,
-                 .col = col,
-                 .type_set = type_set,
-                 .source = 12,
-                 .confidence = confidence,
-                 .fallback_reason = fallback,
-                 .param_index = -1});
-        };
-        hit(10, 1, R"(["record|Device"])", 3, "");
-        hit(11, 2, R"(["record|Screen"])", 2, "single-candidate");
+        upsert_external_hit(m, 10, 1, R"(["record|Device"])", 3, "");
+        upsert_external_hit(
+            m,
+            11,
+            2,
+            R"(["record|Screen"])",
+            2,
+            "single-candidate");
         m.store.upsert_type_hint(
             {.owner_id = m.callee,
              .var_name = "#external",
@@ -2006,26 +2026,19 @@ namespace
         // 邻值 11/13、以及另一个真实槽名。
         const std::string embedded_nul =
             std::string{"#external"} + '\0' + std::string{"extra"};
-        const auto near = [&](std::string_view var, int source, int line)
-        {
-            m.store.upsert_type_hint(
-                {.owner_id = m.caller,
-                 .var_name = var,
-                 .file_id = m.fa,
-                 .line = line,
-                 .col = 5,
-                 .type_set = R"(["record|Near"])",
-                 .source = source});
-        };
-        near("#External", 12, 30);  // 大小写
-        near(" #external", 12, 31); // 前导空格
-        near("#external ", 12, 32); // 尾随空格
-        near(embedded_nul, 12, 33); // 嵌入 NUL（sqlite 按字节长度存取）
-        near("#externa", 12, 34);   // 前缀截断邻居
-        near("#externall", 12, 35); // 后缀扩展邻居
-        near("#external", 11, 36);  // 来源下邻值
-        near("#external", 13, 37);  // 来源上邻值
-        near("#ret", 12, 38);       // 另一个真实槽名
+        upsert_near_row(m, "#External", 12, 30);  // 大小写
+        upsert_near_row(m, " #external", 12, 31); // 前导空格
+        upsert_near_row(m, "#external ", 12, 32); // 尾随空格
+        upsert_near_row(
+            m,
+            embedded_nul,
+            12,
+            33); // 嵌入 NUL（sqlite 按字节长度存取）
+        upsert_near_row(m, "#externa", 12, 34);   // 前缀截断邻居
+        upsert_near_row(m, "#externall", 12, 35); // 后缀扩展邻居
+        upsert_near_row(m, "#external", 11, 36);  // 来源下邻值
+        upsert_near_row(m, "#external", 13, 37);  // 来源上邻值
+        upsert_near_row(m, "#ret", 12, 38);       // 另一个真实槽名
 
         const auto projected = m.store.type_hints_of_source(12, "#external");
         cg::test::check(

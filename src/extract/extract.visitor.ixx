@@ -432,6 +432,73 @@ export namespace cg::extract
         }
 
         /**
+         * @brief 字符串/字符字面量剥除扫描器。
+         *
+         * @internal 文本判据的多个扫描循环共用同一套转义与闭合语义：
+         *           反斜杠吞掉字面量内的下一字符；引号按种类开启/闭合
+         *           对应字面量（字符串内的单引号、字符字面量内的双引
+         *           号都是普通内容）。字面量内的字符对宿主扫描不可见，
+         *           宿主先判 inside() 再把字面量内字符交给 consume()。
+         */
+        struct LiteralScan
+        {
+            bool str = false; // 处于字符串字面量内
+            bool chr = false; // 处于字符字面量内
+            bool esc = false; // 前一字符是字面量内的转义反斜杠
+
+            /** @brief 是否处于任一字面量内。 */
+            [[nodiscard]]
+            auto inside() const -> bool
+            {
+                return str || chr;
+            }
+
+            /** @brief 字面量内的字符消费（前置条件 inside()）。 */
+            auto consume(char ch) -> void
+            {
+                if (esc)
+                {
+                    esc = false;
+                }
+                else if (ch == '\\')
+                {
+                    esc = true;
+                }
+                else if (str && ch == '"')
+                {
+                    str = false;
+                }
+                else if (chr && ch == '\'')
+                {
+                    chr = false;
+                }
+            }
+
+            /**
+             * @brief 字面量外的开引号：ch 为引号则开启对应字面量并
+             *        返回 true。
+             *
+             * @internal 宿主扫描在开引号字符上自行收口（词边界判定
+             *           等），再调这里；非引号字符返回 false、状态
+             *           不动。
+             */
+            auto open(char ch) -> bool
+            {
+                if (ch == '"')
+                {
+                    str = true;
+                    return true;
+                }
+                if (ch == '\'')
+                {
+                    chr = true;
+                    return true;
+                }
+                return false;
+            }
+        };
+
+        /**
          * @brief constexpr 检测：AST 重打印文本的声明头里找说明符。
          *
          * @internal
@@ -484,9 +551,7 @@ export namespace cg::extract
         {
             const std::string printed = cg::clang::pretty_printed_decl(c);
             const std::size_t size = printed.size();
-            bool              in_string = false;
-            bool              in_char = false;
-            bool              escaped = false;
+            LiteralScan       lit;
             // 说明符之前的两类花括号语境：requires 词之后的首个花括号组
             // 是复合要求的体；尖括号深度大于零（模板形参表）内的花括号
             // 组是类类型 NTTP 的花括号默认值。两者都不是函数体。
@@ -513,24 +578,9 @@ export namespace cg::extract
             while (i < size)
             {
                 const char ch = printed[i];
-                if (in_string || in_char)
+                if (lit.inside())
                 {
-                    if (escaped)
-                    {
-                        escaped = false;
-                    }
-                    else if (ch == '\\')
-                    {
-                        escaped = true;
-                    }
-                    else if (in_string && ch == '"')
-                    {
-                        in_string = false;
-                    }
-                    else if (in_char && ch == '\'')
-                    {
-                        in_char = false;
-                    }
+                    lit.consume(ch);
                     ++i;
                     continue;
                 }
@@ -540,8 +590,7 @@ export namespace cg::extract
                     {
                         return true;
                     }
-                    in_string = ch == '"';
-                    in_char = ch == '\'';
+                    lit.open(ch);
                     ++i;
                     continue;
                 }
@@ -557,42 +606,21 @@ export namespace cg::extract
                     }
                     // requirement 体 / 花括号默认值：配对整组跳过（组内
                     // 字符串照剥、嵌套花括号计数；组不闭合按截断处理）。
-                    int  depth = 1;
-                    bool str = false;
-                    bool chr = false;
-                    bool esc = false;
+                    int         depth = 1;
+                    LiteralScan group_lit;
                     while (++i < size)
                     {
                         const char g = printed[i];
-                        if (str || chr)
+                        if (group_lit.inside())
                         {
-                            if (esc)
-                            {
-                                esc = false;
-                            }
-                            else if (g == '\\')
-                            {
-                                esc = true;
-                            }
-                            else if (str && g == '"')
-                            {
-                                str = false;
-                            }
-                            else if (chr && g == '\'')
-                            {
-                                chr = false;
-                            }
+                            group_lit.consume(g);
                             continue;
                         }
-                        if (g == '"')
+                        if (group_lit.open(g))
                         {
-                            str = true;
+                            continue;
                         }
-                        else if (g == '\'')
-                        {
-                            chr = true;
-                        }
-                        else if (g == '{')
+                        if (g == '{')
                         {
                             ++depth;
                         }
@@ -664,9 +692,7 @@ export namespace cg::extract
             }
             bool        line_comment = false;
             bool        block_comment = false;
-            bool        p_in_string = false;
-            bool        p_in_char = false;
-            bool        p_escaped = false;
+            LiteralScan prefix_lit;
             std::string prefix_word;
             const auto  prefix_hits = [&prefix_word]
             {
@@ -675,24 +701,9 @@ export namespace cg::extract
             for (std::size_t j = 0; j < prefix->size(); ++j)
             {
                 const char ch = (*prefix)[j];
-                if (p_in_string || p_in_char)
+                if (prefix_lit.inside())
                 {
-                    if (p_escaped)
-                    {
-                        p_escaped = false;
-                    }
-                    else if (ch == '\\')
-                    {
-                        p_escaped = true;
-                    }
-                    else if (p_in_string && ch == '"')
-                    {
-                        p_in_string = false;
-                    }
-                    else if (p_in_char && ch == '\'')
-                    {
-                        p_in_char = false;
-                    }
+                    prefix_lit.consume(ch);
                     continue;
                 }
                 if (line_comment)
@@ -735,8 +746,7 @@ export namespace cg::extract
                         return true;
                     }
                     prefix_word.clear();
-                    p_in_string = ch == '"';
-                    p_in_char = ch == '\'';
+                    prefix_lit.open(ch);
                     continue;
                 }
                 const bool ident = (ch >= 'a' && ch <= 'z')

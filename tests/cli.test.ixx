@@ -904,38 +904,50 @@ namespace
     // -------------------------------------------------------------- 退出码
     // --------
 
+    /// 花括号实参表便捷重载：span 形参不接受花括号初始化。
+    auto run_main(std::initializer_list<std::string> args) -> int
+    {
+        const std::vector<std::string> argv{args};
+        return cg::cli::run_main(argv);
+    }
+
+    /// 既有向量实参的直通重载。
+    auto run_main(std::span<const std::string> args) -> int
+    {
+        return cg::cli::run_main(args);
+    }
+
     void run_main_exit_codes(R& r)
     {
-        const auto run = [](std::vector<std::string> args)
-        { return cg::cli::run_main(args); };
-        cg::test::check(r, run({"bogus"}) == 2, "unknown command exits 2");
-        cg::test::check(r, run({}) == 2, "no args exits 2");
-        cg::test::check(r, run({"query"}) == 2, "missing operand exits 2");
+        cg::test::check(r, run_main({"bogus"}) == 2, "unknown command exits 2");
+        cg::test::check(r, run_main({}) == 2, "no args exits 2");
+        cg::test::check(r, run_main({"query"}) == 2, "missing operand exits 2");
         cg::test::check(
             r,
-            run({"stats", "--depth", "1"}) == 2,
+            run_main({"stats", "--depth", "1"}) == 2,
             "option invalid for the command exits 2");
         cg::test::check(
             r,
-            run({"stats", "-o", "no/such/ccg-dir", "--config", "missing"}) == 1,
+            run_main({"stats", "-o", "no/such/ccg-dir", "--config", "missing"})
+                == 1,
             "missing database exits 1");
-        cg::test::check(r, run({"--version"}) == 0, "--version exits 0");
-        cg::test::check(r, run({"help"}) == 0, "help exits 0");
+        cg::test::check(r, run_main({"--version"}) == 0, "--version exits 0");
+        cg::test::check(r, run_main({"help"}) == 0, "help exits 0");
         cg::test::check(
             r,
-            run({"help", "query"}) == 0,
+            run_main({"help", "query"}) == 0,
             "per-command help exits 0");
         cg::test::check(
             r,
-            run({"query", "--help"}) == 0,
+            run_main({"query", "--help"}) == 0,
             "--help on a subcommand exits 0");
         cg::test::check(
             r,
-            run({"check", "-o", "no/such/ccg-dir"}) == 2,
+            run_main({"check", "-o", "no/such/ccg-dir"}) == 2,
             "check without a mode exits 2 (usage, not runtime)");
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"check",
                  "--cycles",
                  "-o",
@@ -946,7 +958,7 @@ namespace
             "check --cycles on a missing db exits 1");
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"changes",
                  "some.cpp",
                  "-o",
@@ -957,19 +969,19 @@ namespace
             "changes on a missing db exits 1");
         cg::test::check(
             r,
-            run({"changes", "x", "--depth", "11"}) == 2,
+            run_main({"changes", "x", "--depth", "11"}) == 2,
             "changes depth out of range exits 2");
         cg::test::check(
             r,
-            run({"check", "--cycles", "--max", "0"}) == 2,
+            run_main({"check", "--cycles", "--max", "0"}) == 2,
             "check --max 0 exits 2");
         cg::test::check(
             r,
-            run({"update"}) == 2,
+            run_main({"update"}) == 2,
             "bare update (no files, no --drain) exits 2");
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"update",
                  "x.cpp",
                  "-o",
@@ -978,7 +990,10 @@ namespace
                  "missing"})
                 == 1,
             "update on a missing db exits 1");
-        cg::test::check(r, run({"help", "update"}) == 0, "help update exits 0");
+        cg::test::check(
+            r,
+            run_main({"help", "update"}) == 0,
+            "help update exits 0");
     }
 
     // ---------------------------------------------------- changes/check 解析
@@ -1363,39 +1378,37 @@ namespace
 
     void config_command(R& r)
     {
-        const auto run = [](std::vector<std::string> args)
-        { return cg::cli::run_main(args); };
         cg::test::check(
             r,
             make_inv({"config", "get"}).cmd == Invocation::Cmd::Config,
             "config parses into its command");
         cg::test::check(
             r,
-            run({"config", "get", "llvm-path", "extra"}) == 2,
+            run_main({"config", "get", "llvm-path", "extra"}) == 2,
             "config rejects a 4th operand (usage)");
         cg::test::check(
             r,
-            run({"config"}) == 2,
+            run_main({"config"}) == 2,
             "config without action exits 2");
         cg::test::check(
             r,
-            run({"config", "frobnicate"}) == 2,
+            run_main({"config", "frobnicate"}) == 2,
             "unknown config action exits 2");
         cg::test::check(
             r,
-            run({"config", "set", "llvm-path"}) == 2,
+            run_main({"config", "set", "llvm-path"}) == 2,
             "config set without a value exits 2");
         cg::test::check(
             r,
-            run({"config", "set", "no-such-key", "x"}) == 2,
+            run_main({"config", "set", "no-such-key", "x"}) == 2,
             "unknown config key exits 2");
         cg::test::check(
             r,
-            run({"config", "unset"}) == 2,
+            run_main({"config", "unset"}) == 2,
             "config unset without a key exits 2");
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "get",
                  "-o",
@@ -1406,7 +1419,8 @@ namespace
             "config get on a missing db exits 1");
         cg::test::check(
             r,
-            run({"config", "set", "llvm-path", "no/such/ccg-missing-prefix"})
+            run_main(
+                {"config", "set", "llvm-path", "no/such/ccg-missing-prefix"})
                 == 1,
             "config set with a nonexistent path exits 1");
 
@@ -1436,7 +1450,7 @@ namespace
         const fs::path  db = layout / "main" / "ccg.db";
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "set",
                  "llvm-path",
@@ -1462,7 +1476,7 @@ namespace
         }
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "unset",
                  "llvm-path",
@@ -1492,7 +1506,7 @@ namespace
         {
             const fs::path cap = layout / "get.json";
             FdRedirect     cap_stdout{1, cap, /*readable=*/false};
-            const int      rc = run(
+            const int      rc = run_main(
                 {"config",
                  "get",
                  "--json",
@@ -1526,9 +1540,20 @@ namespace
         // `ccg update` 协调旋钮（排队租约协议）：整数
         // 键存于各自的 meta 名下；非正值是
         // 运行时错误，未设置恢复 schema 默认值。
+    }
+
+    // update 协调旋钮（排队租约协议）的 set/get/unset 面：毫秒键
+    // 非正值拒绝、畸形矩阵全拒且不写库、报错文案带原始输入。
+    void config_update_knobs(R& r)
+    {
+        namespace fs = std::filesystem;
+        cg::test::ScratchDir layout_guard{
+            fs::temp_directory_path() / "ccg-cli-config-update"};
+        const fs::path& layout = layout_guard.base;
+        const fs::path  db = layout / "main" / "ccg.db";
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "set",
                  "update-lease-ms",
@@ -1541,7 +1566,7 @@ namespace
             "config set update-lease-ms exits 0");
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "set",
                  "update-busy-timeout-ms",
@@ -1565,7 +1590,7 @@ namespace
         }
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "set",
                  "update-lease-ms",
@@ -1593,7 +1618,7 @@ namespace
         {
             cg::test::check(
                 r,
-                run(
+                run_main(
                     {"config",
                      "set",
                      "update-lease-ms",
@@ -1622,7 +1647,7 @@ namespace
             // 代表形态。
             const fs::path cap = layout / "set-bad.err";
             FdRedirect     cap_stderr{2, cap, /*readable=*/false};
-            const int      rc = run(
+            const int      rc = run_main(
                 {"config",
                  "set",
                  "update-lease-ms",
@@ -1643,7 +1668,7 @@ namespace
         }
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "get",
                  "update-lease-ms",
@@ -1655,7 +1680,7 @@ namespace
             "config get update-lease-ms exits 0");
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "unset",
                  "update-lease-ms",
@@ -1672,12 +1697,23 @@ namespace
                 !store.meta("update_lease_ms").has_value(),
                 "unset removes the knob row (schema default)");
         }
+    }
+
+    // index-jobs 与 clang-compile-flags 两键的 set/get/unset 面：0-64
+    // 边界与畸形矩阵、字符串键空值用法错误。
+    void config_index_jobs_and_flags(R& r)
+    {
+        namespace fs = std::filesystem;
+        cg::test::ScratchDir layout_guard{
+            fs::temp_directory_path() / "ccg-cli-config-jobs"};
+        const fs::path& layout = layout_guard.base;
+        const fs::path  db = layout / "main" / "ccg.db";
         // index-jobs（并发上限键）：与毫秒旋钮同一严格解析纪律，但 0 合法
         // （显式回自动）、1-64 生效——与 update-lease-ms 的"非正值拒绝"分支
         // 相对照。写库值规范化（to_string），读回即生效形态。
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "set",
                  "index-jobs",
@@ -1697,7 +1733,7 @@ namespace
         }
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "set",
                  "index-jobs",
@@ -1710,7 +1746,7 @@ namespace
             "config set index-jobs 64 (upper bound) exits 0");
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "set",
                  "index-jobs",
@@ -1723,7 +1759,7 @@ namespace
             "config set index-jobs 1 (lower bound) exits 0");
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "set",
                  "index-jobs",
@@ -1756,7 +1792,7 @@ namespace
         {
             cg::test::check(
                 r,
-                run(
+                run_main(
                     {"config",
                      "set",
                      "index-jobs",
@@ -1780,7 +1816,7 @@ namespace
         }
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "get",
                  "index-jobs",
@@ -1792,7 +1828,7 @@ namespace
             "config get index-jobs exits 0");
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "unset",
                  "index-jobs",
@@ -1813,7 +1849,7 @@ namespace
         // 是用法错误（清空走 unset）；重放层经 db meta 消费。
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "set",
                  "clang-compile-flags",
@@ -1834,7 +1870,7 @@ namespace
         }
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "get",
                  "clang-compile-flags",
@@ -1846,7 +1882,7 @@ namespace
             "config get clang-compile-flags exits 0");
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "set",
                  "clang-compile-flags",
@@ -1859,7 +1895,7 @@ namespace
             "config set clang-compile-flags '' is a usage error");
         cg::test::check(
             r,
-            run(
+            run_main(
                 {"config",
                  "unset",
                  "clang-compile-flags",
@@ -1874,6 +1910,32 @@ namespace
     // ------------------------------- 并发上限覆盖链（resolve_jobs
     // 三态）--------
 
+    /// 路径的规范化字符串形态（词法规范化 + norm_path）。
+    [[nodiscard]]
+    auto norm_lex(const std::filesystem::path& p) -> std::string
+    {
+        return cg::util::norm_path(p.lexically_normal().generic_string());
+    }
+
+    /// 根下的 cdb 发现结果（未发现给空串；命中按规范化形态返回）。
+    [[nodiscard]]
+    auto find_compile_db_norm(const std::filesystem::path& root) -> std::string
+    {
+        const auto hit =
+            cg::cli::detail::find_compile_db(root.generic_string());
+        return hit.has_value() ? norm_lex(std::filesystem::path{*hit})
+                               : std::string{};
+    }
+
+    /// 直接写库的 index_jobs meta（手改库形态的读侧防御用例）。
+    void set_index_jobs_meta(
+        const std::filesystem::path& db_path,
+        const char*                  raw)
+    {
+        db::GraphStore writer{db_path.string()};
+        writer.set_meta("index_jobs", raw);
+    }
+
     void resolve_jobs_priority(R& r)
     {
         // 覆盖链：--jobs 旗标 > 库配置键 index_jobs > 自动按核。自动档基
@@ -1886,7 +1948,7 @@ namespace
         const std::string o = layout_guard.base.generic_string();
         cg::test::check(
             r,
-            cg::cli::run_main(
+            run_main(
                 std::vector<std::string>{
                     "config",
                     "set",
@@ -1939,17 +2001,12 @@ namespace
         {
             // 读侧防御：手改库写出的畸形 meta 按未配置处理（0 = 显式回自
             // 动、越界、非数字、空串），边界 1/64 恰好生效。
-            const auto with_raw = [&](const char* raw)
-            {
-                db::GraphStore writer{db.string()};
-                writer.set_meta("index_jobs", raw);
-            };
             Invocation inv = make_inv({"index", "r", "--config", "m"});
             inv.db_path = db.string();
             for (const char* raw :
                  {"0", "65", "abc", "-3", "1e5", "12,000", ""})
             {
-                with_raw(raw);
+                set_index_jobs_meta(db, raw);
                 db::GraphStore store{db.string()};
                 cg::test::check(
                     r,
@@ -1963,7 +2020,7 @@ namespace
             for (const std::pair<const char*, int> ok :
                  {std::pair{"1", 1}, std::pair{"64", 64}})
             {
-                with_raw(ok.first);
+                set_index_jobs_meta(db, ok.first);
                 db::GraphStore store{db.string()};
                 cg::test::check(
                     r,
@@ -2125,14 +2182,13 @@ namespace
         }
         Invocation msbuild_inv = make_inv({"msbuild", "p"});
         msbuild_inv.db_path = schema_db.string();
-        std::optional<db::GraphStore> rebuilt;
-        bool                          msbuild_recovered = false;
+        bool msbuild_recovered = false;
         try
         {
-            cg::cli::detail::open_store_create(msbuild_inv, rebuilt);
-            msbuild_recovered = rebuilt.has_value()
-                                && rebuilt->meta("schema_version").value_or("")
-                                       == std::to_string(db::schema_version);
+            db::GraphStore rebuilt =
+                cg::cli::detail::open_store_create(msbuild_inv);
+            msbuild_recovered = rebuilt.meta("schema_version").value_or("")
+                                == std::to_string(db::schema_version);
         }
         catch (const std::exception&)
         {
@@ -2148,11 +2204,10 @@ namespace
         }
         Invocation index_inv = make_inv({"index", "r", "--config", "schema"});
         index_inv.db_path = schema_db.string();
-        std::optional<db::GraphStore> denied;
-        bool                          index_threw = false;
+        bool index_threw = false;
         try
         {
-            cg::cli::detail::open_store_create(index_inv, denied);
+            (void)cg::cli::detail::open_store_create(index_inv);
         }
         catch (const db::SchemaMismatchError&)
         {
@@ -2160,7 +2215,7 @@ namespace
         }
         cg::test::check(
             r,
-            index_threw && !denied.has_value(),
+            index_threw,
             "ccg index without --force still refuses a "
             "schema-mismatched db");
 
@@ -2257,15 +2312,13 @@ namespace
         namespace fsn = std::filesystem;
         cg::test::ScratchDir scratch{
             fsn::absolute(fsn::path{"ccg-cli-update-scratch"})};
-        const fsn::path& base = scratch.base;
-        const auto       norm = [](const fsn::path& p)
-        { return cg::util::norm_path(p.lexically_normal().generic_string()); };
-        const std::string db_path = norm(base / "ccg.db");
+        const fsn::path&  base = scratch.base;
+        const std::string db_path = norm_lex(base / "ccg.db");
 
         // normalize_update_files：绝对化 + 词法规范化 + norm_path，
         // 按规范化形态去重，保留喂入顺序。
-        const std::string a_norm = norm(base / "a.cpp");
-        const std::string b_norm = norm(fsn::absolute(fsn::path{"b.cpp"}));
+        const std::string a_norm = norm_lex(base / "a.cpp");
+        const std::string b_norm = norm_lex(fsn::absolute(fsn::path{"b.cpp"}));
         const std::vector<std::string> files =
             cg::cli::detail::normalize_update_files(
                 {(base / "a.cpp").generic_string(),
@@ -3187,7 +3240,7 @@ namespace
             base.generic_string(),
             "--config",
             "rt"};
-        const int rc = cg::cli::run_main(hook_args);
+        const int rc = run_main(hook_args);
 
         std::cin.rdbuf(old_cin);
         redir_out.restore();
@@ -3243,11 +3296,32 @@ namespace
     // from_stream 会把 2 月 30 日这类日历上不存在的日子静默
     // 规范化成下月日期而不是置失败，靠 format 往返比对拦下，
     // 缺字段与尾随字符也一并拒绝。
+    /// 以 '|' 连接分支列表。
+    [[nodiscard]]
+    auto join_pipes(const std::vector<std::string>& parts) -> std::string
+    {
+        std::string out;
+        for (const std::string& p : parts)
+        {
+            if (!out.empty())
+            {
+                out += "|";
+            }
+            out += p;
+        }
+        return out;
+    }
+
+    /// ISO8601 时间戳解析是否拒绝该输入。
+    [[nodiscard]]
+    auto iso8601_age_rejects(std::string_view s) -> bool
+    {
+        return !cg::cli::detail::iso8601_age_hours(s).has_value();
+    }
+
     void hook_iso8601_age(R& r)
     {
         namespace hk = cg::cli::detail;
-        const auto reject = [&](std::string_view s)
-        { return !hk::iso8601_age_hours(s).has_value(); };
 
         // 合法：纪元零点距今必然远超 40 万小时。
         const auto zero = hk::iso8601_age_hours("1970-01-01T00:00:00Z");
@@ -3270,55 +3344,58 @@ namespace
         // 日历上不存在的日子（from_stream 规范化后必然对不上原串）。
         cg::test::check(
             r,
-            reject("2026-02-30T10:30:00Z"),
+            iso8601_age_rejects("2026-02-30T10:30:00Z"),
             "Feb 30 is rejected");
         cg::test::check(
             r,
-            reject("2026-02-29T10:30:00Z"),
+            iso8601_age_rejects("2026-02-29T10:30:00Z"),
             "Feb 29 of a non-leap year is rejected");
         cg::test::check(
             r,
-            reject("2100-02-29T00:00:00Z"),
+            iso8601_age_rejects("2100-02-29T00:00:00Z"),
             "Feb 29 of a century non-leap year is rejected");
         cg::test::check(
             r,
-            reject("2026-04-31T00:00:00Z"),
+            iso8601_age_rejects("2026-04-31T00:00:00Z"),
             "Apr 31 is rejected");
         cg::test::check(
             r,
-            reject("2026-11-31T00:00:00Z"),
+            iso8601_age_rejects("2026-11-31T00:00:00Z"),
             "Nov 31 is rejected");
         // 字段值域与缺字段。
         cg::test::check(
             r,
-            reject("2026-13-01T00:00:00Z"),
+            iso8601_age_rejects("2026-13-01T00:00:00Z"),
             "month 13 is rejected");
         cg::test::check(
             r,
-            reject("2026-11-14T24:00:00Z"),
+            iso8601_age_rejects("2026-11-14T24:00:00Z"),
             "hour 24 is rejected");
         cg::test::check(
             r,
-            reject("2026-11-14T10:60:00Z"),
+            iso8601_age_rejects("2026-11-14T10:60:00Z"),
             "minute 60 is rejected");
         cg::test::check(
             r,
-            reject("2026-11-14T10:30Z"),
+            iso8601_age_rejects("2026-11-14T10:30Z"),
             "a stamp missing seconds is rejected");
         cg::test::check(
             r,
-            reject("2026-11-14T10:30:00"),
+            iso8601_age_rejects("2026-11-14T10:30:00"),
             "a stamp missing the Z suffix is rejected");
         // 尾随字符、纪元前与垃圾输入。
         cg::test::check(
             r,
-            reject("2026-11-14T10:30:00Zx"),
+            iso8601_age_rejects("2026-11-14T10:30:00Zx"),
             "trailing bytes after Z are rejected");
         cg::test::check(
             r,
-            reject("1969-12-31T23:59:59Z"),
+            iso8601_age_rejects("1969-12-31T23:59:59Z"),
             "pre-1970 stamps are rejected");
-        cg::test::check(r, reject("not a timestamp"), "garbage is rejected");
+        cg::test::check(
+            r,
+            iso8601_age_rejects("not a timestamp"),
+            "garbage is rejected");
     }
 
     void hook_inprocess_queries(R& r)
@@ -3379,23 +3456,28 @@ namespace
         (void)ov1;
         (void)ov2;
 
-        bool       timed_out = false;
-        const auto hits = query_symbols(db, "callee", "b.cpp", &timed_out);
+        const cg::cli::detail::SymbolQuery hits =
+            query_symbols(db, "callee", "b.cpp");
         cg::test::check(
             r,
-            !timed_out && hits.size() == 1 && hits[0].uid == callee
-                && hits[0].kind == "function" && hits[0].name == "callee"
-                && hits[0].qualified_name == "shape::callee"
-                && hits[0].file == "e:/hook/b.cpp" && hits[0].line == 2,
+            !hits.yielded && hits.symbols.size() == 1
+                && hits.symbols[0].uid == callee
+                && hits.symbols[0].kind == "function"
+                && hits.symbols[0].name == "callee"
+                && hits.symbols[0].qualified_name == "shape::callee"
+                && hits.symbols[0].file == "e:/hook/b.cpp"
+                && hits.symbols[0].line == 2,
             "the in-process query mirrors `ccg query --file`");
 
-        const auto caller_hit = query_symbols(db, "caller", "a.cpp");
+        const cg::cli::detail::SymbolQuery caller_hit =
+            query_symbols(db, "caller", "a.cpp");
         cg::test::check(
             r,
-            caller_hit.size() == 1 && caller_hit[0].uid == caller,
+            caller_hit.symbols.size() == 1
+                && caller_hit.symbols[0].uid == caller,
             "the caller resolves for impact");
         const cg::cli::detail::ImpactInfo impact =
-            symbol_impact(db, caller_hit.front());
+            symbol_impact(db, caller_hit.symbols.front());
         cg::test::check(
             r,
             impact.attempted && impact.ok,
@@ -3405,7 +3487,7 @@ namespace
             impact.direct == 0 && impact.impacted == 0,
             "an upstream walk from the caller finds nothing");
         const cg::cli::detail::ImpactInfo downstream =
-            symbol_impact(db, hits.front());
+            symbol_impact(db, hits.symbols.front());
         cg::test::check(
             r,
             downstream.ok && downstream.direct == 1 && downstream.impacted == 1
@@ -3413,10 +3495,14 @@ namespace
                 && downstream.direct_symbols[0].uid == caller,
             "the in-process impact reports the direct consumer");
 
-        const auto ov_hit = query_symbols(db, "ov", "a.cpp");
-        cg::test::check(r, ov_hit.size() == 2, "both overloads match by name");
+        const cg::cli::detail::SymbolQuery ov_hit =
+            query_symbols(db, "ov", "a.cpp");
+        cg::test::check(
+            r,
+            ov_hit.symbols.size() == 2,
+            "both overloads match by name");
         const cg::cli::detail::ImpactInfo ambiguous =
-            symbol_impact(db, ov_hit.front());
+            symbol_impact(db, ov_hit.symbols.front());
         cg::test::check(
             r,
             ambiguous.attempted && !ambiguous.ok
@@ -3501,37 +3587,34 @@ namespace
 
         // 发现顺序：根本身压过 root/build 与一层
         // 子目录；root/build 压过任意子目录。
-        const auto found = [&](const fsn::path& root)
-        {
-            const auto hit =
-                cg::cli::detail::find_compile_db(root.generic_string());
-            return hit.has_value() ? norm(fsn::path{*hit}) : std::string{};
-        };
         cg::test::check(
             r,
-            found(tree).empty(),
+            find_compile_db_norm(tree).empty(),
             "no compile db -> discovery finds nothing");
         scratch.put(tree / "build" / "compile_commands.json", "[]");
         cg::test::check(
             r,
-            found(tree) == norm(tree / "build" / "compile_commands.json"),
+            find_compile_db_norm(tree)
+                == norm_lex(tree / "build" / "compile_commands.json"),
             "discovery falls back to <root>/build");
         scratch.put(tree / "generated" / "compile_commands.json", "[]");
         cg::test::check(
             r,
-            found(tree) == norm(tree / "build" / "compile_commands.json"),
+            find_compile_db_norm(tree)
+                == norm_lex(tree / "build" / "compile_commands.json"),
             "<root>/build outranks a one-level subdirectory");
         scratch.put(tree / "compile_commands.json", "[]");
         cg::test::check(
             r,
-            found(tree) == norm(tree / "compile_commands.json"),
+            find_compile_db_norm(tree)
+                == norm_lex(tree / "compile_commands.json"),
             "<root> itself outranks <root>/build");
         const fsn::path shallow = base / "shallow";
         scratch.put(shallow / "generated" / "compile_commands.json", "[]");
         cg::test::check(
             r,
-            found(shallow)
-                == norm(shallow / "generated" / "compile_commands.json"),
+            find_compile_db_norm(shallow)
+                == norm_lex(shallow / "generated" / "compile_commands.json"),
             "discovery scans one level of subdirectories");
 
         // 对未记录编译数据库的库（库文件在而 compile_db_path meta
@@ -3940,6 +4023,12 @@ namespace
         "cli.run_main.exit_codes",
         &run_main_exit_codes};
     const cg::test::Registrar reg_config{"cli.config_command", &config_command};
+    const cg::test::Registrar reg_config_knobs{
+        "cli.config_update_knobs",
+        &config_update_knobs};
+    const cg::test::Registrar reg_config_jobs{
+        "cli.config_index_jobs_and_flags",
+        &config_index_jobs_and_flags};
     const cg::test::Registrar reg_resolve_jobs{
         "cli.resolve_jobs",
         &resolve_jobs_priority};
@@ -4185,6 +4274,12 @@ namespace
                 text.ends_with(" …[ccg 截断]"),
                 "V7.1 degrade ladder ends in the truncation marker");
         }
+    }
+
+    // Grep 模式过滤器与受限正则路径：整标识符（链）在装饰剥离后幸存、
+    // 顶层交替拆分与分支级合并、形态护栏拒指数回溯形状。
+    void grep_pattern_filter_units(R& r)
+    {
         // Grep 模式过滤器：整标识符（链）在装饰
         // 剥离后幸存；交替/调用形态/点号不行。
         cg::test::check(
@@ -4237,31 +4332,33 @@ namespace
         // 转义竖线、括号内竖线、空分支、不平衡括号、超限分支与空输入
         // 一律整体静默（返回空列表）。
         {
-            const auto eq = [](const std::vector<std::string>& got,
-                               const std::vector<std::string>& want)
-            { return got == want; };
             cg::test::check(
                 r,
-                eq(hk::split_top_alternation("pi"), {"pi"}),
+                hk::split_top_alternation("pi")
+                    == std::vector<std::string>{"pi"},
                 "split: no alternation returns the whole pattern");
             const std::vector<std::string> two =
                 hk::split_top_alternation("pi|area");
             cg::test::check(
                 r,
-                eq(two, {"pi", "area"}),
+                two == std::vector<std::string>({"pi", "area"}),
                 "split: top-level pipe cuts branches");
             cg::test::check(
                 r,
-                eq(hk::split_top_alternation("a|b|c"), {"a", "b", "c"}),
+                hk::split_top_alternation("a|b|c")
+                    == std::vector<std::string>({"a", "b", "c"}),
                 "split: three branches");
             cg::test::check(
                 r,
-                eq(hk::split_top_alternation("f(a|b)"), {"f(a|b)"})
-                    && eq(hk::split_top_alternation("(a|b)"), {"(a|b)"}),
+                hk::split_top_alternation("f(a|b)")
+                        == std::vector<std::string>{"f(a|b)"}
+                    && hk::split_top_alternation("(a|b)")
+                           == std::vector<std::string>{"(a|b)"},
                 "split: pipes inside groups stay in their branch");
             cg::test::check(
                 r,
-                eq(hk::split_top_alternation("foo\\|bar"), {"foo\\|bar"}),
+                hk::split_top_alternation("foo\\|bar")
+                    == std::vector<std::string>{"foo\\|bar"},
                 "split: escaped pipe is a literal, not a cut");
             cg::test::check(
                 r,
@@ -4288,19 +4385,6 @@ namespace
         // pattern 合并（rg -e pi -e area 等价交替）、正则路径 pattern
         // 取"非噪声分支原始文本重拼"（绝不取用户原文整条）。
         {
-            const auto join_pipe = [](const std::vector<std::string>& parts)
-            {
-                std::string out;
-                for (const std::string& p : parts)
-                {
-                    if (!out.empty())
-                    {
-                        out += "|";
-                    }
-                    out += p;
-                }
-                return out;
-            };
             const auto one = hk::classify_lookup_patterns({"pi|class"});
             cg::test::check(
                 r,
@@ -4323,7 +4407,7 @@ namespace
             cg::test::check(
                 r,
                 mixed.has_value() && mixed->alive.empty() && !mixed->noise_only
-                    && join_pipe(mixed->non_noise_raw) == "Get\\w+",
+                    && join_pipes(mixed->non_noise_raw) == "Get\\w+",
                 "classify: regex pattern re-joins non-noise raw branches "
                 "only");
             const auto multi = hk::classify_lookup_patterns({"pi", "area"});
@@ -4331,7 +4415,7 @@ namespace
                 r,
                 multi.has_value()
                     && multi->alive == std::vector<std::string>{"pi", "area"}
-                    && join_pipe(multi->non_noise_raw) == "pi|area",
+                    && join_pipes(multi->non_noise_raw) == "pi|area",
                 "classify: multi-pattern request merges like alternation");
             cg::test::check(
                 r,
@@ -4380,8 +4464,12 @@ namespace
                 && !hk::regex_pattern_allowed("^\\b$")
                 && !hk::regex_pattern_allowed(""),
             "regex guard: pure-decoration patterns reject");
-        // 多词候选清单渲染：首行披露、term 序优先、(+K more) 尾注、
-        // 首行/条目域显示截断、硬截档保险丝与 1400B 恒有界。
+    }
+
+    // 多词候选清单渲染：首行披露、term 序优先、(+K more) 尾注、
+    // 首行/条目域显示截断、硬截档保险丝与 1400B 恒有界。
+    void injection_candidate_list_units(R& r)
+    {
         {
             std::vector<hk::MultiLookupEntry> entries;
             entries.push_back(
@@ -4649,6 +4737,12 @@ namespace
                            != std::string::npos,
                 "candidate list: over-budget rows drop, head and hint stay");
         }
+    }
+
+    // 注入层共享词汇微钉：噪声 token、限定名裁剪、码点裁剪、
+    // 置信档排序与路径预筛归一化。
+    void injection_helper_vocabulary_units(R& r)
+    {
         cg::test::check(
             r,
             hk::is_noise_token("auto") && !hk::is_noise_token("IsOk"),
@@ -4689,6 +4783,15 @@ namespace
     const cg::test::Registrar reg_ptu{
         "cli.hook.pretooluse_injection",
         &pretooluse_injection_units};
+    const cg::test::Registrar reg_pattern_filter{
+        "cli.hook.grep_pattern_filter",
+        &grep_pattern_filter_units};
+    const cg::test::Registrar reg_candidate_list{
+        "cli.hook.injection_candidate_list",
+        &injection_candidate_list_units};
+    const cg::test::Registrar reg_helper_vocab{
+        "cli.hook.injection_helper_vocabulary",
+        &injection_helper_vocabulary_units};
 
     /**
      * @brief 结构化查找请求的归一化闸门（四工具监听的 shell 臂汇合点）。
@@ -4698,26 +4801,31 @@ namespace
      *           fixed 字面串必须剥装饰恒等（裸标识符链）才转发且绝不拆；
      *           AfterCd 的 cwd 提示收窄路径过滤。
      */
+    /// 单意图查找请求的提取产出形态。
+    [[nodiscard]]
+    auto make_single_lookup(
+        std::string              pattern,
+        std::vector<std::string> paths = {},
+        bool fixed = false) -> cg::util::shellscan::ShellExtractOutcome
+    {
+        namespace scan = cg::util::shellscan;
+        scan::ShellExtractOutcome outcome;
+        scan::ShellRequest        request;
+        request.patterns = {std::move(pattern)};
+        request.single = true;
+        request.fixed = fixed;
+        request.paths = std::move(paths);
+        outcome.requests.push_back(std::move(request));
+        return outcome;
+    }
+
     void normalize_lookup_cases(R& r)
     {
         namespace scan = cg::util::shellscan;
-        const auto make_single = [](std::string              pattern,
-                                    std::vector<std::string> paths = {},
-                                    bool                     fixed = false)
-        {
-            scan::ShellExtractOutcome outcome;
-            scan::ShellRequest        request;
-            request.patterns = {std::move(pattern)};
-            request.single = true;
-            request.fixed = fixed;
-            request.paths = std::move(paths);
-            outcome.requests.push_back(std::move(request));
-            return outcome;
-        };
         // 单意图正则请求：pattern 原样转发（装饰留给意图判定剥）。
         {
-            const auto lookup =
-                hk::normalize_shell_lookup(make_single("pi", {"src/db"}));
+            const auto lookup = hk::normalize_shell_lookup(
+                make_single_lookup("pi", {"src/db"}));
             cg::test::check(
                 r,
                 lookup.has_value() && lookup->pattern == "pi"
@@ -4726,7 +4834,7 @@ namespace
         }
         {
             const auto lookup =
-                hk::normalize_shell_lookup(make_single("IsOk()"));
+                hk::normalize_shell_lookup(make_single_lookup("IsOk()"));
             cg::test::check(
                 r,
                 lookup.has_value() && lookup->pattern == "IsOk()",
@@ -4735,7 +4843,7 @@ namespace
         // fixed 字面串：裸链恒等转发；含元字符的字面在找非符号文本。
         {
             const auto lookup =
-                hk::normalize_shell_lookup(make_single("pi", {}, true));
+                hk::normalize_shell_lookup(make_single_lookup("pi", {}, true));
             cg::test::check(
                 r,
                 lookup.has_value() && lookup->pattern == "pi",
@@ -4743,18 +4851,18 @@ namespace
         }
         cg::test::check(
             r,
-            !hk::normalize_shell_lookup(make_single("IsOk()", {}, true))
+            !hk::normalize_shell_lookup(make_single_lookup("IsOk()", {}, true))
                  .has_value(),
             "normalize: fixed literal with call shape drops");
         cg::test::check(
             r,
-            !hk::normalize_shell_lookup(make_single("^pi$", {}, true))
+            !hk::normalize_shell_lookup(make_single_lookup("^pi$", {}, true))
                  .has_value(),
             "normalize: fixed literal with anchors drops");
         // 多意图与歧义形态：多请求、多 pattern、多路径、通配路径。
         {
-            scan::ShellExtractOutcome two = make_single("foo");
-            two.requests.push_back(make_single("bar").requests.front());
+            scan::ShellExtractOutcome two = make_single_lookup("foo");
+            two.requests.push_back(make_single_lookup("bar").requests.front());
             cg::test::check(
                 r,
                 !hk::normalize_shell_lookup(two).has_value(),
@@ -4764,7 +4872,7 @@ namespace
             // 多 pattern 翻转：rg -e a -e b 是 OR 语义的"多词并查"，与顶层
             // 交替同构——非 fixed 形态转发（首 pattern + extra_patterns），
             // 汇合判定层按交替分支同款护栏消费。
-            scan::ShellExtractOutcome multi = make_single("foo");
+            scan::ShellExtractOutcome multi = make_single_lookup("foo");
             multi.requests.front().patterns.push_back("bar");
             multi.requests.front().single = false;
             const auto forwarded = hk::normalize_shell_lookup(multi);
@@ -4778,7 +4886,7 @@ namespace
         }
         {
             // 多 pattern 合计上限与交替分支同口径：9 个 pattern 拒。
-            scan::ShellExtractOutcome nine = make_single("p1");
+            scan::ShellExtractOutcome nine = make_single_lookup("p1");
             for (int i = 2; i <= 9; ++i)
             {
                 nine.requests.front().patterns.push_back(
@@ -4792,7 +4900,8 @@ namespace
         }
         {
             // fixed 字面多 pattern：多意图字面查找，绝不拆交替。
-            scan::ShellExtractOutcome fixed2 = make_single("a", {}, true);
+            scan::ShellExtractOutcome fixed2 =
+                make_single_lookup("a", {}, true);
             fixed2.requests.front().patterns.push_back("b");
             fixed2.requests.front().single = false;
             cg::test::check(
@@ -4802,14 +4911,14 @@ namespace
         }
         cg::test::check(
             r,
-            !hk::normalize_shell_lookup(make_single("a|b", {}, true))
+            !hk::normalize_shell_lookup(make_single_lookup("a|b", {}, true))
                  .has_value(),
             "normalize: fixed literal with a pipe drops");
         {
             // 引擎显式否决单意图（single=false 的单 pattern 请求）仍拒：
             // 各提取层对多 pattern 均按数量派生 single，该形态只能来自引
             // 擎 JSON 直写——引擎语义漂移的防线。
-            scan::ShellExtractOutcome dissent = make_single("pi");
+            scan::ShellExtractOutcome dissent = make_single_lookup("pi");
             dissent.requests.front().single = false;
             cg::test::check(
                 r,
@@ -4818,16 +4927,17 @@ namespace
         }
         cg::test::check(
             r,
-            !hk::normalize_shell_lookup(make_single("pi", {"src", "include"}))
+            !hk::normalize_shell_lookup(
+                 make_single_lookup("pi", {"src", "include"}))
                  .has_value(),
             "normalize: multiple paths drop (range ambiguous)");
         cg::test::check(
             r,
-            !hk::normalize_shell_lookup(make_single("pi", {"*.cpp"}))
+            !hk::normalize_shell_lookup(make_single_lookup("pi", {"*.cpp"}))
                  .has_value(),
             "normalize: wildcard path drops (range unknown)");
         {
-            scan::ShellExtractOutcome shadowed = make_single("pi");
+            scan::ShellExtractOutcome shadowed = make_single_lookup("pi");
             shadowed.skip_all = "alias-shadow";
             cg::test::check(
                 r,
@@ -4845,7 +4955,7 @@ namespace
         // AfterCd 的 cwd 提示：无路径时单独成过滤串；相对路径拼接；
         // 绝对路径过滤串与 cd 无关。
         {
-            auto outcome = make_single("pi");
+            auto outcome = make_single_lookup("pi");
             outcome.requests.front().path_kind = scan::PathKind::AfterCd;
             outcome.requests.front().cwd_hint = "src";
             const auto lookup = hk::normalize_shell_lookup(outcome);
@@ -4855,7 +4965,7 @@ namespace
                 "normalize: cd hint becomes the path filter");
         }
         {
-            auto outcome = make_single("pi", {"include"});
+            auto outcome = make_single_lookup("pi", {"include"});
             outcome.requests.front().path_kind = scan::PathKind::AfterCd;
             outcome.requests.front().cwd_hint = "src";
             const auto lookup = hk::normalize_shell_lookup(outcome);
@@ -4865,7 +4975,7 @@ namespace
                 "normalize: cd hint prefixes a relative path filter");
         }
         {
-            auto outcome = make_single("pi", {"e:/abs/dir"});
+            auto outcome = make_single_lookup("pi", {"e:/abs/dir"});
             outcome.requests.front().path_kind = scan::PathKind::AfterCd;
             outcome.requests.front().cwd_hint = "src";
             const auto lookup = hk::normalize_shell_lookup(outcome);
@@ -4876,7 +4986,7 @@ namespace
         }
         // 管道中段（stdin 语义）：无路径提示，全库口径。
         {
-            auto outcome = make_single("pi");
+            auto outcome = make_single_lookup("pi");
             outcome.requests.front().path_kind = scan::PathKind::StdinPipe;
             const auto lookup = hk::normalize_shell_lookup(outcome);
             cg::test::check(
@@ -4969,10 +5079,6 @@ namespace
     // 不识别这类"怪但承重"的形态）。
     void hook_scanner_golden(R& r)
     {
-        const auto mask = [](std::string_view s)
-        { return hk::mask_literals(s); };
-        const auto fp = [](std::string_view s)
-        { return hk::code_fingerprint(s); };
 
         // 掩码：注释/字面量内容变空格，字节长度与换行原样。
         const std::string src1 = "int x; // note\nint y; /* block */ z;";
@@ -4980,12 +5086,13 @@ namespace
                                   + "int y; " + std::string(11, ' ') + " z;";
         cg::test::check(
             r,
-            mask(src1) == want1 && mask(src1).size() == src1.size(),
+            hk::mask_literals(src1) == want1
+                && hk::mask_literals(src1).size() == src1.size(),
             "mask blanks comments, keeps code and line structure");
         const std::string src8 = "a /* x\r\ny */ b";
         cg::test::check(
             r,
-            mask(src8)
+            hk::mask_literals(src8)
                 == "a " + std::string(4, ' ') + "\r\n" + std::string(4, ' ')
                        + " b",
             "mask preserves CR/LF inside block comments");
@@ -4994,38 +5101,39 @@ namespace
         const std::string src2 = "f(\"a b\"); c='\\''; d=\"\\\"\";";
         cg::test::check(
             r,
-            mask(src2)
+            hk::mask_literals(src2)
                     == "f(" + std::string(5, ' ')
                            + "); c=" + std::string(4, ' ')
                            + "; d=" + std::string(4, ' ') + ";"
-                && mask(src2).size() == src2.size(),
+                && hk::mask_literals(src2).size() == src2.size(),
             "mask covers quotes and escape pairs");
 
         // 掩码：原始字符串整体识别（含定界符与后续代码的分界）。
         cg::test::check(
             r,
-            mask("auto s = R\"(no // code here)\"; int t;")
+            hk::mask_literals("auto s = R\"(no // code here)\"; int t;")
                 == "auto s = " + std::string(20, ' ') + "; int t;",
             "mask recognizes bare raw strings");
         // 编码前缀（u8R/uR/UR/LR）与前缀字符一并掩码；自定义定界符可用。
         cg::test::check(
             r,
-            mask("x=u8R\"ab(c)ab\";y=1;")
+            hk::mask_literals("x=u8R\"ab(c)ab\";y=1;")
                 == "x=" + std::string(12, ' ') + ";y=1;",
             "mask includes the u8 encoding prefix");
         cg::test::check(
             r,
-            mask("x=uR\"(c)\"; z;") == "x=" + std::string(7, ' ') + "; z;",
+            hk::mask_literals("x=uR\"(c)\"; z;")
+                == "x=" + std::string(7, ' ') + "; z;",
             "mask includes the u encoding prefix");
         // 定界符恰 16 字符合法；17 字符退化为非原始字符串路径。
         cg::test::check(
             r,
-            mask("R\"abcdefghijklmnop(x)abcdefghijklmnop\" t;")
+            hk::mask_literals("R\"abcdefghijklmnop(x)abcdefghijklmnop\" t;")
                 == std::string(38, ' ') + " t;",
             "a 16-char raw delimiter is still raw");
         cg::test::check(
             r,
-            mask("R\"abcdefghijklmnopq(x)abcdefghijklmnopq\" t;")
+            hk::mask_literals("R\"abcdefghijklmnopq(x)abcdefghijklmnopq\" t;")
                 == std::string(2, ' ') + "abcdefghijklmnopq(x)abcdefghijklmnopq"
                        + std::string(4, ' '),
             "a 17-char delimiter falls back to the plain-string path");
@@ -5034,61 +5142,65 @@ namespace
         // 括号部分作为代码存活，直到下一个引号重新开串。
         cg::test::check(
             r,
-            mask("int XR\"(a)\"; int b;")
+            hk::mask_literals("int XR\"(a)\"; int b;")
                 == "int X  (a) " + std::string(8, ' '),
             "illegal raw prefix keeps parens as code (golden)");
 
         // 掩码：未闭合形态一律吞到文本末尾，绝不越界。
         cg::test::check(
             r,
-            mask("int a; R\"(never closed") == "int a; " + std::string(15, ' '),
+            hk::mask_literals("int a; R\"(never closed")
+                == "int a; " + std::string(15, ' '),
             "unclosed raw string masks to EOF");
         cg::test::check(
             r,
-            mask("x='\\") == "x=  ",
+            hk::mask_literals("x='\\") == "x=  ",
             "trailing backslash at EOF is masked, not skipped over");
 
         // 指纹：注释整段丢弃、代码空白丢弃、字面量逐字保留（含空格）。
         cg::test::check(
             r,
-            fp("a; // note\nb;\t/* z */ c") == "a;b;c",
+            hk::code_fingerprint("a; // note\nb;\t/* z */ c") == "a;b;c",
             "fingerprint drops comments and code whitespace");
         cg::test::check(
             r,
-            fp("f(\"a  b\") ; g('x')") == "f(\"a  b\");g('x')",
+            hk::code_fingerprint("f(\"a  b\") ; g('x')")
+                == "f(\"a  b\");g('x')",
             "fingerprint keeps string/char literals verbatim");
         cg::test::check(
             r,
-            fp("x; //\"c\" ; y") == "x;",
+            hk::code_fingerprint("x; //\"c\" ; y") == "x;",
             "line comment swallows embedded quotes");
         cg::test::check(
             r,
-            fp("x = \"//\"; y") == "x=\"//\";y",
+            hk::code_fingerprint("x = \"//\"; y") == "x=\"//\";y",
             "string-embedded slashes are not a comment");
         // 指纹的存在意义：纯注释/空白编辑不改变指纹。
         cg::test::check(
             r,
-            fp("a=1;//x") == fp("a=1;  "),
+            hk::code_fingerprint("a=1;//x") == hk::code_fingerprint("a=1;  "),
             "comment-only edits leave the fingerprint unchanged");
         cg::test::check(
             r,
-            fp("int f() {\n}\n// done") == fp("int f(){}"),
+            hk::code_fingerprint("int f() {\n}\n// done")
+                == hk::code_fingerprint("int f(){}"),
             "whitespace-only edits leave the fingerprint unchanged");
 
         // 指纹：原始字符串刻意不识别（与掩码侧的口径差异显式保留）。
         cg::test::check(
             r,
-            fp("R\"( // note )\"") == "R\"( // note )\"",
+            hk::code_fingerprint("R\"( // note )\"") == "R\"( // note )\"",
             "fingerprint does not special-case raw strings");
         // 同一输入两副面孔：内部引号让指纹把后续代码当串内容、掩码则按
         // 原始字符串整体抹掉——这正是两策略差异的浓缩样本。
         cg::test::check(
             r,
-            fp("R\"(q\")\" int x;") == "R\"(q\")\" int x;",
+            hk::code_fingerprint("R\"(q\")\" int x;") == "R\"(q\")\" int x;",
             "fingerprint mis-parses inner quotes verbatim (golden)");
         cg::test::check(
             r,
-            mask("R\"(q\")\" int x;") == std::string(7, ' ') + " int x;",
+            hk::mask_literals("R\"(q\")\" int x;")
+                == std::string(7, ' ') + " int x;",
             "mask closes the raw string at its true delimiter");
 
         // 掩码的下游用途：引用扫描在掩码文本上找独立标识符。

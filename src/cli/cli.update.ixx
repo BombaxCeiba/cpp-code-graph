@@ -39,8 +39,9 @@ export namespace cg::cli
          * @brief 写入声明行的持有者身份记号。
          *
          * @internal
-         * `ccg update` 的库协调协议（排队租约 + 事务内心跳 + 偷取仲裁）：数据库自身是协调者。
-         * pending_updates 是变更队列（每行一个规范化路径，PRIMARY KEY 把并发
+         * `ccg update` 的库协调协议（排队租约 + 事务内心跳 +
+         * 偷取仲裁）：数据库自身是协调者。 pending_updates
+         * 是变更队列（每行一个规范化路径，PRIMARY KEY 把并发
          * 入队去重），update_claim 单例行（持有者 + Unix 纪元毫秒的租约到期）
          * 是独占声明。没有锁文件、没有 PID 启发式：租约已过期的声明会被下一
          * 个更新者偷走，故崩溃的持有者在下一个事件上自愈。每个协调步骤都是
@@ -106,6 +107,520 @@ export namespace cg::cli
                 }
             }
             return out;
+        }
+
+        /**
+         * @brief 项目文件行重采集联动的参数面。
+         *
+         * @internal run_update 传给重采集管线各段的公共参数。content_hash
+         * 复用宿主的哈希回调（与 TU 批的出队判定同一单点）；claim_lost 是
+         * 引用出参——静默窗内声明被偷时置位，宿主的 peek 循环据此停轮，
+         * 把队列交给偷取者。
+         */
+        struct ProjectRefreshArgs
+        {
+            cg::db::GraphStore& store;
+            const Invocation&   inv;
+            const std::string&  holder;
+            std::int64_t        lease_ms;
+            std::int64_t        refresh_debounce_ms;
+            bool&               claim_lost;
+
+            /** @brief 出队判定与哈希回调共用的内容哈希单点。 */
+            const std::function<std::string(const std::string&)>& content_hash;
+        };
+
+        /**
+         * @brief 无条件出队一组队列行（tracked=false 通道）。
+         *
+         * @internal 服务两类行：成功采集后的项目行（信号已被一次完整重
+         * 采集消费）与联动无处可去的行（留着只会让 peek 永远返回它们）。
+         * 与 TU 批的覆盖判定无关——那些行走 clear_covered 的快照复核
+         * 通道。
+         */
+        auto dequeue_untracked(
+            const ProjectRefreshArgs&       args,
+            const std::vector<std::string>& which) -> void
+        {
+            std::vector<cg::db::PendingClearInput> clear;
+            clear.reserve(which.size());
+            for (const std::string& f : which)
+            {
+                clear.push_back(
+                    cg::db::PendingClearInput{.path = f, .tracked = false});
+            }
+            args.store.clear_covered(
+                clear,
+                args.content_hash,
+                args.holder,
+                args.lease_ms);
+        }
+
+        /**
+         * @brief 失败镜像重入队：把派生前已出队的项目行原样放回队列。
+         *
+         * @internal 保住"下一次事件重试"的联动语义——行在派生前删除
+         * （见 spawn_capture_and_settle 的事务次序），失败路径把它们送
+         * 回来。入队失败（库锁死等超时）时行已不可恢复地离开队列：如实
+         * 告警，用户下一次保存该文件即自愈。
+         */
+        auto requeue_project_lines(
+            const ProjectRefreshArgs&       args,
+            const std::vector<std::string>& lines) -> void
+        {
+            try
+            {
+                args.store.enqueue_pending(lines);
+            }
+            catch (const std::exception&)
+            {
+                std::println(
+                    std::cerr,
+                    "ccg update: could not re-queue the project line{} after "
+                    "the failed refresh",
+                    lines.size() == 1 ? "" : "s");
+            }
+        }
+
+        /**
+         * @brief 把 peek 出的项目文件行映射到应重采集的配置目标。
+         *
+         * @internal 逐行调用 project_refresh_target_for（联动判定的唯一
+         * 收口）：命中的行合并进一次重采集（同一配置），未命中的行（根
+         * 外属性文件等）由调用方按未跟踪出队。目标取首个命中——多行命中
+         * 同一配置目录时一次采集覆盖全部。
+         *
+         * @param registry 已加载的注册表。
+         * @param project_root 项目根（正斜杠、规范化）。
+         * @param inv 调用面（配置名参与注册表条目匹配）。
+         * @param lines peek 出的项目文件行。
+         * @param matched 命中的行（出参，按输入序）。
+         * @param unmatched 未命中的行（出参，按输入序）。
+         *
+         * @return 命中时给出目标配置；全部未命中时为 nullopt。
+         */
+        [[nodiscard]]
+        auto match_refresh_lines(
+            const cg::msbuild::Registry&    registry,
+            const std::string&              project_root,
+            const Invocation&               inv,
+            const std::vector<std::string>& lines,
+            std::vector<std::string>&       matched,
+            std::vector<std::string>&       unmatched)
+            -> std::optional<cg::msbuild::ProjectRefreshTarget>
+        {
+            std::optional<cg::msbuild::ProjectRefreshTarget> target;
+            for (const std::string& line : lines)
+            {
+                auto candidate = cg::msbuild::project_refresh_target_for(
+                    registry,
+                    project_root,
+                    inv.config_name,
+                    line);
+                if (candidate.has_value())
+                {
+                    matched.push_back(line);
+                    if (!target.has_value())
+                    {
+                        target = std::move(candidate);
+                    }
+                }
+                else
+                {
+                    unmatched.push_back(line);
+                }
+            }
+            return target;
+        }
+
+        /**
+         * @brief 静默窗去抖：等队列静默或到达硬上限后再发起重采集。
+         *
+         * @internal 期间的新行入队会重置窗口（IDE 连发保存在窗口内合并
+         * 进同一次采集），租约照常心跳；30 秒硬上限后照发（宁可多采集，
+         * 绝不丢事件）。心跳 peek 发现声明被偷时置 args.claim_lost 并返
+         * 回 false——队列归偷取者，调用方以 "yielded" 让外层停轮。
+         *
+         * @return true = 窗口已过，可继续联动；false = 声明被偷，须让位。
+         */
+        [[nodiscard]]
+        auto wait_quiet_window(
+            const ProjectRefreshArgs&       args,
+            const std::vector<std::string>& lines) -> bool
+        {
+            const auto window_start = std::chrono::steady_clock::now();
+            auto       quiet_since = window_start;
+            std::vector<std::string> queue_face = lines;
+            for (;;)
+            {
+                const auto now = std::chrono::steady_clock::now();
+                if (now - window_start >= std::chrono::seconds{30}
+                    || now - quiet_since >= std::chrono::milliseconds{
+                           args.refresh_debounce_ms})
+                {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds{250});
+                const cg::db::PendingPeek beat =
+                    args.store.peek_pending(args.lease_ms, args.holder);
+                if (beat.claim_lost)
+                {
+                    std::println(
+                        std::cerr,
+                        "ccg update: claim stolen during the refresh "
+                        "debounce - stopping; the new holder continues");
+                    args.claim_lost = true;
+                    return false;
+                }
+                if (beat.files != queue_face)
+                {
+                    quiet_since = now;
+                    queue_face = beat.files;
+                }
+            }
+            return true;
+        }
+
+        /**
+         * @brief 哈希门：求值输入快照与当前输入全等则本次事件可被现有
+         *        语料吸收。
+         *
+         * @internal 与求值通道成对，插在静默窗之后、capture 锁探测之前：
+         * 重采前先问"求值输入变没变"。快照由成功求值采集的尾部写回
+         * （import 闭包是求值腿的免费产物）；读侧全等 = 本次事件已被现有
+         * 语料覆盖——吸收行、跳过重采（IDE 保存未落实质变化是联动事件的
+         * 大多数形态）。任何不等（无快照/文件哈希变/环境身份变/坏行）按
+         * "变"处理，走既有采集联动。msbuild/cl 的"当前值"口径 = 下一轮
+         * 采集的发现缓存会复用的注册表路径——与采集侧同一决策面，不会出
+         * 现"门说变、采集却复用旧路径"的门-采集失配循环。
+         *
+         * @return true = 全等（调用方吸收行并跳过重采）；false = 有差异
+         *         或无快照（继续既有采集联动）。
+         */
+        [[nodiscard]]
+        auto refresh_snapshot_absorbs(
+            const ProjectRefreshArgs&                args,
+            const cg::msbuild::Registry&             registry,
+            const std::string&                       project_root,
+            const cg::msbuild::ProjectRefreshTarget& target) -> bool
+        {
+            const auto snapshot = cg::msbuild::eval::load_refresh_snapshot(
+                cg::msbuild::eval::refresh_snapshot_path(
+                    project_root,
+                    target.stem));
+            if (!snapshot.has_value())
+            {
+                return false;
+            }
+            const auto entry = std::ranges::find(
+                registry.entries,
+                target.stem,
+                &cg::msbuild::RegistryEntry::name);
+            if (entry == registry.entries.end())
+            {
+                return false;
+            }
+            const std::string mismatch =
+                cg::msbuild::eval::refresh_snapshot_unchanged(
+                    *snapshot,
+                    entry->msbuild,
+                    entry->cl,
+                    cg::msbuild::eval::vc_targets_dir_of(
+                        cg::msbuild::eval::vs_root_of(entry->msbuild)));
+            if (mismatch.empty())
+            {
+                if (args.inv.verbose)
+                {
+                    std::println(
+                        std::cerr,
+                        "ccg update: project refresh skipped - "
+                        "evaluation inputs unchanged since the last capture "
+                        "({} file{} watched)",
+                        snapshot->files.size(),
+                        snapshot->files.size() == 1 ? "" : "s");
+                }
+                return true;
+            }
+            if (args.inv.verbose)
+            {
+                std::println(
+                    std::cerr,
+                    "ccg update: refresh snapshot mismatch - {}",
+                    mismatch);
+            }
+            return false;
+        }
+
+        /** @brief 派生采集的联动结论。 */
+        struct CaptureSettle
+        {
+            /** @brief 联动结论串："busy" / "failed" / "captured"。 */
+            std::string outcome;
+            /** @brief 成功采集置位：语料与跟踪集需调用方重载。 */
+            bool corpus_stale = false;
+        };
+
+        /**
+         * @brief 派生同步采集子进程并按结局分账（出队 → 让位 → 派生）。
+         *
+         * @internal 事务次序（不可重排）：①触发即出队（宁可重入队也不丢
+         * 事件）——项目行在派生前删除、任何失败路径原样入队回来。两个理
+         * 由：采集子进程的索引尾看到非空队列会派生自己的 --drain 收敛进
+         * 程（coord_drain_pending），那个进程会抢走声明并对同一行再跑一
+         * 轮幂等采集——空队列让每个事件恰好一轮采集；子进程退出后不再
+         * 需要重取声明（声明已让位，外层 peek 以 claim_lost 自然停轮，
+         * 队列的未来归下一个事件）。出队到派生之间的进程崩溃是毫秒级残
+         * 余窗口（与既有"读哈希 → DELETE"窗口同级），用户再保存一次即
+         * 自愈。②让位声明——采集子进程的索引提交段按 update_claim 排队
+         * 等待（Coordination::wait 默认开），持有者不放手必然互等；守卫
+         * 仍然在场：析构时的二次释放按持有者匹配，删不到别人的行。③派生
+         * 同步采集（同步等待、超时放手不杀）——成功与否由退出码判定，失
+         * 败保旧由 msbuild 侧兜底（非 exec 类失败不写 cdb、库一行不动、
+         * 退出 1），本侧只决定队列行的去留。
+         *
+         * @param matched 命中的项目行（在本函数内出队，失败时重入队）。
+         *
+         * @return 联动结论："busy"（未启动/超时让行，行已重入队）、
+         *         "failed"（退出码非零，行已重入队、库保旧）、
+         *         "captured"（成功，行已消费，声明已让位；corpus_stale
+         *         置位，语料与跟踪集的重载由调用方执行——那是宿主的语
+         *         料重载设施）。
+         */
+        [[nodiscard]]
+        auto spawn_capture_and_settle(
+            const ProjectRefreshArgs&                args,
+            const cg::msbuild::ProjectRefreshTarget& target,
+            const std::vector<std::string>&          matched) -> CaptureSettle
+        {
+            dequeue_untracked(args, matched);
+            args.store.release_update(args.holder);
+
+            const fs::path ccg = cg::util::platform::executable_path();
+            const std::vector<std::string> capture_args{
+                "msbuild",
+                target.solution,
+                "--config",
+                target.configuration,
+                "--platform",
+                target.platform,
+                "-o",
+                args.inv.layout_root};
+            const auto refresh_start = std::chrono::steady_clock::now();
+            const cg::util::platform::TimedExecResult child =
+                cg::util::platform::capture_exec_timed(
+                    ccg,
+                    capture_args,
+                    std::chrono::minutes{30});
+            const auto refresh_secs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - refresh_start)
+                    .count();
+            if (!child.started)
+            {
+                requeue_project_lines(args, matched);
+                std::println(
+                    std::cerr,
+                    "ccg update: could not spawn the capture subprocess - the "
+                    "queued project line{} stay{} for the next event",
+                    matched.size() == 1 ? "" : "s",
+                    matched.size() == 1 ? "s" : "");
+                return {.outcome = "busy"};
+            }
+            if (args.inv.verbose || child.exit_code != 0)
+            {
+                std::println(
+                    std::cerr,
+                    "ccg update: project refresh (ccg msbuild {} --config {} "
+                    "--platform {}) exited {} in {} ms",
+                    target.solution,
+                    target.configuration,
+                    target.platform,
+                    child.exit_code,
+                    refresh_secs);
+            }
+            if (child.timed_out)
+            {
+                requeue_project_lines(args, matched);
+                std::println(
+                    std::cerr,
+                    "ccg update: project refresh still running after 30 min "
+                    "- detached; the queued line{} stay{} for the next event",
+                    matched.size() == 1 ? "" : "s",
+                    matched.size() == 1 ? "s" : "");
+                return {.outcome = "busy"};
+            }
+            if (child.exit_code != 0)
+            {
+                requeue_project_lines(args, matched);
+                std::println(
+                    std::cerr,
+                    "ccg update: project refresh failed (exit {}); the "
+                    "database keeps the previous corpus - the queued line{} "
+                    "stay{} for the next event",
+                    child.exit_code,
+                    matched.size() == 1 ? "" : "s",
+                    matched.size() == 1 ? "s" : "");
+                return {.outcome = "failed"};
+            }
+
+            // 成功：新 TU 已由子进程的索引尾增量入库。声明已让位——不再
+            // 重取，外层 peek 以 claim_lost 停轮，把队列的未来（窗口内的
+            // TU 编辑等）交给下一个事件/持有者。语料重载由调用方按
+            // corpus_stale 执行：若下一轮 peek 恰好抢回声明，未跟踪判定
+            // 必须基于新语料。
+            std::println(
+                std::cerr,
+                "ccg update: project files re-captured - corpus refreshed "
+                "({} file{}, {} ms)",
+                matched.size(),
+                matched.size() == 1 ? "" : "s",
+                refresh_secs);
+            return {.outcome = "captured", .corpus_stale = true};
+        }
+
+        /** @brief 项目联动管线的结论。 */
+        struct ProjectRefreshOutcome
+        {
+            /** @brief 联动结论串（六值协议，见 refresh_project_files）。 */
+            std::string outcome;
+            /** @brief 成功采集置位：语料与跟踪集需调用方重载。 */
+            bool corpus_stale = false;
+        };
+
+        /**
+         * @brief 项目文件行的重采集联动管线（编排入口）。
+         *
+         * @internal 注册表反查（平台中立门）→ 静默窗去抖 → 哈希门（求值
+         * 输入全等即吸收）→ capture 锁探测 → 触发即出队 → 让位声明 →
+         * 派生 ccg msbuild（其内部自带 run_index_tail 增量索引与失败保
+         * 旧）；失败把行重新入队。返回联动结论（六值逐字是协议，JSON/
+         * 注入面按串分类）：
+         * - "captured"：重采集完成，行已消费；声明已让位，外层 peek 以
+         *   claim_lost 停轮；corpus_stale 置位，调用方据此重载语料与
+         *   跟踪面；
+         * - "skipped-unchanged"：哈希门吸收——快照与当前输入全等，行出
+         *   队、不派生采集，声明未让；
+         * - "untracked"：联动无处可去，行按未跟踪出队；
+         * - "busy"：行保留待下一事件（互斥锁活/子进程未启动/超时让行）；
+         * - "failed"：采集失败，行重新入队，库保旧态；
+         * - "yielded"：静默窗内声明被偷，claim_lost 已置，外层停轮。
+         *
+         * @param lines peek 出的项目文件行。
+         *
+         * @return 联动结论（六值之一，见上）。
+         */
+        [[nodiscard]]
+        auto refresh_project_files(
+            const ProjectRefreshArgs&       args,
+            const std::vector<std::string>& lines) -> ProjectRefreshOutcome
+        {
+            // 注册表反查的第一权威是库 meta 的 project_root（msbuild 索
+            // 引运行写入 sln 所在目录）；无根/无注册表 = 联动无处可去，
+            // 按未跟踪出队避免队列永久堆积（非 Windows 天然走此分支——
+            // 注册表从不存在，项目文件事件不触发任何采集）。
+            const auto        recorded_root = args.store.meta("project_root");
+            const std::string project_root =
+                recorded_root.has_value() ? cg::util::norm_path(*recorded_root)
+                                          : std::string{};
+            if (project_root.empty())
+            {
+                std::println(
+                    std::cerr,
+                    "ccg: note: {} project file{} seen but the database "
+                    "records no project root - treated as untracked (nothing "
+                    "to refresh)",
+                    lines.size(),
+                    lines.size() == 1 ? "" : "s");
+                dequeue_untracked(args, lines);
+                return {.outcome = "untracked"};
+            }
+            const std::string registry_path =
+                project_root + "/.ccg/msbuild.json";
+            const auto registry = cg::msbuild::load_registry(registry_path);
+            if (!registry.has_value())
+            {
+                std::println(
+                    std::cerr,
+                    "ccg: note: {} project file{} seen but no msbuild "
+                    "registry exists at {} - treated as untracked (nothing "
+                    "to refresh)",
+                    lines.size(),
+                    lines.size() == 1 ? "" : "s",
+                    registry_path);
+                dequeue_untracked(args, lines);
+                return {.outcome = "untracked"};
+            }
+            std::vector<std::string> matched;
+            std::vector<std::string> unmatched;
+            const auto               target = match_refresh_lines(
+                *registry,
+                project_root,
+                args.inv,
+                lines,
+                matched,
+                unmatched);
+            if (!unmatched.empty())
+            {
+                std::println(
+                    std::cerr,
+                    "ccg: note: {} project file{} outside the registered "
+                    "solution tree - treated as untracked",
+                    unmatched.size(),
+                    unmatched.size() == 1 ? "" : "s");
+                dequeue_untracked(args, unmatched);
+            }
+            if (!target.has_value())
+            {
+                return {.outcome = "untracked"};
+            }
+            if (args.inv.verbose)
+            {
+                std::println(
+                    std::cerr,
+                    "ccg update: project file{} -> re-capture {} ({}|{})",
+                    matched.size() == 1 ? "" : "s",
+                    target->stem,
+                    target->configuration,
+                    target->platform);
+            }
+            if (!wait_quiet_window(args, lines))
+            {
+                return {.outcome = "yielded"};
+            }
+            if (refresh_snapshot_absorbs(
+                    args,
+                    *registry,
+                    project_root,
+                    *target))
+            {
+                dequeue_untracked(args, matched);
+                return {.outcome = "skipped-unchanged"};
+            }
+
+            // capture 互斥只读探测：真锁由采集执行方（ccg msbuild）获取
+            // 并持有到翻译/索引/注册表全部完成；这里只问"是否有人在跑"。
+            const std::string capture_lock_path = project_root
+                                                  + "/.ccg/msbuild/capture-"
+                                                  + target->stem + ".lock";
+            if (cg::util::platform::file_lock_held_by_live_process(
+                    fs::path{capture_lock_path},
+                    900'000))
+            {
+                std::println(
+                    std::cerr,
+                    "ccg update: project refresh deferred - another capture "
+                    "is running for {} (lock {} is live); the queued line{} "
+                    "stays for the next event",
+                    target->stem,
+                    capture_lock_path,
+                    matched.size() == 1 ? "" : "s");
+                return {.outcome = "busy"};
+            }
+            const CaptureSettle settled =
+                spawn_capture_and_settle(args, *target, matched);
+            return {
+                .outcome = std::move(settled.outcome),
+                .corpus_stale = settled.corpus_stale};
         }
 
         /**
@@ -175,25 +690,23 @@ export namespace cg::cli
             const std::vector<std::string> own =
                 normalize_update_files(inv.positional);
 
-            std::optional<cg::db::GraphStore> store;
-            open_store_create(inv, store);
+            cg::db::GraphStore store = open_store_create(inv);
 
             const auto knob = [&](const char* key, std::int64_t fallback)
-            { return cg::util::parse_bounded(store->meta(key), fallback); };
+            { return cg::util::parse_bounded(store.meta(key), fallback); };
             const std::int64_t lease_ms =
                 knob("update_lease_ms", cg::db::default_update_lease_ms);
-            store->set_busy_timeout_ms(knob(
+            store.set_busy_timeout_ms(knob(
                 "update_busy_timeout_ms",
                 cg::db::default_update_busy_timeout_ms));
-            // 项目文件联动的静默窗（见 attempt_project_refresh；联动契约
-            // realtime coordination spec）。
+            // 项目文件联动的静默窗（见 refresh_project_files 的静默窗段）。
             const std::int64_t refresh_debounce_ms = knob(
                 "msbuild_refresh_debounce_ms",
                 cg::db::default_msbuild_refresh_debounce_ms);
 
             if (!own.empty())
             {
-                store->enqueue_pending(own);
+                store.enqueue_pending(own);
             }
 
             const std::string holder = update_claim_token();
@@ -203,13 +716,9 @@ export namespace cg::cli
             // run-start（每次运行一条；hook 派生与 detach 续跑的同一进程
             // 也在此记账）；actor 用 claim 记号使 update --json 的会话过滤
             // 天然包含这对事件。
-            detail::RunAuditGuard run_audit{
-                *store,
-                holder,
-                "update",
-                inv.db_path,
-                inv.positional};
-            if (!store->claim_update(lease_ms, holder))
+            detail::RunAuditGuard
+                run_audit{store, holder, "update", inv.db_path, inv.positional};
+            if (!store.claim_update(lease_ms, holder))
             {
                 std::println(
                     std::cerr,
@@ -231,7 +740,7 @@ export namespace cg::cli
                     "a live claim holds the database");
                 return 0;
             }
-            const UpdateClaimGuard claim_guard{*store, holder};
+            const UpdateClaimGuard claim_guard{store, holder};
 
             // 测试注入（生产零开销：无环境变量即什么都不做）：仅持声明睡 N
             // 毫秒、绝不碰写锁——复现"活租约持有者无在飞批"的现场，让写命令
@@ -267,7 +776,7 @@ export namespace cg::cli
                     0);
                 hold_ms > 0)
             {
-                cg::db::GraphStore::Tx writer{*store, /*immediate=*/true};
+                cg::db::GraphStore::Tx writer{store, /*immediate=*/true};
                 if (const auto marker =
                         cg::util::cstd::get_env("CCG_TEST_CLAIM_MARKER"))
                 {
@@ -297,10 +806,9 @@ export namespace cg::cli
             std::vector<std::string> roots;
             if (db_file.empty())
             {
-                db_file =
-                    store->meta("compile_db_path").value_or(std::string{});
+                db_file = store.meta("compile_db_path").value_or(std::string{});
             }
-            if (const auto root = store->meta("project_root"))
+            if (const auto root = store.meta("project_root"))
             {
                 roots.push_back(*root);
             }
@@ -345,7 +853,7 @@ export namespace cg::cli
             // 拆分库只刷新自己的配置：库 meta 的 build_config 签名过滤
             // 全量编译数据库，其它配置的条目绝不混进本库。
             const std::string build_config =
-                store->meta("build_config").value_or(std::string{});
+                store.meta("build_config").value_or(std::string{});
             ResolvedCommands resolved;
             // 语料加载：项目文件联动会在持有者中途重写 compile_commands.json
             // （新 TU 进、移除 TU 出），本段必须可重跑——首次加载与每次成功
@@ -381,7 +889,7 @@ export namespace cg::cli
             }
 
             auto [synced_engine, engine_forced_full] =
-                sync_engine_with_store(*store, inv, std::move(engine));
+                sync_engine_with_store(store, inv, std::move(engine));
             engine = std::move(synced_engine);
             require_driver();
 
@@ -398,7 +906,7 @@ export namespace cg::cli
                 {
                     tracked_fold.insert(fold(c.file));
                 }
-                for (const cg::db::FileRow& fr : cg::db::all_files(*store))
+                for (const cg::db::FileRow& fr : cg::db::all_files(store))
                 {
                     tracked_fold.insert(fold(fr.path));
                 }
@@ -434,361 +942,24 @@ export namespace cg::cli
             // = 本轮没触发。
             std::string project_refresh_state;
 
-            // 项目文件行的重采集联动（既定设计：队列 peek 出的项目文件行触发重采集）：
-            // 注册表反查（平台中立门）→ 静默窗去抖 → 哈希门（求值输入全等
-            // 即吸收）→ capture 探测 → 触发即出队 → 让位声明 → 派生
-            // ccg msbuild（其内部自带 run_index_tail 增量索引与失败保旧）；
-            // 失败把行重新入队。返回联动结论：
-            // "captured"（重采集完成，行已消费；声明已让位，外层 peek 以
-            // claim_lost 停轮）/ "skipped-unchanged"（哈希门吸收：快照与当前
-            // 输入全等，行出队、不派生采集，声明未让）/ "untracked"（联动
-            // 无处可去，行按未跟踪出队）/ "busy"（行保留：互斥锁活/子进程未
-            // 启动/超时让行）/ "failed"（行重新入队：采集失败，库保旧态）/
-            // "yielded"（静默窗内声明被偷，claim_lost 已置，外层停轮）。
-            const auto attempt_project_refresh =
-                [&](const std::vector<std::string>& lines) -> std::string
-            {
-                // 注册表反查的第一权威是库 meta 的 project_root（msbuild 索引
-                // 运行写入 sln 所在目录）；无根/无注册表 = 联动无处可去，按未
-                // 跟踪出队避免队列永久堆积（非 Windows 天然走此分支——注册表
-                // 从不存在，项目文件事件不触发任何采集）。
-                const std::string project_root = [&]() -> std::string
-                {
-                    const auto recorded = store->meta("project_root");
-                    return recorded.has_value() ? cg::util::norm_path(*recorded)
-                                                : std::string{};
-                }();
-                // 无条件出队（tracked=false 通道）：用于"成功采集后的项目行"
-                // （信号已被一次完整重采集消费）与"联动无处可去的行"（留着只会
-                // 让 peek 永远返回它们）。与 TU 批的覆盖判定无关。
-                const auto dequeue_lines =
-                    [&](const std::vector<std::string>& which)
-                {
-                    std::vector<cg::db::PendingClearInput> clear;
-                    clear.reserve(which.size());
-                    for (const std::string& f : which)
-                    {
-                        clear.push_back(
-                            cg::db::PendingClearInput{
-                                .path = f,
-                                .tracked = false});
-                    }
-                    store->clear_covered(clear, content_hash, holder, lease_ms);
-                };
-                if (project_root.empty())
-                {
-                    std::println(
-                        std::cerr,
-                        "ccg: note: {} project file{} seen but the database records "
-                        "no project root - treated as untracked (nothing to "
-                        "refresh)",
-                        lines.size(),
-                        lines.size() == 1 ? "" : "s");
-                    dequeue_lines(lines);
-                    return "untracked";
-                }
-                const std::string registry_path =
-                    project_root + "/.ccg/msbuild.json";
-                const auto registry = cg::msbuild::load_registry(registry_path);
-                if (!registry.has_value())
-                {
-                    std::println(
-                        std::cerr,
-                        "ccg: note: {} project file{} seen but no msbuild registry "
-                        "exists at {} - treated as untracked (nothing to refresh)",
-                        lines.size(),
-                        lines.size() == 1 ? "" : "s",
-                        registry_path);
-                    dequeue_lines(lines);
-                    return "untracked";
-                }
-                // 行匹配：命中的行合并进一次重采集（同一配置），未命中的行
-                // （根外属性文件等）按未跟踪出队。
-                std::optional<cg::msbuild::ProjectRefreshTarget> target;
-                std::vector<std::string>                         matched;
-                std::vector<std::string>                         unmatched;
-                for (const std::string& line : lines)
-                {
-                    auto candidate = cg::msbuild::project_refresh_target_for(
-                        *registry,
-                        project_root,
-                        inv.config_name,
-                        line);
-                    if (candidate.has_value())
-                    {
-                        matched.push_back(line);
-                        if (!target.has_value())
-                        {
-                            target = std::move(candidate);
-                        }
-                    }
-                    else
-                    {
-                        unmatched.push_back(line);
-                    }
-                }
-                if (!unmatched.empty())
-                {
-                    std::println(
-                        std::cerr,
-                        "ccg: note: {} project file{} outside the registered "
-                        "solution tree - treated as untracked",
-                        unmatched.size(),
-                        unmatched.size() == 1 ? "" : "s");
-                    dequeue_lines(unmatched);
-                }
-                if (!target.has_value())
-                {
-                    return "untracked";
-                }
-                if (inv.verbose)
-                {
-                    std::println(
-                        std::cerr,
-                        "ccg update: project file{} -> re-capture {} ({}|{})",
-                        matched.size() == 1 ? "" : "s",
-                        target->stem,
-                        target->configuration,
-                        target->platform);
-                }
-
-                // 静默窗：等队列静默（期间的新行入队会重置窗口——IDE 连发保
-                // 存合并进同一次采集），租约照常心跳；30 秒硬上限后照发（宁可
-                // 多采集，绝不丢事件）。
-                const auto window_start = std::chrono::steady_clock::now();
-                auto       quiet_since = window_start;
-                std::vector<std::string> queue_face = lines;
-                for (;;)
-                {
-                    const auto now = std::chrono::steady_clock::now();
-                    if (now - window_start >= std::chrono::seconds{30}
-                        || now - quiet_since >= std::chrono::milliseconds{
-                               refresh_debounce_ms})
-                    {
-                        break;
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds{250});
-                    const cg::db::PendingPeek beat =
-                        store->peek_pending(lease_ms, holder);
-                    if (beat.claim_lost)
-                    {
-                        std::println(
-                            std::cerr,
-                            "ccg update: claim stolen during the refresh "
-                            "debounce - stopping; the new holder continues");
-                        claim_lost = true;
-                        return "yielded";
-                    }
-                    if (beat.files != queue_face)
-                    {
-                        quiet_since = now;
-                        queue_face = beat.files;
-                    }
-                }
-
-                // 哈希门（与求值通道成对，插在静默窗之后、capture 锁探测
-                // 之前）：重采前先问"求值输入变没变"。快照由成功求值采集
-                // 的尾部写回（import 闭包是求值腿免费产物）；读侧全等 =
-                // 本次事件已被现有语料覆盖——吸收行、跳过重采（IDE 保存
-                // 未落实质变化是联动事件的大多数形态）。任何不等（无快照/
-                // 文件哈希变/环境身份变/坏行）按"变"处理，走既有采集联动。
-                // msbuild/cl 的"当前值"口径 = 下一轮采集的发现缓存会复用
-                // 的注册表路径——与采集侧同一决策面，不会出现"门说变、采
-                // 集却复用旧路径"的门-采集失配循环。
-                if (const auto snapshot = cg::msbuild::eval::
-                        load_refresh_snapshot(
-                            cg::msbuild::eval::refresh_snapshot_path(
-                                project_root,
-                                target->stem));
-                    snapshot.has_value())
-                {
-                    const auto entry = std::ranges::find(
-                        registry->entries,
-                        target->stem,
-                        &cg::msbuild::RegistryEntry::name);
-                    if (entry != registry->entries.end())
-                    {
-                        const std::string mismatch =
-                            cg::msbuild::eval::refresh_snapshot_unchanged(
-                                *snapshot,
-                                entry->msbuild,
-                                entry->cl,
-                                cg::msbuild::eval::vc_targets_dir_of(
-                                    cg::msbuild::eval::vs_root_of(
-                                        entry->msbuild)));
-                        if (mismatch.empty())
-                        {
-                            if (inv.verbose)
-                            {
-                                std::println(
-                                    std::cerr,
-                                    "ccg update: project refresh skipped - "
-                                    "evaluation inputs unchanged since the "
-                                    "last capture ({} file{} watched)",
-                                    snapshot->files.size(),
-                                    snapshot->files.size() == 1 ? ""
-                                                               : "s");
-                            }
-                            dequeue_lines(matched);
-                            return "skipped-unchanged";
-                        }
-                        if (inv.verbose)
-                        {
-                            std::println(
-                                std::cerr,
-                                "ccg update: refresh snapshot mismatch - {}",
-                                mismatch);
-                        }
-                    }
-                }
-
-                // capture 互斥只读探测：真锁由采集执行方（ccg msbuild）获取并
-                // 持有到翻译/索引/注册表全部完成；这里只问"是否有人在跑"。
-                const std::string capture_lock_path = project_root
-                                                      + "/.ccg/msbuild/capture-"
-                                                      + target->stem + ".lock";
-                if (cg::util::platform::file_lock_held_by_live_process(
-                        fs::path{capture_lock_path},
-                        900'000))
-                {
-                    std::println(
-                        std::cerr,
-                        "ccg update: project refresh deferred - another capture is "
-                        "running for {} (lock {} is live); the queued line{} stays "
-                        "for the next event",
-                        target->stem,
-                        capture_lock_path,
-                        matched.size() == 1 ? "" : "s");
-                    return "busy";
-                }
-
-                // 触发即出队（宁可重入队也不丢事件）：项目行在派生前删除、任
-                // 何失败路径原样入队回来。两个理由：①采集子进程的索引尾看到
-                // 非空队列会派生自己的 --drain
-                // 收敛进程（coord_drain_pending），
-                // 那个进程会抢走声明并对同一行再跑一轮幂等采集——空队列让每
-                // 个事件恰好一轮采集；②子进程退出后不再需要重取声明（声明已
-                // 让位，外层 peek 以 claim_lost 自然停轮，队列的未来归下一个
-                // 事件）。出队到派生之间的进程崩溃是毫秒级残余窗口（与既有
-                // "读哈希 → DELETE"窗口同级），用户再保存一次即自愈。
-                dequeue_lines(matched);
-
-                // 让位声明：采集子进程的索引提交段按 update_claim 排队等待
-                // （Coordination::wait 默认开），持有者不放手必然互等。守卫仍然
-                // 在场：析构时的二次释放按持有者匹配，删不到别人的行。
-                store->release_update(holder);
-
-                // 派生同步采集（同步等待、超时放手不杀）：成功与否由退出码裁
-                // 决——失败保旧由 msbuild 侧兜底（非 exec 类失败不写 cdb、库一
-                // 行不动、退出 1），本侧只决定队列行的去留。
-                const fs::path ccg = cg::util::platform::executable_path();
-                const std::vector<std::string> capture_args{
-                    "msbuild",
-                    target->solution,
-                    "--config",
-                    target->configuration,
-                    "--platform",
-                    target->platform,
-                    "-o",
-                    inv.layout_root};
-                const auto refresh_start = std::chrono::steady_clock::now();
-                const cg::util::platform::TimedExecResult child =
-                    cg::util::platform::capture_exec_timed(
-                        ccg,
-                        capture_args,
-                        std::chrono::minutes{30});
-                const auto refresh_secs =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - refresh_start)
-                        .count();
-                // 失败镜像重入队：项目行已在派生前删除（见上），失败路径把它
-                // 们原样放回队列，保住"下一次事件重试"的联动语义。
-                const auto requeue_on_failure = [&]()
-                {
-                    try
-                    {
-                        store->enqueue_pending(matched);
-                    }
-                    catch (const std::exception&)
-                    {
-                        // 入队失败（库锁死等超时）：行已不可恢复地离开队列，
-                        // 如实告警——用户下一次保存该文件即自愈。
-                        std::println(
-                            std::cerr,
-                            "ccg update: could not re-queue the project "
-                            "line{} after the failed refresh",
-                            matched.size() == 1 ? "" : "s");
-                    }
-                };
-                if (!child.started)
-                {
-                    requeue_on_failure();
-                    std::println(
-                        std::cerr,
-                        "ccg update: could not spawn the capture subprocess - the "
-                        "queued project line{} stay{} for the next event",
-                        matched.size() == 1 ? "" : "s",
-                        matched.size() == 1 ? "s" : "");
-                    return "busy";
-                }
-                if (inv.verbose || child.exit_code != 0)
-                {
-                    std::println(
-                        std::cerr,
-                        "ccg update: project refresh (ccg msbuild {} "
-                        "--config {} --platform {}) exited {} in {} ms",
-                        target->solution,
-                        target->configuration,
-                        target->platform,
-                        child.exit_code,
-                        refresh_secs);
-                }
-                if (child.timed_out)
-                {
-                    requeue_on_failure();
-                    std::println(
-                        std::cerr,
-                        "ccg update: project refresh still running after 30 min - "
-                        "detached; the queued line{} stay{} for the next event",
-                        matched.size() == 1 ? "" : "s",
-                        matched.size() == 1 ? "s" : "");
-                    return "busy";
-                }
-                if (child.exit_code != 0)
-                {
-                    requeue_on_failure();
-                    std::println(
-                        std::cerr,
-                        "ccg update: project refresh failed (exit {}); the database "
-                        "keeps the previous corpus - the queued line{} stay{} for "
-                        "the next event",
-                        child.exit_code,
-                        matched.size() == 1 ? "" : "s",
-                        matched.size() == 1 ? "s" : "");
-                    return "failed";
-                }
-
-                // 成功：新 TU 已由子进程的索引尾增量入库。声明已让位（采集期
-                // 间按 Coordination::wait 排队的就是它）——不再重取，外层 peek
-                // 以 claim_lost 停轮，把队列的未来（窗口内的 TU 编辑等）交给
-                // 下一个事件/持有者。命令面重载仍要做：若下一轮 peek 恰好抢回
-                // 声明，未跟踪判定必须基于新语料。
-                load_corpus();
-                rebuild_tracked();
-                std::println(
-                    std::cerr,
-                    "ccg update: project files re-captured - corpus "
-                    "refreshed ({} file{}, {} ms)",
-                    matched.size(),
-                    matched.size() == 1 ? "" : "s",
-                    refresh_secs);
-                return "captured";
-            };
+            // 项目文件行重采集联动的参数面（管线本体见 detail 的
+            // refresh_project_files 函数族）：一次构造、循环内复用；哈希
+            // 回调与 TU 批的出队判定同一单点，claim_lost 为引用出参。
+            const std::function<std::string(const std::string&)> refresh_hash =
+                content_hash;
+            const ProjectRefreshArgs refresh_args{
+                store,
+                inv,
+                holder,
+                lease_ms,
+                refresh_debounce_ms,
+                claim_lost,
+                refresh_hash};
 
             for (;;)
             {
                 const cg::db::PendingPeek peek =
-                    store->peek_pending(lease_ms, holder);
+                    store.peek_pending(lease_ms, holder);
                 if (peek.claim_lost)
                 {
                     std::println(
@@ -854,7 +1025,7 @@ export namespace cg::cli
                     opt.db_path = inv.db_path;
                     // 覆盖链同 index：--jobs 旗标（update 已放开）> 库配置
                     // index_jobs > 自动按核；持有者连接已在手，直接读 meta。
-                    opt.jobs = resolve_jobs(inv, &*store);
+                    opt.jobs = resolve_jobs(inv, &store);
                     opt.seed_files = tu_files;
                     // 批内让位点（租约被偷即让位）：引擎批的提交段按本持有者的
                     // 记号做事务内心跳——声明被偷（写命令启动接管等）时抛
@@ -869,7 +1040,7 @@ export namespace cg::cli
                     // 传播/dispatch 在快速批里不跑，meta dispatch_stale
                     // 显式记录滞后。
                     opt.defer_dispatch = !inv.drain;
-                    cg::graph::Indexer indexer{*store, std::move(opt)};
+                    cg::graph::Indexer indexer{store, std::move(opt)};
                     try
                     {
                         last = indexer.run(resolved.commands);
@@ -891,13 +1062,13 @@ export namespace cg::cli
                             std::string                 thief;
                             std::int64_t                thief_pid = 0;
                             const cg::db::ClaimSnapshot now_snap =
-                                store->claim_snapshot();
+                                store.claim_snapshot();
                             if (now_snap.has_claim)
                             {
                                 thief = now_snap.holder;
                                 thief_pid = now_snap.pid;
                             }
-                            (void)store->log_coord_event(
+                            (void)store.log_coord_event(
                                 cg::db::CoordEventInput{
                                     .event = cg::db::CoordEvent::Rollback,
                                     .actor_holder = holder,
@@ -928,8 +1099,8 @@ export namespace cg::cli
                         claim_lost = true;
                         break;
                     }
-                    store->set_meta("llvm_engine_path", engine.path);
-                    store->set_meta("llvm_version", engine.version);
+                    store.set_meta("llvm_engine_path", engine.path);
+                    store.set_meta("llvm_version", engine.version);
 
                     // 批后出队：覆盖集 ∩ 快照哈希未变。未跟踪条目按既有 note
                     // 处理并从队列删除（否则 peek 永远返回它们）。
@@ -954,7 +1125,7 @@ export namespace cg::cli
                                 // 重查轮的拒收：按新 cdb 仍不在语料面
                                 // （enqueue-reject 审计，detail 带重查标记
                                 // 与库路径——误投当场留痕）。
-                                (void)store->log_coord_event(
+                                (void)store.log_coord_event(
                                     cg::db::CoordEventInput{
                                         .event =
                                             cg::db::CoordEvent::EnqueueReject,
@@ -986,7 +1157,7 @@ export namespace cg::cli
                     // IMMEDIATE 事务里按需重算，并在删除后复核、必要时立即重
                     // 新入队，从而封住"读哈希 → DELETE"之间的编辑窗口。心跳也
                     // 放在同一事务里：出队必须发生在仍持有租约的期间。
-                    store->clear_covered(
+                    store.clear_covered(
                         clear_inputs,
                         content_hash,
                         holder,
@@ -995,8 +1166,9 @@ export namespace cg::cli
                 }
                 if (!project_files.empty())
                 {
-                    project_refresh_state =
-                        attempt_project_refresh(project_files);
+                    const detail::ProjectRefreshOutcome project_refresh =
+                        refresh_project_files(refresh_args, project_files);
+                    project_refresh_state = project_refresh.outcome;
                     // 行仍在队列（busy/failed 重新入队）时停轮：继续 peek 只会
                     // 对同一行再触发一轮采集；声明已让出（yielded/captured 的
                     // 让位路径）时下一个 peek 自然以 claim_lost 停轮。所有停轮
@@ -1009,6 +1181,8 @@ export namespace cg::cli
                     }
                     if (project_refresh_state == "captured")
                     {
+                        // 采集成功换掉了命令面（corpus_stale）：语料与跟
+                        // 踪集一并重载，重查轮的未跟踪判定基于新 cdb。
                         // 文件级门的第二段（重捕获后重查）：重采集成功后
                         // 声明已让位给采集子进程的索引尾；窗口期内入队的
                         // TU 行此刻必须按**新 cdb** 重判——新入工程的文件
@@ -1018,8 +1192,13 @@ export namespace cg::cli
                         // 捕获收尾的排序依赖就是这条重取声明的原子裁决：
                         // 抢回声明者获得重查权，抢不到者（下一个事件/
                         // 持有者）按同一语料结论处理。
+                        if (project_refresh.corpus_stale)
+                        {
+                            load_corpus();
+                            rebuild_tracked();
+                        }
                         recheck_after_capture =
-                            store->claim_update(lease_ms, holder);
+                            store.claim_update(lease_ms, holder);
                         if (!recheck_after_capture)
                         {
                             break;
@@ -1029,8 +1208,9 @@ export namespace cg::cli
             }
 
             // 收敛批：--drain 排空队列后，若快速批留下 dispatch_stale 标注
-            // 则重跑一次完整 RTA/类型传播/dispatch（延迟收敛就是又一个 update 批次：
-            // 同一声明、同一租约协议，只是这一批不解析 TU）。收敛中的新编辑仍
+            // 则重跑一次完整 RTA/类型传播/dispatch（延迟收敛就是又一个 update
+            // 批次： 同一声明、同一租约协议，只是这一批不解析
+            // TU）。收敛中的新编辑仍
             // 在队列里留给下一个事件——这里只把已提交行带回一致。声明被偷时
             // 绝不收敛：窃取者拥有队列与本库的下一步。
             if (inv.drain && !claim_lost)
@@ -1039,7 +1219,7 @@ export namespace cg::cli
                 try
                 {
                     stale_dispatch = cg::util::parse_bounded(
-                        store->meta("dispatch_stale"),
+                        store.meta("dispatch_stale"),
                         0);
                 }
                 catch (const std::exception&)
@@ -1061,7 +1241,7 @@ export namespace cg::cli
                     conv_opt.progress = inv.verbose;
                     conv_opt.db_path = inv.db_path;
                     const cg::graph::IndexSummary conv =
-                        cg::graph::converge_dispatch(*store, conv_opt);
+                        cg::graph::converge_dispatch(store, conv_opt);
                     if (runs == 0)
                     {
                         last = conv;
@@ -1106,7 +1286,7 @@ export namespace cg::cli
                 try
                 {
                     for (const cg::db::CoordEventRow& row :
-                         store->coord_events_since(coord_since_ms))
+                         store.coord_events_since(coord_since_ms))
                     {
                         if (row.actor_holder != holder
                             && row.other_holder != holder)

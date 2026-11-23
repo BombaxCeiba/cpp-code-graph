@@ -149,6 +149,29 @@ namespace cg::db
          * 表示 "无 pid 信息"，调用方退回纯租约判定。故意不导出：它是本单元
          * 与持有者记号之间唯一的格式耦合点，且只在 claim_update 里使用。
          */
+        /// coord_events 写侧的文本绑定：空 string_view 的 data() 可为
+        /// nullptr（会绑成 NULL，撞上 NOT NULL 列），一律回退空串。
+        void bind_coord_text(sqlite3_stmt* stmt, int idx, std::string_view text)
+        {
+            const char* data = text.data() == nullptr ? "" : text.data();
+            sqlite3_bind_text(
+                stmt,
+                idx,
+                data,
+                static_cast<int>(text.size()),
+                SQLITE_TRANSIENT);
+        }
+
+        /// coord_events 读侧的列文本（NULL 列回空串）。
+        [[nodiscard]]
+        auto coord_column_text(sqlite3_stmt* stmt, int col) -> std::string
+        {
+            const unsigned char* text = sqlite3_column_text(stmt, col);
+            return text == nullptr
+                       ? std::string{}
+                       : std::string{reinterpret_cast<const char*>(text)};
+        }
+
         [[nodiscard]]
         auto holder_pid(std::string_view holder) -> std::int64_t
         {
@@ -202,30 +225,15 @@ namespace cg::db
          * RETURNING 编不过——它每条边都重新解析 SQL 文本、在语料尺度上主导了
          * store 阶段；现在是与符号相同的预编译拆分形态。
          */
-        auto make_statements(sqlpp::sqlite3::connection& db)
+        auto str_and_file_statements(sqlpp::sqlite3::connection& db)
         {
             using sqlpp::delete_from;
             using sqlpp::parameter;
             using sqlpp::select;
             using sqlpp::update;
 
-            const tab::Str                 str{};
-            const tab::Files               f{};
-            const tab::Symbols             s{};
-            const tab::Edges               e{};
-            const tab::Includes            inc{};
-            const tab::Imports             imp{};
-            const tab::Fingerprints        fp{};
-            const tab::Failures            fl{};
-            const tab::PendingUpdates      pu{};
-            const tab::UpdateClaim         c{};
-            const tab::TypeHints           th{};
-            const tab::CallSites           cs{};
-            const tab::AnalysisSlots       asl{};
-            const tab::PassthroughWrappers ptw{};
-            const tab::ExternalParamArgs   epa{};
-            const tab::ExternalInvokes     evi{};
-            const tab::SymbolContributions sc{};
+            const tab::Str   str{};
+            const tab::Files f{};
 
             return std::make_tuple(
                 db.prepare(
@@ -237,7 +245,6 @@ namespace cg::db
                     select(str.id).from(str).where(str.s == parameter(str.s))),
                 db.prepare(
                     select(str.s).from(str).where(str.id == parameter(str.id))),
-
                 db.prepare(
                     sqlpp::sqlite3::insert_into(f)
                         .set(f.pathId = parameter(f.pathId))
@@ -260,8 +267,22 @@ namespace cg::db
                                .where(f.fileId == parameter(f.fileId))),
                 db.prepare(update(f)
                                .set(f.pathId = parameter(f.pathId))
-                               .where(f.fileId == parameter(f.fileId))),
+                               .where(f.fileId == parameter(f.fileId))));
+        }
 
+        auto symbol_edge_import_statements(sqlpp::sqlite3::connection& db)
+        {
+            using sqlpp::delete_from;
+            using sqlpp::parameter;
+            using sqlpp::select;
+            using sqlpp::update;
+
+            const tab::Symbols  s{};
+            const tab::Edges    e{};
+            const tab::Includes inc{};
+            const tab::Imports  imp{};
+
+            return std::make_tuple(
                 db.prepare(
                     sqlpp::sqlite3::insert_into(s)
                         .set(
@@ -296,7 +317,6 @@ namespace cg::db
                             s.paramTypes = parameter(s.paramTypes),
                             s.templateParams = parameter(s.templateParams))
                         .where(s.symId == parameter(s.symId))),
-
                 db.prepare(
                     sqlpp::sqlite3::insert_into(e)
                         .set(
@@ -326,7 +346,6 @@ namespace cg::db
                                    e.occurrences =
                                        e.occurrences + parameter(e.occurrences))
                                .where(e.edgeId == parameter(e.edgeId))),
-
                 db.prepare(
                     sqlpp::sqlite3::insert_into(inc)
                         .set(
@@ -336,7 +355,6 @@ namespace cg::db
                             inc.angled = parameter(inc.angled))
                         .on_conflict(inc.fileId, inc.targetId, inc.line)
                         .do_nothing()),
-
                 db.prepare(
                     sqlpp::sqlite3::insert_into(imp)
                         .set(
@@ -344,8 +362,26 @@ namespace cg::db
                             imp.moduleId = parameter(imp.moduleId),
                             imp.line = parameter(imp.line))
                         .on_conflict(imp.fileId, imp.moduleId, imp.line)
-                        .do_nothing()),
+                        .do_nothing()));
+        }
 
+        auto purge_fingerprint_failure_statements(
+            sqlpp::sqlite3::connection& db)
+        {
+            using sqlpp::delete_from;
+            using sqlpp::parameter;
+            using sqlpp::select;
+            using sqlpp::update;
+
+            const tab::Edges        e{};
+            const tab::Includes     inc{};
+            const tab::Imports      imp{};
+            const tab::Files        f{};
+            const tab::Symbols      s{};
+            const tab::Fingerprints fp{};
+            const tab::Failures     fl{};
+
+            return std::make_tuple(
                 db.prepare(delete_from(e).where(
                     e.siteFileId == parameter(e.siteFileId))),
                 db.prepare(delete_from(inc).where(
@@ -365,7 +401,6 @@ namespace cg::db
                     sqlpp::select(sqlpp::all_of(f))
                         .from(f)
                         .where(f.fileId == parameter(f.fileId))),
-
                 db.prepare(
                     sqlpp::sqlite3::insert_into(fp)
                         .set(
@@ -386,7 +421,6 @@ namespace cg::db
                 db.prepare(delete_from(fp).where(
                     fp.fileId == parameter(fp.fileId)
                     and fp.cmdDigest == parameter(fp.cmdDigest))),
-
                 db.prepare(
                     sqlpp::sqlite3::insert_into(fl)
                         .set(
@@ -428,8 +462,23 @@ namespace cg::db
                             and fl.cmdDigest == parameter(fl.cmdDigest))),
                 db.prepare(delete_from(fl).where(
                     fl.fileId == parameter(fl.fileId)
-                    and fl.cmdDigest == parameter(fl.cmdDigest))),
+                    and fl.cmdDigest == parameter(fl.cmdDigest))));
+        }
 
+        auto lease_site_statements(sqlpp::sqlite3::connection& db)
+        {
+            using sqlpp::delete_from;
+            using sqlpp::parameter;
+            using sqlpp::select;
+            using sqlpp::update;
+
+            const tab::PendingUpdates pu{};
+            const tab::UpdateClaim    c{};
+            const tab::TypeHints      th{};
+            const tab::CallSites      cs{};
+            const tab::Edges          e{};
+
+            return std::make_tuple(
                 db.prepare(
                     sqlpp::sqlite3::insert_into(pu)
                         .set(pu.path = parameter(pu.path))
@@ -450,7 +499,6 @@ namespace cg::db
                 db.prepare(delete_from(c).where(
                     c.id == parameter(c.id)
                     and c.holder == parameter(c.holder))),
-
                 db.prepare(
                     sqlpp::sqlite3::insert_into(th)
                         .set(
@@ -476,7 +524,6 @@ namespace cg::db
                         .do_nothing()),
                 db.prepare(
                     delete_from(th).where(th.fileId == parameter(th.fileId))),
-
                 db.prepare(
                     sqlpp::sqlite3::insert_into(cs)
                         .set(
@@ -553,13 +600,26 @@ namespace cg::db
                 db.prepare(delete_from(e).where(
                     e.typeId == parameter(e.typeId)
                     and e.siteFileId == parameter(e.siteFileId))),
-
                 db.prepare(delete_from(e).where(
                     e.typeId == parameter(e.typeId)
                     and e.srcId == parameter(e.srcId)
                     and e.siteFileId == parameter(e.siteFileId)
-                    and e.siteLine == parameter(e.siteLine))),
+                    and e.siteLine == parameter(e.siteLine))));
+        }
 
+        auto payload_slot_statements(sqlpp::sqlite3::connection& db)
+        {
+            using sqlpp::delete_from;
+            using sqlpp::parameter;
+            using sqlpp::select;
+            using sqlpp::update;
+
+            const tab::AnalysisSlots       asl{};
+            const tab::PassthroughWrappers ptw{};
+            const tab::ExternalParamArgs   epa{};
+            const tab::ExternalInvokes     evi{};
+
+            return std::make_tuple(
                 db.prepare(
                     sqlpp::sqlite3::insert_into(asl)
                         .set(
@@ -596,7 +656,6 @@ namespace cg::db
                 db.prepare(delete_from(asl).where(
                     asl.ownerSym == parameter(asl.ownerSym)
                     and asl.varName == parameter(asl.varName))),
-
                 db.prepare(
                     sqlpp::sqlite3::insert_into(ptw)
                         .set(
@@ -612,7 +671,6 @@ namespace cg::db
                     sqlpp::select(sqlpp::all_of(ptw))
                         .from(ptw)
                         .order_by(ptw.wrapperKey.asc(), ptw.getterKey.asc())),
-
                 db.prepare(
                     sqlpp::sqlite3::insert_into(epa)
                         .set(
@@ -660,11 +718,24 @@ namespace cg::db
                             evi.hostUsr.asc(),
                             evi.paramIndex.asc(),
                             evi.fileId.asc(),
-                            evi.line.asc())),
+                            evi.line.asc())));
+        }
 
-                // 读侧聚合：类型过滤不上 SQL——(dst,type) 分组各自独立
-                // 聚合，调用方按类型集丢组与 WHERE 过滤逐位等价，语句形状保持
-                // 单参数（预编译表只收固定形状）。
+        auto aggregate_contrib_statements(sqlpp::sqlite3::connection& db)
+        {
+            using sqlpp::delete_from;
+            using sqlpp::parameter;
+            using sqlpp::select;
+            using sqlpp::update;
+
+            const tab::Edges               e{};
+            const tab::Symbols             s{};
+            const tab::SymbolContributions sc{};
+
+            // 读侧聚合：类型过滤不上 SQL——(dst,type) 分组各自独立
+            // 聚合，调用方按类型集丢组与 WHERE 过滤逐位等价，语句形状保持
+            // 单参数（预编译表只收固定形状）。
+            return std::make_tuple(
                 db.prepare(
                     sqlpp::select(
                         e.dstId,
@@ -741,6 +812,17 @@ namespace cg::db
                         .from(sc)
                         .where(sc.symId == parameter(sc.symId))
                         .limit(1)));
+        }
+
+        auto make_statements(sqlpp::sqlite3::connection& db)
+        {
+            return std::tuple_cat(
+                str_and_file_statements(db),
+                symbol_edge_import_statements(db),
+                purge_fingerprint_failure_statements(db),
+                lease_site_statements(db),
+                payload_slot_statements(db),
+                aggregate_contrib_statements(db));
         }
 
         using Statements = decltype(make_statements(
@@ -968,14 +1050,11 @@ namespace cg::db
          * @internal schema v18 起不再删除该文件上的符号行：键失配只是
          *           “本批新提取不再发射它”的事实，行生死由贡献票数仲裁
          *           （symbol_contributions 归零时在 dispatch 装载前删除）。
-         *           参数 fresh_unique_key_ids 保留在签名里（调用方契约面
-         *           不变），实现不再消费。删除顺序纪律（并发安全论证的
-         *           一环）不变：本方法仍是“先删引用方”的单点，erase_file
-         *           删 files 行永远排在本方法之后。
+         *           删除顺序纪律（并发安全论证的一环）不变：本方法仍是
+         *           “先删引用方”的单点，erase_file 删 files 行永远排在
+         *           本方法之后。
          */
-        void purge_file(
-            FileId                 file,
-            std::span<const StrId> fresh_unique_key_ids);
+        void purge_file(FileId file);
 
         /**
          * @brief 按行 id 删除符号（终态确证真死的键行；引用方随外键
@@ -1665,6 +1744,15 @@ namespace cg::db
     private:
         auto store_str_(std::string_view s) -> StrId;
         auto load_str_(std::string_view s) -> std::optional<StrId>;
+
+        /**
+         * @internal 库内记录的内容哈希（files.content_hash，按路径查）：
+         * 未驻留或无 files 行时无值。出队判定用它对快照哈希——不一致
+         * 说明索引不是当前字节的结论。
+         */
+        auto indexed_hash_of_(std::string_view path)
+            -> std::optional<std::string>;
+
         /**
          * @internal
          * 全新文件探测保持在 catalog 表上走类型化 sqlpp23（cg.db 内无任何
@@ -2136,6 +2224,28 @@ namespace cg::db
         {
             throw std::runtime_error(
                 "cg.db: str row disappeared between upsert and select");
+        }
+        return found;
+    }
+
+    auto GraphStore::indexed_hash_of_(std::string_view path)
+        -> std::optional<std::string>
+    {
+        const StrId path_id = find_str(path).value_or(0);
+        if (path_id == 0)
+        {
+            return std::nullopt; // 未驻留 / 无 files 行：无法核对
+        }
+        auto& sel = std::get<FILE_HASH_BY_PATH>(*impl_->st_);
+        sel.parameters.pathId = path_id;
+        auto                       rows = impl_->run(sel);
+        std::optional<std::string> found;
+        for (const auto& row : rows)
+        {
+            if (row.contentHash.has_value())
+            {
+                found = std::string{*row.contentHash};
+            }
         }
         return found;
     }
@@ -3416,27 +3526,6 @@ namespace cg::db
         // 磁盘哈希会重新相等（决定哈希看不出编辑发生过），但引擎可能
         // 已经把中间状态写进了 files.content_hash。两者不一致说明索引
         // 不是当前字节的结论——保留队列行，让下一批重析。
-        const auto indexed_hash =
-            [this](std::string_view path) -> std::optional<std::string>
-        {
-            const StrId path_id = find_str(path).value_or(0);
-            if (path_id == 0)
-            {
-                return std::nullopt; // 未驻留 / 无 files 行：无法核对
-            }
-            auto& sel = std::get<FILE_HASH_BY_PATH>(*impl_->st_);
-            sel.parameters.pathId = path_id;
-            auto                       rows = impl_->run(sel);
-            std::optional<std::string> found;
-            for (const auto& row : rows)
-            {
-                if (row.contentHash.has_value())
-                {
-                    found = std::string{*row.contentHash};
-                }
-            }
-            return found;
-        };
         std::size_t removed = 0;
         for (const PendingClearInput& entry : entries)
         {
@@ -3464,7 +3553,8 @@ namespace cg::db
             // 缺失（文件在批内被删除并 purge、或从未成功哈希）不构成
             // 反证：保守到永远保留会让持有者循环永不收敛（peek 非空→
             // 重跑→再保留），因此只在"有记录且不一致"时保留。
-            const std::optional<std::string> indexed = indexed_hash(entry.path);
+            const std::optional<std::string> indexed =
+                indexed_hash_of_(entry.path);
             if (indexed.has_value() && *indexed != decided)
             {
                 continue;
@@ -3577,27 +3667,18 @@ namespace cg::db
             {
                 return false;
             }
-            // 空 string_view 的 data() 可为 nullptr——bind_text 会把它绑成
-            // NULL，撞上 NOT NULL 列（DEFAULT 只对缺省生效）；一律回退空串。
-            const auto bind_text = [stmt](int idx, std::string_view text)
-            {
-                const char* data = text.data() == nullptr ? "" : text.data();
-                sqlite3_bind_text(
-                    stmt,
-                    idx,
-                    data,
-                    static_cast<int>(text.size()),
-                    SQLITE_TRANSIENT);
-            };
+            // 空 string_view 的 data() 可为 nullptr——bind_coord_text 会把
+            // 它绑成 NULL，撞上 NOT NULL 列（DEFAULT 只对缺省生效）；一律
+            // 回退空串。
             const std::string event{name_of(input.event)};
             sqlite3_bind_int64(stmt, 1, cg::util::cstd::epoch_ms());
-            bind_text(2, event);
-            bind_text(3, input.actor_holder);
-            bind_text(4, input.other_holder);
+            bind_coord_text(stmt, 2, event);
+            bind_coord_text(stmt, 3, input.actor_holder);
+            bind_coord_text(stmt, 4, input.other_holder);
             sqlite3_bind_int64(stmt, 5, input.actor_pid);
             sqlite3_bind_int64(stmt, 6, input.other_pid);
-            bind_text(7, input.reason);
-            bind_text(8, input.detail);
+            bind_coord_text(stmt, 7, input.reason);
+            bind_coord_text(stmt, 8, input.detail);
             const int rc = sqlite3_step(stmt);
             return rc == SQLITE_DONE;
         }
@@ -3688,26 +3769,19 @@ namespace cg::db
                 return out;
             }
             sqlite3_bind_int64(stmt, 1, since_ms);
-            const auto text_of = [](sqlite3_stmt* s, int col)
-            {
-                const unsigned char* text = sqlite3_column_text(s, col);
-                return text == nullptr
-                           ? std::string{}
-                           : std::string{reinterpret_cast<const char*>(text)};
-            };
             int rc = SQLITE_ROW;
             while ((rc = sqlite3_step(stmt)) == SQLITE_ROW)
             {
                 CoordEventRow row;
                 row.id = sqlite3_column_int64(stmt, 0);
                 row.ts_ms = sqlite3_column_int64(stmt, 1);
-                row.event = text_of(stmt, 2);
-                row.actor_holder = text_of(stmt, 3);
-                row.other_holder = text_of(stmt, 4);
+                row.event = coord_column_text(stmt, 2);
+                row.actor_holder = coord_column_text(stmt, 3);
+                row.other_holder = coord_column_text(stmt, 4);
                 row.actor_pid = sqlite3_column_int64(stmt, 5);
                 row.other_pid = sqlite3_column_int64(stmt, 6);
-                row.reason = text_of(stmt, 7);
-                row.detail = text_of(stmt, 8);
+                row.reason = coord_column_text(stmt, 7);
+                row.detail = coord_column_text(stmt, 8);
                 out.push_back(std::move(row));
             }
         }
@@ -4025,17 +4099,13 @@ namespace cg::db
         return out;
     }
 
-    void GraphStore::purge_file(
-        FileId                 file,
-        std::span<const StrId> fresh_unique_key_ids)
+    void GraphStore::purge_file(FileId file)
     {
-        // 参数保留（调用方契约面不变）但键集比对已退役：schema v18 起
-        // 该文件上的符号行生死改由贡献票数仲裁——键失配只说明“本批新
-        // 提取不再发射它”，行的删除发生在票数归零时（erase_symbols，
-        // dispatch 装载前）。此处只清“按文件替换”的派生行（站点边/
-        // 包含/导入/线索/调用点），它们随本批 upsert 重写。
-        (void)fresh_unique_key_ids;
-
+        // 行生死仲裁收敛：该文件上的符号行生死由贡献票数仲裁——键失配
+        // 只说明“本批新提取不再发射它”，行的删除发生在票数归零时
+        // （erase_symbols，dispatch 装载前）。此处只清“按文件替换”的
+        // 派生行（站点边/包含/导入/线索/调用点），它们随本批 upsert
+        // 重写。
         {
             auto& del = std::get<DEL_EDGES_SITE>(*impl_->st_);
             del.parameters.siteFileId = file;
@@ -4155,17 +4225,8 @@ namespace cg::db
         -> std::vector<SymId>
     {
         // 先读后删（条目整撤同款纪律）：受影响符号集是归零仲裁的输入。
-        std::vector<SymId> affected;
-        {
-            auto& sel = std::get<CONTRIB_OF_FILE>(*impl_->st_);
-            sel.parameters.fileId = file;
-            auto rows = impl_->run(sel);
-            for (const auto& row : rows)
-            {
-                affected.push_back(static_cast<SymId>(row.symId));
-            }
-        }
-        auto& del = std::get<CONTRIB_DEL_FILE>(*impl_->st_);
+        std::vector<SymId> affected = contributions_of_file(file);
+        auto&              del = std::get<CONTRIB_DEL_FILE>(*impl_->st_);
         del.parameters.fileId = file;
         impl_->run(del);
         return affected;

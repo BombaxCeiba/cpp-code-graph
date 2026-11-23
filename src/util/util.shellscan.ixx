@@ -318,9 +318,7 @@ namespace cg::util::shellscan
             out.reserve(text.size());
             for (const char c : text)
             {
-                out.push_back(
-                    static_cast<char>(
-                        c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c));
+                out.push_back(cshost::ascii_lower_byte(c));
             }
             return out;
         }
@@ -572,6 +570,33 @@ namespace cg::util::shellscan
             std::string_view reason;
         };
 
+        /// parse_rg 的失败产出：request 字段无意义。
+        [[nodiscard]]
+        constexpr auto rg_fail(std::string_view why) -> RgParseOutcome
+        {
+            return RgParseOutcome{.request = ShellRequest{}, .reason = why};
+        }
+
+        /// 长选项取值：等号后附着值直接成词，否则吞下一个参数词；
+        /// 无值可取返回 nullopt（missing-value 由调用方落 reason）。
+        [[nodiscard]]
+        auto take_rg_value(
+            bool                            has_eq,
+            std::string_view                attached,
+            const std::vector<std::string>& argv,
+            std::size_t&                    i) -> std::optional<std::string>
+        {
+            if (has_eq)
+            {
+                return std::string{attached};
+            }
+            if (i + 1 >= argv.size())
+            {
+                return std::nullopt;
+            }
+            return argv[++i];
+        }
+
         /**
          * @brief rg 的参数解析。
          *
@@ -590,28 +615,6 @@ namespace cg::util::shellscan
             bool explicit_pattern = false; // -e/--regexp 出现过（与顺序无关）
             bool fixed = false;
             bool opts_done = false;
-
-            const auto fail = [](std::string_view why) -> RgParseOutcome
-            {
-                return RgParseOutcome{.request = ShellRequest{}, .reason = why};
-            };
-
-            // 取等号后附着值，或吞下一个参数词。
-            const auto take_value =
-                [&](bool             has_eq,
-                    std::string_view attached,
-                    std::size_t&     i) -> std::optional<std::string>
-            {
-                if (has_eq)
-                {
-                    return std::string{attached};
-                }
-                if (i + 1 >= argv.size())
-                {
-                    return std::nullopt; // missing-value 由调用方落 reason
-                }
-                return argv[++i];
-            };
 
             for (std::size_t i = 0; i < argv.size(); ++i)
             {
@@ -632,41 +635,44 @@ namespace cg::util::shellscan
                         has_eq ? body.substr(eq + 1) : std::string_view{};
                     if (in_table(name, RG_FILES_MODE))
                     {
-                        return fail("files-mode");
+                        return rg_fail("files-mode");
                     }
                     if (in_table(name, RG_META_NOOP))
                     {
-                        return fail("meta-noop");
+                        return rg_fail("meta-noop");
                     }
                     if (name == "regexp")
                     {
-                        const auto value = take_value(has_eq, attached, i);
+                        const auto value =
+                            take_rg_value(has_eq, attached, argv, i);
                         if (!value.has_value())
                         {
-                            return fail("missing-value");
+                            return rg_fail("missing-value");
                         }
                         explicit_pattern = true;
                         patterns.push_back(std::move(*value));
                     }
                     else if (name == "file")
                     {
-                        return fail("pattern-from-file");
+                        return rg_fail("pattern-from-file");
                     }
                     else if (name == "glob")
                     {
-                        const auto value = take_value(has_eq, attached, i);
+                        const auto value =
+                            take_rg_value(has_eq, attached, argv, i);
                         if (!value.has_value())
                         {
-                            return fail("missing-value");
+                            return rg_fail("missing-value");
                         }
                         globs.push_back(std::move(*value));
                     }
                     else if (name == "type" || name == "type-not")
                     {
-                        const auto value = take_value(has_eq, attached, i);
+                        const auto value =
+                            take_rg_value(has_eq, attached, argv, i);
                         if (!value.has_value())
                         {
-                            return fail("missing-value");
+                            return rg_fail("missing-value");
                         }
                         if (name == "type")
                         {
@@ -675,7 +681,7 @@ namespace cg::util::shellscan
                     }
                     else if (name == "invert-match")
                     {
-                        return fail("invert");
+                        return rg_fail("invert");
                     }
                     else if (name == "fixed-strings")
                     {
@@ -683,7 +689,7 @@ namespace cg::util::shellscan
                     }
                     else if (name == "pcre2")
                     {
-                        return fail("regex-dialect");
+                        return rg_fail("regex-dialect");
                     }
                     else if (in_table(name, RG_FLAG_LONG))
                     {
@@ -695,14 +701,14 @@ namespace cg::util::shellscan
                         {
                             if (i + 1 >= argv.size())
                             {
-                                return fail("missing-value");
+                                return rg_fail("missing-value");
                             }
                             ++i; // 吞掉值
                         }
                     }
                     else
                     {
-                        return fail("unknown-flag");
+                        return rg_fail("unknown-flag");
                     }
                     continue;
                 }
@@ -726,7 +732,7 @@ namespace cg::util::shellscan
                             {
                                 if (i + 1 >= argv.size())
                                 {
-                                    return fail("missing-value");
+                                    return rg_fail("missing-value");
                                 }
                                 value = argv[++i];
                             }
@@ -747,15 +753,15 @@ namespace cg::util::shellscan
                         }
                         else if (c == 'f')
                         {
-                            return fail("pattern-from-file");
+                            return rg_fail("pattern-from-file");
                         }
                         else if (c == 'v')
                         {
-                            return fail("invert");
+                            return rg_fail("invert");
                         }
                         else if (c == 'P')
                         {
-                            return fail("regex-dialect");
+                            return rg_fail("regex-dialect");
                         }
                         else if (c == 'F')
                         {
@@ -773,7 +779,7 @@ namespace cg::util::shellscan
                             {
                                 if (i + 1 >= argv.size())
                                 {
-                                    return fail("missing-value");
+                                    return rg_fail("missing-value");
                                 }
                                 ++i;
                                 cluster_done = true;
@@ -785,7 +791,7 @@ namespace cg::util::shellscan
                         }
                         else
                         {
-                            return fail("unknown-flag");
+                            return rg_fail("unknown-flag");
                         }
                     }
                     continue;
@@ -816,7 +822,7 @@ namespace cg::util::shellscan
 
             if (patterns.empty())
             {
-                return fail("no-pattern");
+                return rg_fail("no-pattern");
             }
             for (const std::string& p : patterns)
             {
@@ -825,12 +831,12 @@ namespace cg::util::shellscan
                     if (static_cast<unsigned char>(ch) < 32
                         || static_cast<unsigned char>(ch) == 127)
                     {
-                        return fail("control-char");
+                        return rg_fail("control-char");
                     }
                 }
                 if (p.size() > 256)
                 {
-                    return fail("too-long");
+                    return rg_fail("too-long");
                 }
             }
             ShellRequest request;
@@ -973,6 +979,42 @@ namespace cg::util::shellscan
     // Bash 提取主流程。
     // ---------------------------------------------------------------------------
 
+    /// command[at..] 的 ASCII 小写化前缀是否与 needle 全等。
+    [[nodiscard]]
+    auto lower_prefix_at(
+        std::string_view command,
+        std::size_t      at,
+        std::string_view needle) -> bool
+    {
+        if (at + needle.size() > command.size())
+        {
+            return false;
+        }
+        for (std::size_t k = 0; k < needle.size(); ++k)
+        {
+            if (cshost::ascii_lower_byte(command[at + k]) != needle[k])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// command[at..at+len) 的前后都不是词成分字节（独立词判定）。
+    [[nodiscard]]
+    auto shell_word_bounded(
+        std::string_view command,
+        std::size_t      at,
+        std::size_t      len) -> bool
+    {
+        const bool left_ok =
+            at == 0 || !cshost::is_command_word_byte(command[at - 1]);
+        const bool right_ok =
+            at + len >= command.size()
+            || !cshost::is_command_word_byte(command[at + len]);
+        return left_ok && right_ok;
+    }
+
     auto bash_mentions_search(std::string_view command) -> bool
     {
         if (command.size() < 2)
@@ -980,38 +1022,6 @@ namespace cg::util::shellscan
             return false;
         }
         // 首字节小写化后才进三联比对，均摊每字节一次比较，微秒级走完。
-        const auto lower_at = [&](std::size_t at, std::string_view needle)
-        {
-            if (at + needle.size() > command.size())
-            {
-                return false;
-            }
-            for (std::size_t k = 0; k < needle.size(); ++k)
-            {
-                char c = command[at + k];
-                if (c >= 'A' && c <= 'Z')
-                {
-                    c = static_cast<char>(c - 'A' + 'a');
-                }
-                if (c != needle[k])
-                {
-                    return false;
-                }
-            }
-            return true;
-        };
-        const auto word_byte = [](char c)
-        {
-            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-                   || (c >= '0' && c <= '9') || c == '_' || c == '-';
-        };
-        const auto word_bounded = [&](std::size_t at, std::size_t len)
-        {
-            const bool left_ok = at == 0 || !word_byte(command[at - 1]);
-            const bool right_ok =
-                at + len >= command.size() || !word_byte(command[at + len]);
-            return left_ok && right_ok;
-        };
         for (std::size_t i = 0; i + 2 <= command.size(); ++i)
         {
             char c = command[i];
@@ -1021,18 +1031,20 @@ namespace cg::util::shellscan
             }
             if (c == 'r')
             {
-                if (lower_at(i, "rg") && word_bounded(i, 2))
+                if (lower_prefix_at(command, i, "rg")
+                    && shell_word_bounded(command, i, 2))
                 {
                     return true;
                 }
             }
             else if (c == 's')
             {
-                if (lower_at(i, "sls") && word_bounded(i, 3))
+                if (lower_prefix_at(command, i, "sls")
+                    && shell_word_bounded(command, i, 3))
                 {
                     return true;
                 }
-                if (lower_at(i, "select-string"))
+                if (lower_prefix_at(command, i, "select-string"))
                 {
                     return true;
                 }

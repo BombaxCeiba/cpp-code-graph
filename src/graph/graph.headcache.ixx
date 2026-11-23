@@ -78,14 +78,14 @@ export namespace cg::graph::headcache
      */
     struct Stats
     {
-        std::int64_t lookups = 0;      // 查询总次数（TU × 遇到的非主文件数）
-        std::int64_t hits = 0;         // 命中并回放的分区数
-        std::int64_t misses = 0;       // miss（含闭包未知/变体超限/PCH 模块）
-        std::int64_t records = 0;      // 本运行落账的分区数
-        std::int64_t files = 0;        // 缓存内不同文件数
-        std::int64_t capped_files = 0; // 因变体超限放弃共享的文件数
-        std::int64_t loaded_rows = 0;  // 从库载入的行数
-        std::int64_t stored_rows = 0;  // 落盘行数
+        std::int64_t lookups = 0;       // 查询总次数（TU × 遇到的非主文件数）
+        std::int64_t hits = 0;          // 命中并回放的分区数
+        std::int64_t misses = 0;        // miss（含闭包未知/变体超限/PCH 模块）
+        std::int64_t records = 0;       // 本运行落账的分区数
+        std::int64_t files = 0;         // 缓存内不同文件数
+        std::int64_t capped_files = 0;  // 因变体超限放弃共享的文件数
+        std::int64_t loaded_rows = 0;   // 从库载入的行数
+        std::int64_t stored_rows = 0;   // 落盘行数
         std::int64_t payload_bytes = 0; // 缓存载荷字节估计
     };
 
@@ -118,21 +118,16 @@ export namespace cg::graph::headcache
             {
                 for (int i = 0; i < 4; ++i)
                 {
-                    buf.push_back(
-                        static_cast<char>((v >> (8 * i)) & 0xff));
+                    buf.push_back(static_cast<char>((v >> (8 * i)) & 0xff));
                 }
             }
-            void i32(std::int32_t v)
-            {
-                u32(static_cast<std::uint32_t>(v));
-            }
+            void i32(std::int32_t v) { u32(static_cast<std::uint32_t>(v)); }
             void i64(std::int64_t v)
             {
                 const auto u = static_cast<std::uint64_t>(v);
                 for (int i = 0; i < 8; ++i)
                 {
-                    buf.push_back(
-                        static_cast<char>((u >> (8 * i)) & 0xff));
+                    buf.push_back(static_cast<char>((u >> (8 * i)) & 0xff));
                 }
             }
             void str(std::string_view s)
@@ -142,53 +137,63 @@ export namespace cg::graph::headcache
             }
         };
 
-        /** @brief 载荷解码；越界一律返回 false（调用方按 miss 处理）。 */
+        /** @brief 载荷解码；越界一律返回无值（调用方按 miss 处理）。 */
         struct BlobReader
         {
             std::string_view buf;
             std::size_t      pos = 0;
             bool             bad = false;
-            bool take_u8(std::uint8_t& v)
+
+            /** @brief 读 1 字节；越界置粘性失败位并返回无值。 */
+            [[nodiscard]]
+            auto take_u8() -> std::optional<std::uint8_t>
             {
                 if (bad || pos + 1 > buf.size())
                 {
                     bad = true;
-                    return false;
+                    return std::nullopt;
                 }
-                v = static_cast<std::uint8_t>(buf[pos++]);
-                return true;
+                return static_cast<std::uint8_t>(buf[pos++]);
             }
-            bool take_u32(std::uint32_t& v)
+
+            /** @brief 读 4 字节小端；越界置粘性失败位并返回无值。 */
+            [[nodiscard]]
+            auto take_u32() -> std::optional<std::uint32_t>
             {
                 if (bad || pos + 4 > buf.size())
                 {
                     bad = true;
-                    return false;
+                    return std::nullopt;
                 }
-                v = 0;
+                std::uint32_t v = 0;
                 for (int i = 0; i < 4; ++i)
                 {
                     v |= static_cast<std::uint8_t>(buf[pos + i]) << (8 * i);
                 }
                 pos += 4;
-                return true;
+                return v;
             }
-            bool take_i32(std::int32_t& v)
+
+            /** @brief 读 4 字节小端按有符号解释。 */
+            [[nodiscard]]
+            auto take_i32() -> std::optional<std::int32_t>
             {
-                std::uint32_t u = 0;
-                if (!take_u32(u))
+                const std::optional<std::uint32_t> u = take_u32();
+                if (!u)
                 {
-                    return false;
+                    return std::nullopt;
                 }
-                v = static_cast<std::int32_t>(u);
-                return true;
+                return static_cast<std::int32_t>(*u);
             }
-            bool take_i64(std::int64_t& v)
+
+            /** @brief 读 8 字节小端；越界置粘性失败位并返回无值。 */
+            [[nodiscard]]
+            auto take_i64() -> std::optional<std::int64_t>
             {
                 if (bad || pos + 8 > buf.size())
                 {
                     bad = true;
-                    return false;
+                    return std::nullopt;
                 }
                 std::uint64_t u = 0;
                 for (int i = 0; i < 8; ++i)
@@ -198,20 +203,22 @@ export namespace cg::graph::headcache
                          << (8 * i);
                 }
                 pos += 8;
-                v = static_cast<std::int64_t>(u);
-                return true;
+                return static_cast<std::int64_t>(u);
             }
-            bool take_str(std::string& s)
+
+            /** @brief 读长度前缀字节串；长度越界置粘性失败位并返回无值。 */
+            [[nodiscard]]
+            auto take_str() -> std::optional<std::string>
             {
-                std::uint32_t n = 0;
-                if (!take_u32(n) || pos + n > buf.size())
+                const std::optional<std::uint32_t> n = take_u32();
+                if (!n || pos + *n > buf.size())
                 {
                     bad = true;
-                    return false;
+                    return std::nullopt;
                 }
-                s.assign(buf.data() + pos, n);
-                pos += n;
-                return true;
+                std::string s{buf.data() + pos, *n};
+                pos += *n;
+                return s;
             }
         };
 
@@ -224,10 +231,10 @@ export namespace cg::graph::headcache
         inline constexpr std::uint8_t payload_format = 3;
 
         [[nodiscard]]
-        inline auto encode_partition(const cg::extract::HeadPartition& p,
-                                     const std::string& main_path,
-                                     const std::string& main_hash)
-            -> std::string
+        inline auto encode_partition(
+            const cg::extract::HeadPartition& p,
+            const std::string&                main_path,
+            const std::string&                main_hash) -> std::string
         {
             BlobWriter w;
             w.u8(payload_format);
@@ -259,8 +266,9 @@ export namespace cg::graph::headcache
                 }
                 w.u8(s.const_method ? 1 : 0);
                 w.str(s.unique_key);
-                w.str(si < p.symbol_regions.size() ? p.symbol_regions[si]
-                                                   : p.file);
+                w.str(
+                    si < p.symbol_regions.size() ? p.symbol_regions[si]
+                                                 : p.file);
             }
             w.u32(static_cast<std::uint32_t>(p.edges.size()));
             for (const cg::extract::EdgeRec& e : p.edges)
@@ -273,8 +281,7 @@ export namespace cg::graph::headcache
                 w.str(e.dst.meta.parent);
                 w.u8(e.dst.meta.sig_hash.has_value() ? 1 : 0);
                 w.i64(
-                    e.dst.meta.sig_hash.has_value() ? *e.dst.meta.sig_hash
-                                                    : 0);
+                    e.dst.meta.sig_hash.has_value() ? *e.dst.meta.sig_hash : 0);
                 w.u8(e.dst.meta.const_method ? 1 : 0);
                 w.u8(static_cast<std::uint8_t>(e.dst.meta.kind));
                 w.u8(e.dst.meta.arg_dep ? 1 : 0);
@@ -297,137 +304,196 @@ export namespace cg::graph::headcache
             return std::move(w.buf);
         }
 
-        [[nodiscard]]
-        inline auto decode_partition(
-            std::string_view            blob,
-            cg::extract::HeadPartition& out,
-            std::string&                main_path,
-            std::string&                main_hash) -> bool
+        /** @brief 解码产物：分区本体与两个身份串。 */
+        struct DecodedPartition
         {
-            BlobReader r{blob};
-            std::uint8_t fmt = 0;
-            if (!r.take_u8(fmt) || fmt != payload_format)
+            cg::extract::HeadPartition partition;
+            std::string                main_path;
+            std::string                main_hash;
+        };
+
+        /**
+         * @brief 载荷解码；任一字段越界或格式版本不符返回无值。
+         *
+         * @internal 读序即编码序；粘性失败位使失败后的读取立即失败，
+         *           字段可按序全部读出后统一判定（pos/bad 终态与短路
+         *           逐字段判等价）。
+         */
+        [[nodiscard]]
+        inline auto decode_partition(std::string_view blob)
+            -> std::optional<DecodedPartition>
+        {
+            BlobReader                         r{blob};
+            DecodedPartition                   out;
+            const std::optional<std::uint8_t>  fmt = r.take_u8();
+            const std::optional<std::string>   file = r.take_str();
+            const std::optional<std::string>   main_path = r.take_str();
+            const std::optional<std::string>   main_hash = r.take_str();
+            const std::optional<std::uint32_t> nsym = r.take_u32();
+            if (!fmt || *fmt != payload_format || !file || !main_path
+                || !main_hash || !nsym || *nsym > (1u << 24))
             {
-                return false;
+                return std::nullopt;
             }
-            if (!r.take_str(out.file) || !r.take_str(main_path)
-                || !r.take_str(main_hash))
+            out.partition.file = std::move(*file);
+            out.main_path = std::move(*main_path);
+            out.main_hash = std::move(*main_hash);
+            out.partition.symbols.resize(*nsym);
+            out.partition.symbol_regions.clear();
+            out.partition.symbol_regions.resize(*nsym);
+            for (std::size_t si = 0; si < out.partition.symbols.size(); ++si)
             {
-                return false;
-            }
-            std::uint32_t nsym = 0;
-            if (!r.take_u32(nsym) || nsym > (1u << 24))
-            {
-                return false;
-            }
-            out.symbols.resize(nsym);
-            out.symbol_regions.clear();
-            out.symbol_regions.resize(nsym);
-            for (std::size_t si = 0; si < out.symbols.size(); ++si)
-            {
-                cg::extract::SymbolRec& s = out.symbols[si];
-                std::uint8_t kind = 0;
-                std::int32_t line = 0;
-                std::int32_t col = 0;
-                std::int32_t flags = 0;
-                std::uint32_t np = 0;
-                std::uint32_t nt = 0;
-                std::uint8_t cm = 0;
-                if (!r.take_u8(kind) || kind > 9 || !r.take_str(s.name)
-                    || !r.take_str(s.ns) || !r.take_str(s.scope)
-                    || !r.take_str(s.parent) || !r.take_str(s.file)
-                    || !r.take_i32(line) || !r.take_i32(col)
-                    || !r.take_i32(flags) || !r.take_u32(np) || np > (1u << 16)
-                    || !r.take_u32(nt) || nt > (1u << 16) || !r.take_u8(cm)
-                    || !r.take_str(s.unique_key)
-                    || !r.take_str(out.symbol_regions[si]))
+                cg::extract::SymbolRec&           s = out.partition.symbols[si];
+                const std::optional<std::uint8_t> kind = r.take_u8();
+                const std::optional<std::string>  name = r.take_str();
+                const std::optional<std::string>  ns = r.take_str();
+                const std::optional<std::string>  scope = r.take_str();
+                const std::optional<std::string>  parent = r.take_str();
+                const std::optional<std::string>  sfile = r.take_str();
+                const std::optional<std::int32_t> line = r.take_i32();
+                const std::optional<std::int32_t> col = r.take_i32();
+                const std::optional<std::int32_t> flags = r.take_i32();
+                const std::optional<std::uint32_t> np = r.take_u32();
+                const std::optional<std::uint32_t> nt = r.take_u32();
+                const std::optional<std::uint8_t>  cm = r.take_u8();
+                const std::optional<std::string>   unique_key = r.take_str();
+                const std::optional<std::string>   region = r.take_str();
+                if (!kind || *kind > 9 || !name || !ns || !scope || !parent
+                    || !sfile || !line || !col || !flags || !np
+                    || *np > (1u << 16) || !nt || *nt > (1u << 16) || !cm
+                    || !unique_key || !region)
                 {
-                    return false;
+                    return std::nullopt;
                 }
-                s.kind = static_cast<cg::extract::SymKind>(kind);
-                s.line = static_cast<int>(line);
-                s.col = static_cast<int>(col);
-                s.flags = static_cast<std::uint32_t>(flags);
-                s.const_method = cm != 0;
-                s.param_types.resize(np);
+                s.kind = static_cast<cg::extract::SymKind>(*kind);
+                s.name = std::move(*name);
+                s.ns = std::move(*ns);
+                s.scope = std::move(*scope);
+                s.parent = std::move(*parent);
+                s.file = std::move(*sfile);
+                s.line = static_cast<int>(*line);
+                s.col = static_cast<int>(*col);
+                s.flags = static_cast<std::uint32_t>(*flags);
+                s.const_method = *cm != 0;
+                s.unique_key = std::move(*unique_key);
+                out.partition.symbol_regions[si] = std::move(*region);
+                s.param_types.resize(*np);
                 for (std::string& t : s.param_types)
                 {
-                    if (!r.take_str(t))
+                    if (const std::optional<std::string> v = r.take_str(); !v)
                     {
-                        return false;
+                        return std::nullopt;
+                    }
+                    else
+                    {
+                        t = std::move(*v);
                     }
                 }
-                s.template_params.resize(nt);
+                s.template_params.resize(*nt);
                 for (std::string& t : s.template_params)
                 {
-                    if (!r.take_str(t))
+                    if (const std::optional<std::string> v = r.take_str(); !v)
                     {
-                        return false;
+                        return std::nullopt;
+                    }
+                    else
+                    {
+                        t = std::move(*v);
                     }
                 }
             }
-            std::uint32_t nedge = 0;
-            if (!r.take_u32(nedge) || nedge > (1u << 26))
+            const std::optional<std::uint32_t> nedge = r.take_u32();
+            if (!nedge || *nedge > (1u << 26))
             {
-                return false;
+                return std::nullopt;
             }
-            out.edges.resize(nedge);
-            for (cg::extract::EdgeRec& e : out.edges)
+            out.partition.edges.resize(*nedge);
+            for (cg::extract::EdgeRec& e : out.partition.edges)
             {
-                std::uint8_t is_key = 0;
-                std::uint8_t has_sig = 0;
-                std::int64_t sig = 0;
-                std::uint8_t cm = 0;
-                std::uint8_t mk = 0;
-                std::uint8_t ad = 0;
-                std::uint8_t ek = 0;
-                std::int32_t line = 0;
-                std::int32_t attrs = 0;
-                std::int32_t occ = 0;
-                if (!r.take_str(e.src_key) || !r.take_u8(is_key)
-                    || !r.take_str(e.dst.key) || !r.take_str(e.dst.meta.name)
-                    || !r.take_str(e.dst.meta.ns)
-                    || !r.take_str(e.dst.meta.parent) || !r.take_u8(has_sig)
-                    || !r.take_i64(sig) || !r.take_u8(cm) || !r.take_u8(mk)
-                    || mk > 9 || !r.take_u8(ad) || !r.take_u8(ek) || ek > 6
-                    || !r.take_str(e.site_file) || !r.take_i32(line)
-                    || !r.take_i32(attrs) || !r.take_i32(occ))
+                const std::optional<std::string>  src_key = r.take_str();
+                const std::optional<std::uint8_t> is_key = r.take_u8();
+                const std::optional<std::string>  dst_key = r.take_str();
+                const std::optional<std::string>  dst_name = r.take_str();
+                const std::optional<std::string>  dst_ns = r.take_str();
+                const std::optional<std::string>  dst_parent = r.take_str();
+                const std::optional<std::uint8_t> has_sig = r.take_u8();
+                const std::optional<std::int64_t> sig = r.take_i64();
+                const std::optional<std::uint8_t> cm = r.take_u8();
+                const std::optional<std::uint8_t> mk = r.take_u8();
+                const std::optional<std::uint8_t> ad = r.take_u8();
+                const std::optional<std::uint8_t> ek = r.take_u8();
+                const std::optional<std::string>  site_file = r.take_str();
+                const std::optional<std::int32_t> line = r.take_i32();
+                const std::optional<std::int32_t> attrs = r.take_i32();
+                const std::optional<std::int32_t> occ = r.take_i32();
+                if (!src_key || !is_key || !dst_key || !dst_name || !dst_ns
+                    || !dst_parent || !has_sig || !sig || !cm || !mk || *mk > 9
+                    || !ad || !ek || *ek > 6 || !site_file || !line || !attrs
+                    || !occ)
                 {
-                    return false;
+                    return std::nullopt;
                 }
-                e.dst.is_key = is_key != 0;
-                if (has_sig != 0)
+                e.src_key = std::move(*src_key);
+                e.dst.is_key = *is_key != 0;
+                e.dst.key = std::move(*dst_key);
+                e.dst.meta.name = std::move(*dst_name);
+                e.dst.meta.ns = std::move(*dst_ns);
+                e.dst.meta.parent = std::move(*dst_parent);
+                if (*has_sig != 0)
                 {
-                    e.dst.meta.sig_hash = sig;
+                    e.dst.meta.sig_hash = *sig;
                 }
-                e.dst.meta.const_method = cm != 0;
-                e.dst.meta.kind = static_cast<cg::extract::SymKind>(mk);
-                e.dst.meta.arg_dep = ad != 0;
-                e.kind = static_cast<cg::extract::EdgeKind>(ek);
-                e.site_line = static_cast<int>(line);
-                e.attrs = static_cast<std::uint32_t>(attrs);
-                e.occurrences = occ;
+                e.dst.meta.const_method = *cm != 0;
+                e.dst.meta.kind = static_cast<cg::extract::SymKind>(*mk);
+                e.dst.meta.arg_dep = *ad != 0;
+                e.kind = static_cast<cg::extract::EdgeKind>(*ek);
+                e.site_file = std::move(*site_file);
+                e.site_line = static_cast<int>(*line);
+                e.attrs = static_cast<std::uint32_t>(*attrs);
+                e.occurrences = *occ;
             }
-            std::uint32_t ninc = 0;
-            if (!r.take_u32(ninc) || ninc > (1u << 24))
+            const std::optional<std::uint32_t> ninc = r.take_u32();
+            if (!ninc || *ninc > (1u << 24))
             {
-                return false;
+                return std::nullopt;
             }
-            out.includes.resize(ninc);
-            for (cg::extract::IncludeRec& i : out.includes)
+            out.partition.includes.resize(*ninc);
+            for (cg::extract::IncludeRec& i : out.partition.includes)
             {
-                std::int32_t line = 0;
-                std::uint8_t ang = 0;
-                if (!r.take_str(i.file) || !r.take_str(i.target)
-                    || !r.take_i32(line) || !r.take_u8(ang))
+                const std::optional<std::string>  ifile = r.take_str();
+                const std::optional<std::string>  target = r.take_str();
+                const std::optional<std::int32_t> line = r.take_i32();
+                const std::optional<std::uint8_t> ang = r.take_u8();
+                if (!ifile || !target || !line || !ang)
                 {
-                    return false;
+                    return std::nullopt;
                 }
-                i.line = static_cast<int>(line);
-                i.angled = ang != 0;
+                i.file = std::move(*ifile);
+                i.target = std::move(*target);
+                i.line = static_cast<int>(*line);
+                i.angled = *ang != 0;
             }
-            return r.take_i64(out.external_dropped)
-                   && r.take_i64(out.operator_dropped) && !r.bad;
+            const std::optional<std::int64_t> external_dropped = r.take_i64();
+            const std::optional<std::int64_t> operator_dropped = r.take_i64();
+            if (!external_dropped || !operator_dropped || r.bad)
+            {
+                return std::nullopt;
+            }
+            out.partition.external_dropped = *external_dropped;
+            out.partition.operator_dropped = *operator_dropped;
+            return out;
+        }
+
+        /// 按文件名取分区骨架（visited_files 建立的索引）；无分区返回
+        /// nullptr（该文件的产物不进任何分区）。
+        [[nodiscard]]
+        inline auto partition_of(
+            const std::unordered_map<std::string, std::size_t>& index,
+            std::vector<cg::extract::HeadPartition>&            parts,
+            const std::string& f) -> cg::extract::HeadPartition*
+        {
+            const auto it = index.find(f);
+            return it == index.end() ? nullptr : &parts[it->second];
         }
 
     } // namespace detail
@@ -448,12 +514,11 @@ export namespace cg::graph::headcache
          *              不符的库内行载入即弃。
          * @param closure_of 归属文件路径 → 闭包摘要（运行期只读快照）。
          */
-        HeadCache(std::string epoch,
-                  const std::unordered_map<std::string, std::string>*
-                      closure_of)
-            : epoch_{std::move(epoch)}
-            , closure_of_{closure_of}
-            , row_ver_{row_ver_of(epoch_)}
+        HeadCache(
+            std::string                                         epoch,
+            const std::unordered_map<std::string, std::string>* closure_of)
+            : epoch_{std::move(epoch)}, closure_of_{closure_of},
+              row_ver_{row_ver_of(epoch_)}
         {
         }
 
@@ -477,9 +542,10 @@ export namespace cg::graph::headcache
 
         /** @brief 生成一个 TU 的查询桥（variant = parse_digest）。 */
         [[nodiscard]]
-        auto bridge_for(const std::string& variant,
-                        const std::string& main_path,
-                        const std::string& main_hash) const -> Bridge
+        auto bridge_for(
+            const std::string& variant,
+            const std::string& main_path,
+            const std::string& main_hash) const -> Bridge
         {
             Bridge b;
             b.owner = this;
@@ -497,9 +563,10 @@ export namespace cg::graph::headcache
          * 记录、变体超限、闭包摘要未知或不匹配。
          */
         [[nodiscard]]
-        auto lookup(const std::string& file,
-                    const std::string& variant,
-                    const std::string& main_anchor) const
+        auto lookup(
+            const std::string& file,
+            const std::string& variant,
+            const std::string& main_anchor) const
             -> const cg::extract::HeadPartition*
         {
             ++a_lookups_;
@@ -511,8 +578,10 @@ export namespace cg::graph::headcache
                 ++a_misses_;
                 if (dbg)
                 {
-                    std::println(std::cerr,
-                                 "HCMISS no-closure file='{}'", file);
+                    std::println(
+                        std::cerr,
+                        "HCMISS no-closure file='{}'",
+                        file);
                 }
                 return nullptr;
             }
@@ -524,9 +593,7 @@ export namespace cg::graph::headcache
                 ++a_misses_;
                 if (dbg)
                 {
-                    std::println(std::cerr,
-                                 "HCMISS no-file file='{}'",
-                                 file);
+                    std::println(std::cerr, "HCMISS no-file file='{}'", file);
                 }
                 return nullptr;
             }
@@ -536,9 +603,10 @@ export namespace cg::graph::headcache
                 ++a_misses_;
                 if (dbg)
                 {
-                    std::println(std::cerr,
-                                 "HCMISS no-variant file='{}'",
-                                 file);
+                    std::println(
+                        std::cerr,
+                        "HCMISS no-variant file='{}'",
+                        file);
                 }
                 return nullptr;
             }
@@ -548,12 +616,13 @@ export namespace cg::graph::headcache
                 ++a_misses_;
                 if (dbg)
                 {
-                    std::println(std::cerr,
-                                 "HCMISS closure file='{}' run={:.16} "
-                                 "entry={:.16}",
-                                 file,
-                                 closure,
-                                 ve.closure);
+                    std::println(
+                        std::cerr,
+                        "HCMISS closure file='{}' run={:.16} "
+                        "entry={:.16}",
+                        file,
+                        closure,
+                        ve.closure);
                 }
                 return nullptr;
             }
@@ -563,9 +632,7 @@ export namespace cg::graph::headcache
                 ++a_misses_;
                 if (dbg)
                 {
-                    std::println(std::cerr,
-                                 "HCMISS anchor file='{}'",
-                                 file);
+                    std::println(std::cerr, "HCMISS anchor file='{}'", file);
                 }
                 return nullptr;
             }
@@ -581,21 +648,19 @@ export namespace cg::graph::headcache
          * （先到先得，编译数据库序稳定可复现）。超出载荷预算即停止记录
          * （既有条目保留可用）。
          */
-        void record(const std::string&         variant,
-                    const std::string&         main_path,
-                    const std::string&         main_hash,
-                    const cg::extract::TuExtract& ex)
+        void record(
+            const std::string&            variant,
+            const std::string&            main_path,
+            const std::string&            main_hash,
+            const cg::extract::TuExtract& ex)
         {
             if (main_path.empty() || main_hash.empty())
             {
                 return; // 主文件锚不完整：整批不记录（宁漏）
             }
             // 按 visited_files 建分区骨架（零产出文件也要有空分区可命中）
-            std::unordered_map<
-                std::string,
-                std::size_t>
-                index;
-            std::vector<cg::extract::HeadPartition> parts;
+            std::unordered_map<std::string, std::size_t> index;
+            std::vector<cg::extract::HeadPartition>      parts;
             for (const std::string& f : ex.visited_files)
             {
                 if (f == ex.main_file)
@@ -606,21 +671,16 @@ export namespace cg::graph::headcache
                 parts.emplace_back();
                 parts.back().file = f;
             }
-            const auto part_of = [&](const std::string& f)
-                -> cg::extract::HeadPartition*
-            {
-                const auto it = index.find(f);
-                return it == index.end() ? nullptr : &parts[it->second];
-            };
             for (std::size_t si = 0; si < ex.symbols.size(); ++si)
             {
                 // 分区归属跟随发射区（游标所在文件），而非符号的归属文件
                 // ——基类实例注册从使用点所在区发射、归属定义处文件；跳过
                 // 某区必须连同它在别处的产物一起跳过（回放面反之）。
-                const std::string& region =
-                    si < ex.symbol_regions.size() ? ex.symbol_regions[si]
-                                                  : ex.symbols[si].file;
-                if (cg::extract::HeadPartition* p = part_of(region))
+                const std::string& region = si < ex.symbol_regions.size()
+                                                ? ex.symbol_regions[si]
+                                                : ex.symbols[si].file;
+                if (cg::extract::HeadPartition* p =
+                        detail::partition_of(index, parts, region))
                 {
                     p->symbols.push_back(ex.symbols[si]);
                     p->symbol_regions.push_back(region);
@@ -628,21 +688,24 @@ export namespace cg::graph::headcache
             }
             for (const cg::extract::EdgeRec& e : ex.edges)
             {
-                if (cg::extract::HeadPartition* p = part_of(e.site_file))
+                if (cg::extract::HeadPartition* p =
+                        detail::partition_of(index, parts, e.site_file))
                 {
                     p->edges.push_back(e);
                 }
             }
             for (const cg::extract::IncludeRec& i : ex.includes)
             {
-                if (cg::extract::HeadPartition* p = part_of(i.file))
+                if (cg::extract::HeadPartition* p =
+                        detail::partition_of(index, parts, i.file))
                 {
                     p->includes.push_back(i);
                 }
             }
             for (const auto& [f, drops] : ex.dropped_by_file)
             {
-                if (cg::extract::HeadPartition* p = part_of(f))
+                if (cg::extract::HeadPartition* p =
+                        detail::partition_of(index, parts, f))
                 {
                     p->external_dropped = drops.first;
                     p->operator_dropped = drops.second;
@@ -663,10 +726,8 @@ export namespace cg::graph::headcache
                 {
                     continue; // 闭包身份未知：不记录（宁漏）
                 }
-                FileEntry& fe =
-                    files_.try_emplace(p.file).first->second;
-                if (!fe.capped
-                    && fe.by_variant.size() >= variant_cap
+                FileEntry& fe = files_.try_emplace(p.file).first->second;
+                if (!fe.capped && fe.by_variant.size() >= variant_cap
                     && !fe.by_variant.contains(variant))
                 {
                     fe.capped = true;
@@ -685,7 +746,7 @@ export namespace cg::graph::headcache
                 e.closure = cit->second;
                 e.main_path = main_path;
                 e.main_hash = main_hash;
-                e.bytes   = estimate_bytes(p);
+                e.bytes = estimate_bytes(p);
                 e.partition = std::move(p);
                 e.dirty_persist = true;
                 fe.persist_paths = true;
@@ -695,12 +756,12 @@ export namespace cg::graph::headcache
         }
 
         /** @brief 从库载入（行版本戳 = 侧版本#纪元 联合哈希，不符即弃）。 */
-        void load(cg::db::GraphStore&                       store,
-                  const std::unordered_map<cg::db::FileId, std::string>&
-                      path_of)
+        void load(
+            cg::db::GraphStore&                                    store,
+            const std::unordered_map<cg::db::FileId, std::string>& path_of)
         {
             std::int64_t dbg_rows = 0, dbg_no_path = 0, dbg_decode = 0,
-                dbg_closure = 0, dbg_ok = 0;
+                         dbg_closure = 0, dbg_ok = 0;
             const bool   dbg =
                 cg::util::cstd::get_env("CCG_DEBUG_C1").has_value();
             const auto loaded = store.head_cache_load(row_ver_);
@@ -714,18 +775,18 @@ export namespace cg::graph::headcache
                     ++dbg_no_path;
                     continue;
                 }
-                cg::extract::HeadPartition p;
-                std::string                main_path;
-                std::string                main_hash;
-                if (!detail::decode_partition(
-                        row.payload, p, main_path, main_hash)
-                    || main_path != mit->second
-                    || p.file != pit->second)
+                std::optional<detail::DecodedPartition> decoded =
+                    detail::decode_partition(row.payload);
+                if (!decoded || decoded->main_path != mit->second
+                    || decoded->partition.file != pit->second)
                 {
                     ++dbg_decode;
                     continue; // 解码失败/拼写身份不符：丢弃（可再生）
                 }
-                const auto cit = closure_of_->find(p.file);
+                cg::extract::HeadPartition p = std::move(decoded->partition);
+                const std::string&         main_path = decoded->main_path;
+                const std::string&         main_hash = decoded->main_hash;
+                const auto                 cit = closure_of_->find(p.file);
                 if (cit == closure_of_->end())
                 {
                     ++dbg_closure;
@@ -746,12 +807,12 @@ export namespace cg::graph::headcache
                 std::string main_anchor = main_path;
                 main_anchor += '\x1f';
                 main_anchor += main_hash;
-                Entry& e    = ve.by_main[main_anchor];
-                ve.closure  = row.closure_digest;
-                e.closure   = row.closure_digest;
+                Entry& e = ve.by_main[main_anchor];
+                ve.closure = row.closure_digest;
+                e.closure = row.closure_digest;
                 e.main_path = main_path;
                 e.main_hash = main_hash;
-                e.bytes     = estimate_bytes(p);
+                e.bytes = estimate_bytes(p);
                 e.partition = std::move(p);
                 e.dirty_persist = false;
                 ++a_loaded_rows_;
@@ -784,10 +845,10 @@ export namespace cg::graph::headcache
          * @param invalidate 内容变脏/抹除的文件 id 集（该文件全部变体行
          *                   删除——头内容变脏则全部变体条目失效）。
          */
-        void persist(cg::db::GraphStore& store,
-                     const std::function<
-                         cg::db::FileId(const std::string&)>& resolve,
-                     const std::vector<cg::db::FileId>&        invalidate)
+        void persist(
+            cg::db::GraphStore&                                      store,
+            const std::function<cg::db::FileId(const std::string&)>& resolve,
+            const std::vector<cg::db::FileId>&                       invalidate)
         {
             std::vector<cg::db::HeadCacheRow> rows;
             {
@@ -817,16 +878,17 @@ export namespace cg::graph::headcache
                             {
                                 continue;
                             }
-                            rows.push_back(cg::db::HeadCacheRow{
-                                .file_id = fid,
-                                .main_id = main_id,
-                                .variant_digest = variant,
-                                .closure_digest = entry.closure,
-                                .payload = detail::encode_partition(
-                                    entry.partition,
-                                    entry.main_path,
-                                    entry.main_hash),
-                                .ver = row_ver_});
+                            rows.push_back(
+                                cg::db::HeadCacheRow{
+                                    .file_id = fid,
+                                    .main_id = main_id,
+                                    .variant_digest = variant,
+                                    .closure_digest = entry.closure,
+                                    .payload = detail::encode_partition(
+                                        entry.partition,
+                                        entry.main_path,
+                                        entry.main_hash),
+                                    .ver = row_ver_});
                         }
                     }
                 }
@@ -868,8 +930,8 @@ export namespace cg::graph::headcache
                 s.hits,
                 s.misses,
                 s.lookups > 0 ? 100.0 * static_cast<double>(s.hits)
-                                  / static_cast<double>(s.lookups)
-                            : 0.0,
+                                    / static_cast<double>(s.lookups)
+                              : 0.0,
                 s.records,
                 s.files,
                 s.capped_files,
@@ -890,13 +952,13 @@ export namespace cg::graph::headcache
         };
         struct VariantEntry
         {
-            std::string closure;
+            std::string                            closure;
             std::unordered_map<std::string, Entry> by_main;
         };
         struct FileEntry
         {
             std::unordered_map<std::string, VariantEntry> by_variant;
-            bool capped = false;
+            bool                                          capped = false;
             bool persist_paths = false; // 本运行动过（需要落盘判定）
         };
 
@@ -908,8 +970,8 @@ export namespace cg::graph::headcache
             for (const cg::extract::SymbolRec& s : p.symbols)
             {
                 n += s.name.size() + s.ns.size() + s.scope.size()
-                     + s.parent.size() + s.file.size()
-                     + s.unique_key.size() + 96;
+                     + s.parent.size() + s.file.size() + s.unique_key.size()
+                     + 96;
                 for (const std::string& t : s.param_types)
                 {
                     n += t.size() + 8;
@@ -932,20 +994,20 @@ export namespace cg::graph::headcache
             return n;
         }
 
-        std::string epoch_;
-        std::int64_t row_ver_ = 0;
+        std::string                                         epoch_;
+        std::int64_t                                        row_ver_ = 0;
         const std::unordered_map<std::string, std::string>* closure_of_ =
             nullptr;
-        mutable std::shared_mutex mx_;
+        mutable std::shared_mutex                  mx_;
         std::unordered_map<std::string, FileEntry> files_;
-        mutable std::atomic<std::int64_t> a_lookups_{0};
-        mutable std::atomic<std::int64_t> a_hits_{0};
-        mutable std::atomic<std::int64_t> a_misses_{0};
-        mutable std::atomic<std::int64_t> a_records_{0};
-        mutable std::atomic<std::int64_t> a_capped_files_{0};
-        mutable std::atomic<std::int64_t> a_loaded_rows_{0};
-        mutable std::atomic<std::int64_t> a_stored_rows_{0};
-        mutable std::atomic<std::int64_t> payload_bytes_{0};
+        mutable std::atomic<std::int64_t>          a_lookups_{0};
+        mutable std::atomic<std::int64_t>          a_hits_{0};
+        mutable std::atomic<std::int64_t>          a_misses_{0};
+        mutable std::atomic<std::int64_t>          a_records_{0};
+        mutable std::atomic<std::int64_t>          a_capped_files_{0};
+        mutable std::atomic<std::int64_t>          a_loaded_rows_{0};
+        mutable std::atomic<std::int64_t>          a_stored_rows_{0};
+        mutable std::atomic<std::int64_t>          payload_bytes_{0};
     };
 
 } // namespace cg::graph::headcache

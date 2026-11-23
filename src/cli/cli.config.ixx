@@ -69,14 +69,31 @@ export namespace cg::cli
          *
          * @internal
          * 已知键：llvm-path（引擎世界观）、两个 `ccg update` 协调旋钮
-         * （update_lease_ms / update_busy_timeout_ms，排队租约协议）与 clang-compile-flags（重放层注入旗标，字符串
-         * 值），各自存于自己的 meta 键下，未设置时用 schema 默认值。get 分支
+         * （update_lease_ms / update_busy_timeout_ms，排队租约协议）与
+         * clang-compile-flags（重放层注入旗标，字符串 值），各自存于自己的 meta
+         * 键下，未设置时用 schema 默认值。get 分支
          * 分行显示库内记录引擎（权威——上次索引实际加载的身份）与当前环境
          * 解析结果，两者不一致时醒目警告"裸跑 index 会换引擎触发全量重建"
          * （发现链上 PATH 会盖过库内引擎）。加载为尽力而为：引擎已丢失的库
          * 仍必须可读。协调旋钮为正整数毫秒；并发上限旋钮（index-jobs）为
          * 0（显式回自动）或 1-64。
          */
+        /**
+         * @brief 配置键的展示值：库内值缺失时以默认值占位显示。
+         */
+        inline auto knob_value_text(
+            cg::db::GraphStore& store,
+            const char*         meta_key,
+            std::int64_t        fallback) -> std::string
+        {
+            const auto raw = store.meta(meta_key);
+            if (!raw.has_value())
+            {
+                return std::format("{} (default)", fallback);
+            }
+            return *raw;
+        }
+
         inline auto run_config(const Invocation& inv_in) -> int
         {
             if (inv_in.positional.empty())
@@ -187,15 +204,14 @@ export namespace cg::cli
                 {
                     only = &check_key(inv.positional[1]);
                 }
-                std::optional<cg::db::GraphStore> store;
-                open_store_read(inv, store);
-                const auto configured = store->meta("llvm_path");
+                cg::db::GraphStore store = open_store_read(inv);
+                const auto         configured = store.meta("llvm_path");
                 // 库内记录引擎（权威）：上次索引运行实际加载并落库的身份
                 // （llvm_engine_path / llvm_version）。与"当前环境解析结果"分行
                 // 显示——发现链（PATH）会盖过库内旧引擎，两者不一致时裸跑
                 // index 会换引擎并触发全量重建，必须醒目警告。
-                const auto recorded_path = store->meta("llvm_engine_path");
-                const auto recorded_version = store->meta("llvm_version");
+                const auto recorded_path = store.meta("llvm_engine_path");
+                const auto recorded_version = store.meta("llvm_version");
 
                 std::string engine_path = "(unresolved)";
                 std::string engine_version = "(unresolved)";
@@ -232,18 +248,6 @@ export namespace cg::cli
                         engine_path,
                         engine_version);
                 }
-                const auto knob_value =
-                    [&](const char*  meta_key,
-                        std::int64_t fallback) -> std::string
-                {
-                    const auto raw = store->meta(meta_key);
-                    if (!raw.has_value())
-                    {
-                        return std::format("{} (default)", fallback);
-                    }
-                    return *raw;
-                };
-
                 const bool want_engine =
                     only == nullptr
                     || only->meta == std::string_view{"llvm_path"};
@@ -273,7 +277,7 @@ export namespace cg::cli
                 // 核），与毫秒旋钮的 "N (default)" 同款、文案按本键语义替换。
                 const auto jobs_value = [&]() -> std::string
                 {
-                    const auto raw = store->meta("index_jobs");
+                    const auto raw = store.meta("index_jobs");
                     if (!raw.has_value())
                     {
                         return std::format(
@@ -310,7 +314,8 @@ export namespace cg::cli
                     {
                         o.set(
                             "update-lease-ms",
-                            knob_value(
+                            knob_value_text(
+                                store,
                                 "update_lease_ms",
                                 cg::db::default_update_lease_ms));
                     }
@@ -318,7 +323,8 @@ export namespace cg::cli
                     {
                         o.set(
                             "update-busy-timeout-ms",
-                            knob_value(
+                            knob_value_text(
+                                store,
                                 "update_busy_timeout_ms",
                                 cg::db::default_update_busy_timeout_ms));
                     }
@@ -326,7 +332,8 @@ export namespace cg::cli
                     {
                         o.set(
                             "msbuild-refresh-debounce-ms",
-                            knob_value(
+                            knob_value_text(
+                                store,
                                 "msbuild_refresh_debounce_ms",
                                 cg::db::default_msbuild_refresh_debounce_ms));
                     }
@@ -336,7 +343,7 @@ export namespace cg::cli
                     }
                     if (want_flags)
                     {
-                        const auto raw = store->meta("clang_compile_flags");
+                        const auto raw = store.meta("clang_compile_flags");
                         o.set(
                             "clang-compile-flags",
                             raw.value_or(std::string{"(none)"}));
@@ -345,13 +352,17 @@ export namespace cg::cli
                     {
                         o.set(
                             "index-drain-rounds",
-                            knob_value("index_drain_rounds", std::int64_t{8}));
+                            knob_value_text(
+                                store,
+                                "index_drain_rounds",
+                                std::int64_t{8}));
                     }
                     if (want_drain_budget)
                     {
                         o.set(
                             "index-drain-budget-ms",
-                            knob_value(
+                            knob_value_text(
+                                store,
                                 "index_drain_budget_ms",
                                 std::int64_t{300'000}));
                     }
@@ -380,7 +391,8 @@ export namespace cg::cli
                 {
                     std::println(
                         "update-lease-ms: {}",
-                        knob_value(
+                        knob_value_text(
+                            store,
                             "update_lease_ms",
                             cg::db::default_update_lease_ms));
                 }
@@ -388,7 +400,8 @@ export namespace cg::cli
                 {
                     std::println(
                         "update-busy-timeout-ms: {}",
-                        knob_value(
+                        knob_value_text(
+                            store,
                             "update_busy_timeout_ms",
                             cg::db::default_update_busy_timeout_ms));
                 }
@@ -396,7 +409,8 @@ export namespace cg::cli
                 {
                     std::println(
                         "msbuild-refresh-debounce-ms: {}",
-                        knob_value(
+                        knob_value_text(
+                            store,
                             "msbuild_refresh_debounce_ms",
                             cg::db::default_msbuild_refresh_debounce_ms));
                 }
@@ -406,7 +420,7 @@ export namespace cg::cli
                 }
                 if (want_flags)
                 {
-                    const auto raw = store->meta("clang_compile_flags");
+                    const auto raw = store.meta("clang_compile_flags");
                     std::println(
                         "clang-compile-flags: {}",
                         raw.value_or(std::string{"(none)"}));
@@ -415,13 +429,17 @@ export namespace cg::cli
                 {
                     std::println(
                         "index-drain-rounds: {}",
-                        knob_value("index_drain_rounds", std::int64_t{8}));
+                        knob_value_text(
+                            store,
+                            "index_drain_rounds",
+                            std::int64_t{8}));
                 }
                 if (want_drain_budget)
                 {
                     std::println(
                         "index-drain-budget-ms: {}",
-                        knob_value(
+                        knob_value_text(
+                            store,
                             "index_drain_budget_ms",
                             std::int64_t{300'000}));
                 }
@@ -447,9 +465,8 @@ export namespace cg::cli
                     }
                     const std::string norm = cg::util::norm_path(
                         abs.lexically_normal().generic_string());
-                    std::optional<cg::db::GraphStore> store;
-                    open_store_create(inv, store);
-                    if (const auto old = store->meta("llvm_path");
+                    cg::db::GraphStore store = open_store_create(inv);
+                    if (const auto old = store.meta("llvm_path");
                         old.has_value() && *old == norm)
                     {
                         std::println(
@@ -458,7 +475,7 @@ export namespace cg::cli
                             norm);
                         return 0;
                     }
-                    store->set_meta("llvm_path", norm);
+                    store.set_meta("llvm_path", norm);
                     std::println(std::cerr, "{}", llvm_path_set_advisory(norm));
                     if (inv.json)
                     {
@@ -484,9 +501,8 @@ export namespace cg::cli
                             "clang-compile-flags` to clear)",
                             usage};
                     }
-                    std::optional<cg::db::GraphStore> store;
-                    open_store_create(inv, store);
-                    if (const auto old = store->meta("clang_compile_flags");
+                    cg::db::GraphStore store = open_store_create(inv);
+                    if (const auto old = store.meta("clang_compile_flags");
                         old.has_value() && *old == value)
                     {
                         std::println(
@@ -496,7 +512,7 @@ export namespace cg::cli
                             value);
                         return 0;
                     }
-                    store->set_meta("clang_compile_flags", value);
+                    store.set_meta("clang_compile_flags", value);
                     std::println(
                         std::cerr,
                         "ccg: clang-compile-flags = '{}'\n"
@@ -548,10 +564,9 @@ export namespace cg::cli
                                 "1 and 64 (got '{}')",
                                 value));
                     }
-                    const std::string norm = std::to_string(parsed);
-                    std::optional<cg::db::GraphStore> store;
-                    open_store_create(inv, store);
-                    if (const auto old = store->meta(k.meta);
+                    const std::string  norm = std::to_string(parsed);
+                    cg::db::GraphStore store = open_store_create(inv);
+                    if (const auto old = store.meta(k.meta);
                         old.has_value() && *old == norm)
                     {
                         std::println(
@@ -560,7 +575,7 @@ export namespace cg::cli
                             norm);
                         return 0;
                     }
-                    store->set_meta(k.meta, norm);
+                    store.set_meta(k.meta, norm);
                     std::println(
                         std::cerr,
                         "ccg: index-jobs = {}{}",
@@ -618,9 +633,8 @@ export namespace cg::cli
                             key,
                             value));
                 }
-                std::optional<cg::db::GraphStore> store;
-                open_store_create(inv, store);
-                store->set_meta(k.meta, std::to_string(parsed));
+                cg::db::GraphStore store = open_store_create(inv);
+                store.set_meta(k.meta, std::to_string(parsed));
                 std::println(std::cerr, "ccg: {} = {} ms", key, parsed);
                 if (inv.json)
                 {
@@ -633,10 +647,9 @@ export namespace cg::cli
 
             if (action == "unset" || action == "clear")
             {
-                const KeyInfo& k = check_key(inv.positional[1]);
-                std::optional<cg::db::GraphStore> store;
-                open_store_read(inv, store);
-                if (!store->meta(k.meta).has_value())
+                const KeyInfo&     k = check_key(inv.positional[1]);
+                cg::db::GraphStore store = open_store_read(inv);
+                if (!store.meta(k.meta).has_value())
                 {
                     std::println(
                         std::cerr,
@@ -644,7 +657,7 @@ export namespace cg::cli
                         k.cli);
                     return 0;
                 }
-                store->erase_meta(k.meta);
+                store.erase_meta(k.meta);
                 if (k.cli == std::string_view{"llvm-path"})
                 {
                     std::println(std::cerr, "{}", llvm_path_unset_advisory());

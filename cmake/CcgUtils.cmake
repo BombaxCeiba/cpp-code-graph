@@ -71,7 +71,17 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     endif()
 
     include("${CMAKE_CURRENT_LIST_DIR}/CcgC2801Workaround.cmake")
+    # std 生产者按 CMake 版本二选一，判定在此一次求值存入普通变量：
+    # 下面的选路分支与 ccg_module_target 里的 CXX_MODULE_STD 设置是
+    # 同一分叉的两个消费点，必须永远同侧（一侧走合成目标另一侧却按
+    # 自建库设置即为双供给或无供给冲突）。普通变量沿目录作用域链对
+    # 函数作用域可读，无需 cache。
     if(CMAKE_VERSION VERSION_GREATER_EQUAL 4.5)
+        set(CCG_STD_SYNTH_TARGET ON)
+    else()
+        set(CCG_STD_SYNTH_TARGET OFF)
+    endif()
+    if(CCG_STD_SYNTH_TARGET)
         ccg_c2801_wire_synth_std()
     else()
         add_library(cg_std_modules OBJECT
@@ -172,7 +182,8 @@ function(ccg_module_target target)
     # 持有模块的目标：clang-tidy 读取这些目标构建出的 BMI。
     set_property(GLOBAL APPEND PROPERTY CCG_MODULE_TARGETS ${target})
     if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-        if(CMAKE_VERSION VERSION_GREATER_EQUAL 4.5)
+        # CCG_STD_SYNTH_TARGET 由上方 MSVC 块按 CMake 版本一次求值。
+        if(CCG_STD_SYNTH_TARGET)
             # std 模块来自 CMake 无条件挂接的 @cmake_cxx_std 合成目标
             #（见本文件顶部版本分支说明）；显式 ON 是意图陈述
             #（4.5 的挂接不读该属性，写出来避免读者误判供给来源）。

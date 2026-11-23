@@ -26,6 +26,17 @@ export import cg.util.cshost;
 export import cg.util.shellscan;
 export import cg.util.msvcswitch;
 
+namespace cg::util
+{
+    /// 32 位字宽的循环右移（SHA-256 的消息调度与工作变量更新专用；
+    /// 移位量取值域 2..25，0 与 32 的未定义移位不会出现）。
+    [[nodiscard]]
+    constexpr auto rotr32(std::uint32_t x, unsigned n) -> std::uint32_t
+    {
+        return (x >> n) | (x << (32 - n));
+    }
+} // namespace cg::util
+
 export namespace cg::util
 {
 
@@ -390,11 +401,12 @@ export namespace cg::util
         {
             return false;
         }
-        const auto fold = [](char c) { return ascii_lower_char(c); };
         for (std::size_t i = 0; i + needle.size() <= hay.size(); ++i)
         {
             std::size_t j = 0;
-            while (j < needle.size() && fold(hay[i + j]) == fold(needle[j]))
+            while (j < needle.size()
+                   && ascii_lower_char(hay[i + j])
+                          == ascii_lower_char(needle[j]))
             {
                 ++j;
             }
@@ -845,14 +857,9 @@ export namespace cg::util
          * 结果按目录与整路径缓存在本实例中。
          *
          * @internal
-         * 每个基目录恰一份目录列表，供后续所有段复用。先收集、后打标记：
-         * 进行中扫描的半成品状态（非局部退出——crash-guard 路径上迭代内的
-         * 故障会恢复到此帧之后——跳过循环的剩余部分）绝不能被观察成已完成
-         * 的扫描，否则后续每次探测都会对着残缺列表反复重拼段。未打标记的
-         * 入口只会触发重新扫描。探测基取到此为止的路径（仍相对时为 "."，
-         * 盘符前缀之后取驱动器根——对 "e:" 调 directory_iterator 读到的
-         * 是该驱动器的工作目录而非其根）。不可读的基目录：缓存保持空、
-         * 各段保持原样。
+         * 探测基取到此为止的路径（仍相对时为 "."，盘符前缀之后取驱动器根
+         * ——对 "e:" 调 directory_iterator 读到的是该驱动器的工作目录而非
+         * 其根）。扫描、标记与复用的口径见 entries_of_。
          */
         [[nodiscard]]
         auto canonical_case_spelling(std::string_view path) -> std::string
@@ -862,44 +869,6 @@ export namespace cg::util
             {
                 return hit->second;
             }
-
-            const auto entries_of =
-                [&](const std::string& base) -> const DirEntries&
-            {
-                if (const auto hit = dirs_.find(base);
-                    hit != dirs_.end() && hit->second.scanned)
-                {
-                    return hit->second;
-                }
-                std::unordered_map<std::string, std::string> by_fold;
-                try
-                {
-                    namespace fs = std::filesystem;
-                    std::error_code ec;
-                    for (fs::directory_iterator it{fs::path{base}, ec}, end;
-                         !ec && it != end;
-                         it.increment(ec))
-                    {
-                        const std::string name =
-                            it->path().filename().generic_string();
-                        if (!by_fold.try_emplace(ascii_lower(name), name)
-                                 .second)
-                        {
-                            by_fold[ascii_lower(name)] =
-                                ""; // 歧义 fold：两种拼写都保持原样
-                        }
-                    }
-                }
-                catch (...)
-                {
-                }
-                DirEntries filled;
-                filled.by_fold = std::move(by_fold);
-                filled.scanned = true;
-                const auto [it, inserted] =
-                    dirs_.insert_or_assign(base, std::move(filled));
-                return it->second;
-            };
 
             std::string out;
             std::size_t pos = 0;
@@ -927,7 +896,7 @@ export namespace cg::util
                     pos,
                     end == std::string_view::npos ? std::string_view::npos
                                                   : end - pos)};
-                const DirEntries& d = entries_of(base);
+                const DirEntries& d = entries_of_(base);
                 std::string       actual = seg;
                 if (const auto it = d.by_fold.find(ascii_lower(seg));
                     it != d.by_fold.end() && !it->second.empty()
@@ -961,6 +930,53 @@ export namespace cg::util
             bool                                         scanned = false;
         };
 
+        /**
+         * @brief 基目录的入口列表（fold → 磁盘拼写），首次探测时扫描并缓存。
+         *
+         * @internal
+         * 每个基目录恰一份目录列表，供后续所有段复用。先收集、后打标记：
+         * 进行中扫描的半成品状态（非局部退出——crash-guard 路径上迭代内的
+         * 故障会恢复到此帧之后——跳过循环的剩余部分）绝不能被观察成已完成
+         * 的扫描，否则后续每次探测都会对着残缺列表反复重拼段。未打标记的
+         * 入口只会触发重新扫描。不可读的基目录：缓存保持空、各段保持原样。
+         */
+        [[nodiscard]]
+        auto entries_of_(const std::string& base) -> const DirEntries&
+        {
+            if (const auto hit = dirs_.find(base);
+                hit != dirs_.end() && hit->second.scanned)
+            {
+                return hit->second;
+            }
+            std::unordered_map<std::string, std::string> by_fold;
+            try
+            {
+                namespace fs = std::filesystem;
+                std::error_code ec;
+                for (fs::directory_iterator it{fs::path{base}, ec}, end;
+                     !ec && it != end;
+                     it.increment(ec))
+                {
+                    const std::string name =
+                        it->path().filename().generic_string();
+                    if (!by_fold.try_emplace(ascii_lower(name), name).second)
+                    {
+                        by_fold[ascii_lower(name)] =
+                            ""; // 歧义 fold：两种拼写都保持原样
+                    }
+                }
+            }
+            catch (...)
+            {
+            }
+            DirEntries filled;
+            filled.by_fold = std::move(by_fold);
+            filled.scanned = true;
+            const auto [it, inserted] =
+                dirs_.insert_or_assign(base, std::move(filled));
+            return it->second;
+        }
+
         std::unordered_map<std::string, DirEntries>  dirs_;
         std::unordered_map<std::string, std::string> whole_;
     };
@@ -992,9 +1008,6 @@ export namespace cg::util
             0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f,
             0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
             0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
-        const auto rotr = [](std::uint32_t x, unsigned n)
-        { return (x >> n) | (x << (32 - n)); };
-
         std::uint32_t h[8] = {
             0x6a09e667,
             0xbb67ae85,
@@ -1031,20 +1044,24 @@ export namespace cg::util
             }
             for (int t = 16; t < 64; ++t)
             {
-                const std::uint32_t s0 =
-                    rotr(w[t - 15], 7) ^ rotr(w[t - 15], 18) ^ (w[t - 15] >> 3);
-                const std::uint32_t s1 =
-                    rotr(w[t - 2], 17) ^ rotr(w[t - 2], 19) ^ (w[t - 2] >> 10);
+                const std::uint32_t s0 = rotr32(w[t - 15], 7)
+                                         ^ rotr32(w[t - 15], 18)
+                                         ^ (w[t - 15] >> 3);
+                const std::uint32_t s1 = rotr32(w[t - 2], 17)
+                                         ^ rotr32(w[t - 2], 19)
+                                         ^ (w[t - 2] >> 10);
                 w[t] = w[t - 16] + s0 + w[t - 7] + s1;
             }
             std::uint32_t a = h[0], b = h[1], c = h[2], d = h[3];
             std::uint32_t e = h[4], f = h[5], g = h[6], hh = h[7];
             for (int t = 0; t < 64; ++t)
             {
-                const std::uint32_t s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+                const std::uint32_t s1 =
+                    rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
                 const std::uint32_t ch = (e & f) ^ (~e & g);
                 const std::uint32_t t1 = hh + s1 + ch + k[t] + w[t];
-                const std::uint32_t s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+                const std::uint32_t s0 =
+                    rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
                 const std::uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
                 const std::uint32_t t2 = s0 + maj;
                 hh = g;
@@ -1155,8 +1172,6 @@ export namespace cg::util
         bool                     in_quotes = false;
         bool                     have_token = false;
         std::size_t              i = 0;
-        const auto               is_space = [](char c)
-        { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
         while (i < command.size())
         {
             const char c = command[i];
@@ -1193,7 +1208,8 @@ export namespace cg::util
                 have_token = true; // 连续两个引号产生一个空实参
                 ++i;
             }
-            else if (!in_quotes && is_space(c))
+            else if (
+                !in_quotes && (c == ' ' || c == '\t' || c == '\n' || c == '\r'))
             {
                 if (have_token)
                 {

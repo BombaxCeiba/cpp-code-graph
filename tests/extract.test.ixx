@@ -94,6 +94,38 @@ namespace
         return nullptr;
     }
 
+    /// 按（名，父类型）查找符号记录。
+    [[nodiscard]]
+    auto find_symbol_of_parent(
+        const Merged&    m,
+        std::string_view name,
+        std::string_view parent) -> const ex::SymbolRec*
+    {
+        for (const ex::SymbolRec& s : m.symbols)
+        {
+            if (s.name == name && s.parent == parent)
+            {
+                return &s;
+            }
+        }
+        return nullptr;
+    }
+
+    /// include 记录中是否存在目标与尖括号形态都匹配的条目。
+    [[nodiscard]]
+    auto has_include(const Merged& m, std::string_view target, bool angled)
+        -> bool
+    {
+        for (const ex::IncludeRec& i : m.includes)
+        {
+            if (i.target == target && i.angled == angled)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // 按符号名读取边端点的查找表。
     [[nodiscard]]
     auto key_names(const Merged& m)
@@ -510,37 +542,25 @@ namespace
     {
         const Merged m = merged_extraction(fixture_dir);
 
-        const auto find_include = [&](std::string_view target,
-                                      bool             angled) -> bool
-        {
-            for (const ex::IncludeRec& i : m.includes)
-            {
-                if (i.target == target && i.angled == angled)
-                {
-                    return true;
-                }
-            }
-            return false;
-        };
         cg::test::check(
             r,
-            find_include("circle.hpp", false),
+            has_include(m, "circle.hpp", false),
             "quoted include circle.hpp recorded");
         cg::test::check(
             r,
-            find_include("shape.hpp", false),
+            has_include(m, "shape.hpp", false),
             "quoted include shape.hpp recorded");
         cg::test::check(
             r,
-            find_include("canvas.hpp", false),
+            has_include(m, "canvas.hpp", false),
             "quoted include canvas.hpp recorded");
         cg::test::check(
             r,
-            find_include("tmpl.hpp", false),
+            has_include(m, "tmpl.hpp", false),
             "quoted include tmpl.hpp recorded");
         cg::test::check(
             r,
-            find_include("vector", true),
+            has_include(m, "vector", true),
             "angled include vector recorded");
     }
 
@@ -632,21 +652,8 @@ namespace
             }
         }
 
-        const auto find = [&](std::string_view name,
-                              std::string_view parent) -> const ex::SymbolRec*
-        {
-            for (const ex::SymbolRec& s : m.symbols)
-            {
-                if (s.name == name && s.parent == parent)
-                {
-                    return &s;
-                }
-            }
-            return nullptr;
-        };
-
         // 头文件定义的符号幸存（静默丢头回归）。
-        const ex::SymbolRec* counter = find("Counter", "");
+        const ex::SymbolRec* counter = find_symbol_of_parent(m, "Counter", "");
         cg::test::check(
             r,
             counter != nullptr,
@@ -659,14 +666,15 @@ namespace
                     && counter->file.find("..") == std::string::npos,
                 "Counter file is the collapsed inc/ path");
         }
-        const ex::SymbolRec* doubled = find("doubled", "Counter");
+        const ex::SymbolRec* doubled =
+            find_symbol_of_parent(m, "doubled", "Counter");
         cg::test::check(
             r,
             doubled != nullptr && doubled->const_method,
             "inline header method Counter::doubled extracted");
 
         // 类外定义经由 ".." 头文件保持其 record 作用域。
-        const ex::SymbolRec* get = find("get", "Counter");
+        const ex::SymbolRec* get = find_symbol_of_parent(m, "get", "Counter");
         cg::test::check(
             r,
             get != nullptr,
@@ -747,20 +755,9 @@ namespace
     void constexpr_flags(R& r)
     {
         const Merged m = merged_extraction(CCG_SAMPLE3_DIR);
-        const auto   find = [&](std::string_view name,
-                                std::string_view parent) -> const ex::SymbolRec*
-        {
-            for (const ex::SymbolRec& s : m.symbols)
-            {
-                if (s.name == name && s.parent == parent)
-                {
-                    return &s;
-                }
-            }
-            return nullptr;
-        };
 
-        const ex::SymbolRec* probe = find("FlagProbe", "FlagProbe");
+        const ex::SymbolRec* probe =
+            find_symbol_of_parent(m, "FlagProbe", "FlagProbe");
         cg::test::check(
             r,
             probe != nullptr,
@@ -774,7 +771,8 @@ namespace
                 "no-specifier ctor with a constexpr local body is "
                 "NOT flagged is_constexpr");
         }
-        const ex::SymbolRec* limit = find("limit", "FlagProbe");
+        const ex::SymbolRec* limit =
+            find_symbol_of_parent(m, "limit", "FlagProbe");
         cg::test::check(r, limit != nullptr, "FlagProbe::limit extracted");
         if (limit)
         {
@@ -802,18 +800,6 @@ namespace
     void constexpr_pretty_printed_head(R& r)
     {
         const Merged m = merged_extraction(constexpr_spec_dir);
-        const auto   find = [&](std::string_view name,
-                                std::string_view parent) -> const ex::SymbolRec*
-        {
-            for (const ex::SymbolRec& s : m.symbols)
-            {
-                if (s.name == name && s.parent == parent)
-                {
-                    return &s;
-                }
-            }
-            return nullptr;
-        };
         struct Want
         {
             std::string_view name;
@@ -863,7 +849,7 @@ namespace
         };
         for (const Want& w : wants)
         {
-            const ex::SymbolRec* s = find(w.name, w.parent);
+            const ex::SymbolRec* s = find_symbol_of_parent(m, w.name, w.parent);
             cg::test::check(
                 r,
                 s != nullptr,
@@ -882,15 +868,15 @@ namespace
         // 函数不是定义——都不进符号表，判据无从误标。
         cg::test::check(
             r,
-            find("local_in_fn", "") == nullptr,
+            find_symbol_of_parent(m, "local_in_fn", "") == nullptr,
             "function-body local is not a symbol");
         cg::test::check(
             r,
-            find("declared_only_fn", "") == nullptr,
+            find_symbol_of_parent(m, "declared_only_fn", "") == nullptr,
             "non-definition declaration is not a symbol");
         cg::test::check(
             r,
-            find("deleted_free_fn", "") == nullptr,
+            find_symbol_of_parent(m, "deleted_free_fn", "") == nullptr,
             "deleted function is not a symbol");
     }
 
@@ -901,6 +887,66 @@ namespace
     // ---------------------------------------------------------------------------
     // USES 提取矩阵（field/param/return/local 交叉 class/template/std）
     // 针对专用的 uses 夹具。
+
+    /// 一条 USES 边的断言投影视图（src 侧带持有符号的 NAME）。
+    struct UseEdge
+    {
+        std::string   src_name;
+        std::string   dst; // 精确 key 或延迟名
+        bool          is_key = false;
+        std::uint32_t attrs = 0;
+    };
+
+    /// 是否存在 src/dst/站点属性都匹配的 USES 边（精确 key 按包含比对）。
+    [[nodiscard]]
+    auto has_use_edge(
+        const std::vector<UseEdge>& uses,
+        std::string_view            src,
+        std::string_view            dst,
+        std::uint32_t               site_bits) -> bool
+    {
+        for (const UseEdge& u : uses)
+        {
+            if (u.src_name == src
+                && (u.is_key ? u.dst.find(dst) != std::string::npos
+                             : u.dst == dst)
+                && (u.attrs & ex::edge_attrs::uses_site_mask) == site_bits)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// 指向 `<name>` 的 USES 边计数（精确 key 解析名字段，延迟形态按裸名）。
+    [[nodiscard]]
+    auto count_uses_to(
+        const std::vector<UseEdge>& uses,
+        std::string_view            dst_name) -> std::int64_t
+    {
+        // 精确 key 形如 "record|uses|`<name>`|file"；延迟形态是
+        // 裸记录名。
+        std::int64_t n = 0;
+        for (const UseEdge& u : uses)
+        {
+            if (!u.is_key)
+            {
+                n += u.dst == dst_name ? 1 : 0;
+                continue;
+            }
+            const std::size_t scope_end = u.dst.find('|', 7);
+            const std::size_t name_end = scope_end == std::string::npos
+                                             ? std::string::npos
+                                             : u.dst.find('|', scope_end + 1);
+            if (name_end != std::string::npos
+                && u.dst.substr(scope_end + 1, name_end - scope_end - 1)
+                       == dst_name)
+            {
+                ++n;
+            }
+        }
+        return n;
+    }
 
     void uses_matrix(R& r)
     {
@@ -922,13 +968,6 @@ namespace
         }
 
         // 全部 USES 边，src 侧带持有符号的 NAME。
-        struct UseEdge
-        {
-            std::string   src_name;
-            std::string   dst; // 精确 key 或延迟名
-            bool          is_key = false;
-            std::uint32_t attrs = 0;
-        };
         const auto           names = key_names(m);
         std::vector<UseEdge> uses;
         for (const ex::EdgeRec& e : m.edges)
@@ -944,98 +983,82 @@ namespace
                  .is_key = e.dst.is_key,
                  .attrs = e.attrs});
         }
-        const auto has = [&](std::string_view src,
-                             std::string_view dst,
-                             std::uint32_t    site_bits)
-        {
-            for (const UseEdge& u : uses)
-            {
-                if (u.src_name == src
-                    && (u.is_key ? u.dst.find(dst) != std::string::npos
-                                 : u.dst == dst)
-                    && (u.attrs & ex::edge_attrs::uses_site_mask) == site_bits)
-                {
-                    return true;
-                }
-            }
-            return false;
-        };
-        const auto count_to = [&](std::string_view dst_name)
-        {
-            // 精确 key 形如 "record|uses|`<name>`|file"；延迟形态是
-            // 裸记录名。
-            std::int64_t n = 0;
-            for (const UseEdge& u : uses)
-            {
-                if (!u.is_key)
-                {
-                    n += u.dst == dst_name ? 1 : 0;
-                    continue;
-                }
-                const std::size_t scope_end = u.dst.find('|', 7);
-                const std::size_t name_end =
-                    scope_end == std::string::npos
-                        ? std::string::npos
-                        : u.dst.find('|', scope_end + 1);
-                if (name_end != std::string::npos
-                    && u.dst.substr(scope_end + 1, name_end - scope_end - 1)
-                           == dst_name)
-                {
-                    ++n;
-                }
-            }
-            return n;
-        };
 
         // field 交叉 class / template / std 命名：Carrier 的字段。
         cg::test::check(
             r,
-            has("by_class",
+            has_use_edge(
+                uses,
+                "by_class",
                 payload->unique_key,
                 ex::edge_attrs::uses_site_field),
             "field x class: by_class -> Payload (exact key)");
         cg::test::check(
             r,
-            has("by_template",
+            has_use_edge(
+                uses,
+                "by_template",
                 holder->unique_key,
                 ex::edge_attrs::uses_site_field),
             "field x template: by_template -> Holder primary");
         cg::test::check(
             r,
-            has("by_template",
+            has_use_edge(
+                uses,
+                "by_template",
                 payload->unique_key,
                 ex::edge_attrs::uses_site_field),
             "field x template: template argument -> Payload");
         cg::test::check(
             r,
-            has("by_std", payload->unique_key, ex::edge_attrs::uses_site_field),
+            has_use_edge(
+                uses,
+                "by_std",
+                payload->unique_key,
+                ex::edge_attrs::uses_site_field),
             "field x std: std::vector<Payload> -> Payload");
         cg::test::check(
             r,
-            count_to("vector") == 0 && count_to("allocator") == 0,
+            count_uses_to(uses, "vector") == 0
+                && count_uses_to(uses, "allocator") == 0,
             "std template records themselves create no USES edge");
 
         // param/return 交叉 class（echo：同一行的两个点在存储层
         // 折叠；提取层产出两条记录）。
         cg::test::check(
             r,
-            has("echo", payload->unique_key, ex::edge_attrs::uses_site_param),
+            has_use_edge(
+                uses,
+                "echo",
+                payload->unique_key,
+                ex::edge_attrs::uses_site_param),
             "param x class: echo(Payload) -> Payload");
         cg::test::check(
             r,
-            has("echo", payload->unique_key, ex::edge_attrs::uses_site_return),
+            has_use_edge(
+                uses,
+                "echo",
+                payload->unique_key,
+                ex::edge_attrs::uses_site_return),
             "return x class: echo returns Payload");
         cg::test::check(
             r,
-            has("echo_tpl", holder->unique_key, ex::edge_attrs::uses_site_param)
-                && has(
+            has_use_edge(
+                uses,
+                "echo_tpl",
+                holder->unique_key,
+                ex::edge_attrs::uses_site_param)
+                && has_use_edge(
+                    uses,
                     "echo_tpl",
                     payload->unique_key,
                     ex::edge_attrs::uses_site_param),
             "param x template: echo_tpl sees Holder and Payload");
         cg::test::check(
             r,
-            has("echo_std",
+            has_use_edge(
+                uses,
+                "echo_std",
                 payload->unique_key,
                 ex::edge_attrs::uses_site_param),
             "param x std: echo_std(std::vector<Payload>) -> Payload");
@@ -1043,15 +1066,27 @@ namespace
         // echo 体内 locals 交叉 class/template/std。
         cg::test::check(
             r,
-            has("echo", payload->unique_key, ex::edge_attrs::uses_site_local),
+            has_use_edge(
+                uses,
+                "echo",
+                payload->unique_key,
+                ex::edge_attrs::uses_site_local),
             "local x class: Payload local in echo");
         cg::test::check(
             r,
-            has("echo", holder->unique_key, ex::edge_attrs::uses_site_local),
+            has_use_edge(
+                uses,
+                "echo",
+                holder->unique_key,
+                ex::edge_attrs::uses_site_local),
             "local x template: Holder<Payload> local in echo");
         cg::test::check(
             r,
-            has("echo", payload->unique_key, ex::edge_attrs::uses_site_local),
+            has_use_edge(
+                uses,
+                "echo",
+                payload->unique_key,
+                ex::edge_attrs::uses_site_local),
             "local x std: std::vector<Payload> local in echo");
 
         // 跨 TU 不完整类型：按名延迟，绝不用精确 key。

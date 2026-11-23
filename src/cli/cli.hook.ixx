@@ -578,7 +578,8 @@ export namespace cg::cli
 
         inline constexpr HookSpec HOOK_SPECS[] = {
             // 宿主硬超时 10s：处理器内部最多等 update 9s，到点只 detach、绝不
-            // kill——后台 update 继续跑完（租约协议保证 detach 后独立完成）。因此这里
+            // kill——后台 update 继续跑完（租约协议保证 detach
+            // 后独立完成）。因此这里
             // 必须略大于 9s：hook 仍要先于宿主返回并注入那行"后台继续"。
             {"PostToolUse",
              "ccg-posttooluse",
@@ -1221,8 +1222,6 @@ export namespace cg::cli
         [[nodiscard]]
         auto display_path(std::string_view path) -> std::string
         {
-            const auto normalized = [](std::string_view value)
-            { return cg::util::to_forward_slashes(value); };
             // 已是相对路径（少见，但库内路径可能如此）时原样展示。
             const bool absolute =
                 path.size() >= 2
@@ -1231,7 +1230,7 @@ export namespace cg::cli
                     || path.front() == '/' || path.front() == '\\');
             if (!absolute)
             {
-                return normalized(path);
+                return cg::util::to_forward_slashes(path);
             }
             std::error_code ec;
             const fs::path  cwd = fs::current_path(ec);
@@ -1268,6 +1267,28 @@ export namespace cg::cli
             RawLiteral,   ///< 原始字符串（含编码前缀、定界符与全部内容）
         };
 
+        /** @brief 标识符字符判定（字母/数字/下划线）。 */
+        [[nodiscard]]
+        auto is_ident_char(char c) -> bool
+        {
+            return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+        }
+
+        /**
+         * @brief 发射 span_begin..at 的代码区间（空区间不发）。
+         */
+        template <typename Sink>
+        auto emit_code_span_before(
+            Sink&       sink,
+            std::size_t span_begin,
+            std::size_t at) -> void
+        {
+            if (at > span_begin)
+            {
+                sink(SourceSpan::Code, span_begin, at);
+            }
+        }
+
         /**
          * @brief 五状态源码扫描器：把文本切成无缝衔接的区间流回调给 sink。
          *
@@ -1293,17 +1314,8 @@ export namespace cg::cli
                 String,
                 Char,
             };
-            const auto ident_char = [](char c)
-            { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
             State       state = State::Code;
             std::size_t span_begin = 0; // 当前未发射区间的起点
-            const auto  emit_code_before = [&](std::size_t at)
-            {
-                if (at > span_begin)
-                {
-                    sink(SourceSpan::Code, span_begin, at);
-                }
-            };
             for (std::size_t i = 0; i < text.size(); ++i)
             {
                 const char c = text[i];
@@ -1313,14 +1325,14 @@ export namespace cg::cli
                 case State::Code:
                     if (c == '/' && next == '/')
                     {
-                        emit_code_before(i);
+                        emit_code_span_before(sink, span_begin, i);
                         span_begin = i;
                         ++i;
                         state = State::LineComment;
                     }
                     else if (c == '/' && next == '*')
                     {
-                        emit_code_before(i);
+                        emit_code_span_before(sink, span_begin, i);
                         span_begin = i;
                         ++i;
                         state = State::BlockComment;
@@ -1329,14 +1341,14 @@ export namespace cg::cli
                     {
                         // 前缀合法性：`R"`、`uR"`、`UR"`、`LR"`、`u8R"`。
                         const char prev = i > 0 ? text[i - 1] : '\0';
-                        const bool bare = i == 0 || !ident_char(prev);
+                        const bool bare = i == 0 || !is_ident_char(prev);
                         const bool u8_prefix =
                             i >= 2 && text[i - 1] == '8' && text[i - 2] == 'u'
-                            && (i < 3 || !ident_char(text[i - 3]));
+                            && (i < 3 || !is_ident_char(text[i - 3]));
                         const bool simple_prefix =
                             i >= 1
                             && (prev == 'u' || prev == 'U' || prev == 'L')
-                            && (i < 2 || !ident_char(text[i - 2]));
+                            && (i < 2 || !is_ident_char(text[i - 2]));
                         const std::size_t seg = text.find('(', i + 2);
                         bool raw = (bare || u8_prefix || simple_prefix)
                                    && seg != std::string_view::npos
@@ -1373,7 +1385,7 @@ export namespace cg::cli
                             }
                             // 编码前缀字符（u8R/uR/UR/LR 的前半段）此前被当作
                             // 代码流过，这里把区间起点回拨，划进字面量。
-                            emit_code_before(begin);
+                            emit_code_span_before(sink, span_begin, begin);
                             sink(SourceSpan::RawLiteral, begin, stop);
                             span_begin = stop;
                             i = stop > 0 ? stop - 1 : 0;
@@ -1382,7 +1394,7 @@ export namespace cg::cli
                         {
                             // 非法前缀/定界符：`R"` 恰好自成一个两字符字面量
                             // （R 进串、紧随的引号闭串），括号部分退回代码。
-                            emit_code_before(i);
+                            emit_code_span_before(sink, span_begin, i);
                             sink(SourceSpan::Literal, i, i + 2);
                             span_begin = i + 2;
                             ++i;
@@ -1390,13 +1402,13 @@ export namespace cg::cli
                     }
                     else if (c == '"')
                     {
-                        emit_code_before(i);
+                        emit_code_span_before(sink, span_begin, i);
                         span_begin = i;
                         state = State::String;
                     }
                     else if (c == '\'')
                     {
-                        emit_code_before(i);
+                        emit_code_span_before(sink, span_begin, i);
                         span_begin = i;
                         state = State::Char;
                     }
@@ -1439,7 +1451,7 @@ export namespace cg::cli
             // 截断文件留下的未闭合区间照实切出（孤引号/未终结注释）。
             if (state == State::Code)
             {
-                emit_code_before(text.size());
+                emit_code_span_before(sink, span_begin, text.size());
             }
             else
             {
@@ -1625,13 +1637,14 @@ export namespace cg::cli
 
         /** @brief 从 structuredPatch 的 hunks 取首个新增行；纯删除时取锚点。 */
         [[nodiscard]]
-        auto span_from_patch(const json::ValueView& patch, EditSpan& span)
-            -> bool
+        auto span_from_patch(const json::ValueView& patch)
+            -> std::optional<EditSpan>
         {
             if (!patch.is_array())
             {
-                return false;
+                return std::nullopt;
             }
+            EditSpan                   span;
             std::optional<std::size_t> deleted_anchor;
             for (std::size_t h = 0; h < patch.size(); ++h)
             {
@@ -1655,7 +1668,7 @@ export namespace cg::cli
                 {
                     span.have_line = true;
                     span.line = static_cast<std::size_t>(line);
-                    return true;
+                    return span;
                 }
                 for (std::size_t j = 0; j < lines->size(); ++j)
                 {
@@ -1690,7 +1703,7 @@ export namespace cg::cli
                         span.have_line = true;
                         span.line = static_cast<std::size_t>(line);
                         span.lines = std::max<std::size_t>(added, 1);
-                        return true;
+                        return span;
                     }
                     if (text.front() == '-')
                     {
@@ -1714,9 +1727,9 @@ export namespace cg::cli
                 span.have_line = true;
                 span.line = *deleted_anchor;
                 span.lines = 1;
-                return true;
+                return span;
             }
-            return false;
+            return std::nullopt;
         }
 
         /** @brief 文本在文件中的首次出现行（1 基）。 */
@@ -1853,17 +1866,12 @@ export namespace cg::cli
             {
                 return std::nullopt;
             }
-            std::string captured;
-            int         exit_code = -1;
-            if (!cg::util::platform::capture_exec(
-                    exe,
-                    args,
-                    captured,
-                    exit_code))
+            const auto captured = cg::util::platform::capture_exec(exe, args);
+            if (!captured.has_value())
             {
                 return std::nullopt;
             }
-            return parse_child_json(captured);
+            return parse_child_json(captured->out);
         }
 
 /**
@@ -1931,7 +1939,8 @@ export namespace cg::cli
          * 非 Linux 的其它 POSIX 为 8 秒，见 HOOK_TOTAL_BUDGET）。
          * 已存活时长取自 cg::util::platform::process_elapsed_since_creation，
          * Windows 上包含镜像加载/DLL 初始化；POSIX 为 best-effort（见
-         * process_elapsed_since_creation 的平台差异注释）。`CCG_HOOK_UPDATE_TIMEOUT_MS` 仍可进一步收紧
+         * process_elapsed_since_creation
+         * 的平台差异注释）。`CCG_HOOK_UPDATE_TIMEOUT_MS` 仍可进一步收紧
          * （测试超时路径），但绝不能把预算推过绝对截止。结果非负；为 0 时
          * 子进程照样派生后立即 detach（绝不 kill）。
          */
@@ -2106,24 +2115,30 @@ export namespace cg::cli
             return out;
         }
 
+        /**
+         * @brief 组装 Claude Code 钩子应答信封的 JSON 文本。
+         */
+        [[nodiscard]]
+        auto hook_envelope(std::string_view event, std::string_view ctx)
+            -> std::string
+        {
+            json::Object inner;
+            inner.set("hookEventName", event);
+            inner.set("additionalContext", ctx);
+            json::Object root;
+            root.set("hookSpecificOutput", std::move(inner));
+            return json::stringify(std::move(root));
+        }
+
         /** @brief 在 stdout 发出 Claude Code 钩子应答信封。 */
         void emit_hook_context(std::string_view event, std::string_view context)
         {
-            const auto envelope = [&](std::string_view ctx)
-            {
-                json::Object inner;
-                inner.set("hookEventName", event);
-                inner.set("additionalContext", ctx);
-                json::Object root;
-                root.set("hookSpecificOutput", std::move(inner));
-                return json::stringify(std::move(root));
-            };
-            std::string out = envelope(context);
+            std::string out = hook_envelope(event, context);
             if (out.empty())
             {
                 // 兜底：非法 UTF-8 只应来自意外的外部输入；替换后重试，
                 // 绝不让整条注入退化成空行。
-                out = envelope(sanitize_utf8(context));
+                out = hook_envelope(event, sanitize_utf8(context));
             }
             if (out.empty())
             {
@@ -2228,9 +2243,14 @@ export namespace cg::cli
             if (tool_response.has_value())
             {
                 if (const auto patch = tool_response->get("structuredPatch");
-                    patch.has_value() && span_from_patch(*patch, info.span))
+                    patch.has_value())
                 {
-                    return info;
+                    if (const auto span = span_from_patch(*patch))
+                    {
+                        info.span = *span;
+                        info.span.comment_only = info.comment_only;
+                        return info;
+                    }
                 }
             }
 
@@ -2379,11 +2399,18 @@ export namespace cg::cli
             return s;
         }
 
+        /** @brief 一次按名查询的结果：命中符号与本次查询是否让位。 */
+        struct SymbolQuery
+        {
+            std::vector<FileSymbol> symbols;
+            bool                    yielded = false;
+        };
+
         /**
          * @brief 进程内直连的按名查询：与 `ccg query <needle> --file <filter>
          *        --json` 同判据（分层查找、层合并、路径子串大小写敏感）。
          *
-         * @internal `timed_out` 回填本次查询是否让位（会话失效/查询抛出）：调用
+         * @internal `yielded` 标记本次查询是否让位（会话失效/查询抛出）：调用
          * 方据此停止继续派生查询，而不是把"让位"误当成"没有匹配"——与旧子进
          * 程超时同一个旗语，行为等价。
          */
@@ -2391,20 +2418,11 @@ export namespace cg::cli
         auto query_symbols(
             HookQueryDb&       db,
             const std::string& needle,
-            const std::string& file_filter,
-            bool*              timed_out = nullptr) -> std::vector<FileSymbol>
+            const std::string& file_filter) -> SymbolQuery
         {
-            if (timed_out != nullptr)
-            {
-                *timed_out = false;
-            }
             if (!db.alive)
             {
-                if (timed_out != nullptr)
-                {
-                    *timed_out = true;
-                }
-                return {};
+                return SymbolQuery{.symbols = {}, .yielded = true};
             }
             try
             {
@@ -2412,11 +2430,11 @@ export namespace cg::cli
                 filter.file_substring = file_filter;
                 const cg::db::FindResult found =
                     cg::db::find_symbols(*db.store, needle, filter);
-                std::vector<FileSymbol> out;
-                out.reserve(found.matches.size());
+                SymbolQuery out;
+                out.symbols.reserve(found.matches.size());
                 for (const cg::db::SymbolRow& row : found.matches)
                 {
-                    out.push_back(file_symbol_of(row));
+                    out.symbols.push_back(file_symbol_of(row));
                 }
                 return out;
             }
@@ -2424,11 +2442,7 @@ export namespace cg::cli
             {
                 // 让位即弃用会话：后续查询全部按超时语义跳过（同旧级联）。
                 db.alive = false;
-                if (timed_out != nullptr)
-                {
-                    *timed_out = true;
-                }
-                return {};
+                return SymbolQuery{.symbols = {}, .yielded = true};
             }
         }
 
@@ -2453,6 +2467,62 @@ export namespace cg::cli
             return std::ranges::find(NOISE, token) != std::ranges::end(NOISE);
         }
 
+        /** @brief 从 at 起向右跳过空白；返回停下的位置。 */
+        [[nodiscard]]
+        auto skip_spaces_in(std::string_view text, std::size_t at)
+            -> std::size_t
+        {
+            while (at < text.size()
+                   && std::isspace(static_cast<unsigned char>(text[at])))
+            {
+                ++at;
+            }
+            return at;
+        }
+
+        /** @brief 从 pos 起向左跳过空白；返回停下的位置。 */
+        [[nodiscard]]
+        auto skip_spaces_back_in(std::string_view text, std::size_t pos)
+            -> std::size_t
+        {
+            while (pos > 0
+                   && std::isspace(static_cast<unsigned char>(text[pos - 1])))
+            {
+                --pos;
+            }
+            return pos;
+        }
+
+        /** @brief pos 左侧紧邻的标识符（跳过中间空白）；无则空。 */
+        [[nodiscard]]
+        auto identifier_ending_at(std::string_view text, std::size_t pos)
+            -> std::string
+        {
+            pos = skip_spaces_back_in(text, pos);
+            const std::size_t end = pos;
+            while (pos > 0 && is_ident_char(text[pos - 1]))
+            {
+                --pos;
+            }
+            return pos < end ? std::string{text.substr(pos, end - pos)}
+                             : std::string{};
+        }
+
+        /** @brief pos 右侧紧邻的标识符（跳过中间空白）；无则空。 */
+        [[nodiscard]]
+        auto identifier_starting_at(std::string_view text, std::size_t pos)
+            -> std::string
+        {
+            pos = skip_spaces_in(text, pos);
+            const std::size_t from = pos;
+            while (pos < text.size() && is_ident_char(text[pos]))
+            {
+                ++pos;
+            }
+            return from < pos ? std::string{text.substr(from, pos - from)}
+                              : std::string{};
+        }
+
         /**
          * @brief 把 `operator` 与其后的符号拼成可查询的完整名字。
          *
@@ -2469,30 +2539,21 @@ export namespace cg::cli
             {
                 return {};
             }
-            const auto skip_space = [&](std::size_t at)
-            {
-                while (at < line.size()
-                       && std::isspace(static_cast<unsigned char>(line[at])))
-                {
-                    ++at;
-                }
-                return at;
-            };
-            pos = skip_space(pos);
+            pos = skip_spaces_in(line, pos);
             if (pos >= line.size())
             {
                 return {};
             }
             if (line[pos] == '(')
             {
-                const std::size_t close = skip_space(pos + 1);
+                const std::size_t close = skip_spaces_in(line, pos + 1);
                 return close < line.size() && line[close] == ')'
                            ? "operator()"
                            : std::string{};
             }
             if (line[pos] == '[')
             {
-                const std::size_t close = skip_space(pos + 1);
+                const std::size_t close = skip_spaces_in(line, pos + 1);
                 return close < line.size() && line[close] == ']'
                            ? "operator[]"
                            : std::string{};
@@ -2665,6 +2726,18 @@ export namespace cg::cli
             return std::string{text.substr(0, end)};
         }
 
+        /** @brief 非空且非噪音的名字去重加入 preferred。 */
+        void add_preferred_name(
+            std::vector<std::string>& preferred,
+            std::string               name)
+        {
+            if (name.empty() || is_noise_token(name))
+            {
+                return;
+            }
+            cg::util::push_unique(preferred, std::move(name));
+        }
+
         /**
          * @brief 把一行里的“声明名”token 提到本行候选的最前面。
          *
@@ -2678,70 +2751,20 @@ export namespace cg::cli
             std::vector<std::string>& tokens,
             std::size_t               begin)
         {
-            const auto skip_space_back = [&](std::size_t pos)
-            {
-                while (
-                    pos > 0
-                    && std::isspace(static_cast<unsigned char>(line[pos - 1])))
-                {
-                    --pos;
-                }
-                return pos;
-            };
-            const auto skip_space_forward = [&](std::size_t pos)
-            {
-                while (pos < line.size()
-                       && std::isspace(static_cast<unsigned char>(line[pos])))
-                {
-                    ++pos;
-                }
-                return pos;
-            };
-            const auto identifier_before = [&](std::size_t pos)
-            {
-                pos = skip_space_back(pos);
-                const std::size_t end = pos;
-                while (
-                    pos > 0
-                    && (std::isalnum(static_cast<unsigned char>(line[pos - 1]))
-                        || line[pos - 1] == '_'))
-                {
-                    --pos;
-                }
-                return pos < end ? std::string{line.substr(pos, end - pos)}
-                                 : std::string{};
-            };
-            const auto identifier_after = [&](std::size_t pos)
-            {
-                pos = skip_space_forward(pos);
-                const std::size_t from = pos;
-                while (pos < line.size()
-                       && (std::isalnum(static_cast<unsigned char>(line[pos]))
-                           || line[pos] == '_'))
-                {
-                    ++pos;
-                }
-                return from < pos ? std::string{line.substr(from, pos - from)}
-                                  : std::string{};
-            };
             std::vector<std::string> preferred;
-            const auto               add = [&](std::string name)
-            {
-                if (name.empty() || is_noise_token(name))
-                {
-                    return;
-                }
-                cg::util::push_unique(preferred, std::move(name));
-            };
             if (const std::size_t scope = line.rfind("::");
                 scope != std::string_view::npos)
             {
-                add(identifier_after(scope + 2));
+                add_preferred_name(
+                    preferred,
+                    identifier_starting_at(line, scope + 2));
             }
             if (const std::size_t paren = line.find('(');
                 paren != std::string_view::npos)
             {
-                add(identifier_before(paren));
+                add_preferred_name(
+                    preferred,
+                    identifier_ending_at(line, paren));
             }
             for (std::size_t at = line.find('='); at != std::string_view::npos;
                  at = line.find('=', at + 1))
@@ -2753,7 +2776,7 @@ export namespace cg::cli
                 {
                     continue;
                 }
-                add(identifier_before(at));
+                add_preferred_name(preferred, identifier_ending_at(line, at));
                 break;
             }
             std::size_t insert_at = begin;
@@ -2952,24 +2975,31 @@ export namespace cg::cli
                 false; // `enum/struct ... { ... } name =` 的外层声明名
         };
 
+        /** @brief 一行的声明判定：是否像 name 的声明与是否声明名角色。 */
+        struct LineDeclaration
+        {
+            bool declares = false;
+            bool declarator = false; ///< `}` 之后的声明名
+        };
+
         /**
-         * @brief 某行是否像 name 的声明；declarator 回填“`}` 之后的声明名”。
+         * @brief 判定某行是否像 name 的声明，并给出声明名角色。
          *
          * @internal 同行可能同时出现内联类型的 tag 与它声明的字段
          * （`enum class Kind { ... } kind = ...`）。`Kind` 后跟 `:` 是 tag，
          * `kind` 前面是 `}`、后面是 `=` 才是这行真正声明的对象。
          */
         [[nodiscard]]
-        auto line_declares_symbol(
+        auto line_declaration_on(
             std::string_view line,
             std::string_view name,
-            std::string_view kind,
-            bool*            declarator) -> bool
+            std::string_view kind) -> LineDeclaration
         {
-            const auto pos = identifier_position(line, name);
+            LineDeclaration verdict;
+            const auto      pos = identifier_position(line, name);
             if (!pos.has_value())
             {
-                return false;
+                return verdict;
             }
             std::size_t after = *pos + name.size();
             while (after < line.size()
@@ -2984,53 +3014,61 @@ export namespace cg::cli
             {
                 --before;
             }
-            if (declarator != nullptr)
-            {
-                *declarator = before > 0 && line[before - 1] == '}';
-            }
+            verdict.declarator = before > 0 && line[before - 1] == '}';
             const char next = after < line.size() ? line[after] : '\0';
             if (cg::db::is_callable(kind))
             {
-                return next == '(';
+                verdict.declares = next == '(';
+                return verdict;
             }
             if (cg::db::is_type_like(kind))
             {
-                return next == '{' || next == ':' || next == ';' || next == '='
-                       || next == '<' || next == '\0';
+                verdict.declares = next == '{' || next == ':' || next == ';'
+                                   || next == '=' || next == '<'
+                                   || next == '\0';
+                return verdict;
             }
             const bool member = before > 0
                                 && (line[before - 1] == '.'
                                     || (before >= 2 && line[before - 1] == '>'
                                         && line[before - 2] == '-'));
-            return !member
-                   && (next == '=' || next == ';' || next == ',' || next == '{'
-                       || next == '[' || next == '\0');
+            verdict.declares =
+                !member
+                && (next == '=' || next == ';' || next == ',' || next == '{'
+                    || next == '[' || next == '\0');
+            return verdict;
         }
 
+        /** @brief 盘上声明证据：命中的声明行（1 基；0 = 未找到）与角色。 */
+        struct EvidenceSpot
+        {
+            std::size_t line = 0;
+            bool        declarator = false;
+        };
+
         /**
-         * @brief 在盘上附近找该符号的声明行（1 基）；找不到返回 0。
+         * @brief 在盘上附近找该符号的声明行证据。
          *
          * 库内行号在“更新排队”或注释插入后会漂移；声明核验同时是选错符号
          * 的最后一道闸：名字若只是恰好出现在附近（构造函数的类名、同行的
          * 枚举 tag），行文本不会呈现声明形态。
          */
         [[nodiscard]]
-        auto declaration_evidence_line(
+        auto declaration_evidence(
             const std::vector<std::string_view>& lines,
             std::string_view                     name,
             std::string_view                     kind,
             std::size_t                          near,
             std::size_t                          back,
-            std::size_t                          forward,
-            bool*                                declarator) -> std::size_t
+            std::size_t                          forward) -> EvidenceSpot
         {
+            EvidenceSpot best;
             if (lines.empty() || name.empty() || near == 0)
             {
-                return 0;
+                return best;
             }
             const std::size_t lo = near > back ? near - back : 1;
             const std::size_t hi = std::min(lines.size(), near + forward);
-            std::size_t       best = 0;
             std::size_t best_distance = std::numeric_limits<std::size_t>::max();
             for (std::size_t line_no = lo; line_no <= hi; ++line_no)
             {
@@ -3039,8 +3077,9 @@ export namespace cg::cli
                 {
                     continue;
                 }
-                bool role = false;
-                if (!line_declares_symbol(text, name, kind, &role))
+                const LineDeclaration verdict =
+                    line_declaration_on(text, name, kind);
+                if (!verdict.declares)
                 {
                     continue;
                 }
@@ -3048,15 +3087,39 @@ export namespace cg::cli
                     line_no > near ? line_no - near : near - line_no;
                 if (distance < best_distance)
                 {
-                    best = line_no;
+                    best = EvidenceSpot{line_no, verdict.declarator};
                     best_distance = distance;
-                    if (declarator != nullptr)
-                    {
-                        *declarator = role;
-                    }
                 }
             }
             return best;
+        }
+
+        /** @brief 内联类型标签 kind（record/enum/enum_constant）。
+         *
+         * @internal 集合语义是"同行噪音标签"而非 kind 身份档，无谓词承载，
+         * 保持显式比较。
+         */
+        [[nodiscard]]
+        auto is_inline_tag_kind(std::string_view kind) -> bool
+        {
+            return kind == "record" || kind == "enum"
+                   || kind == "enum_constant";
+        }
+
+        /**
+         * @brief 值候选是否压过内联类型标签候选。
+         *
+         * @internal 内联类型定义（`enum class Kind { ... } kind =`）里，
+         * 被声明的是 `}` 之后那个名字；tag 与枚举常量都只是同行噪音，
+         * 不能靠 kind_rank 压过字段（A#2 曾被 `Kind::None` 抢走）。
+         */
+        [[nodiscard]]
+        auto value_beats_tag(
+            const NearCandidate& value,
+            const NearCandidate& tag) -> bool
+        {
+            return value.declarator && cg::db::is_value_like(value.symbol.kind)
+                   && is_inline_tag_kind(tag.symbol.kind);
         }
 
         /** @brief 两个近邻候选的偏好：行距 → 声明核验 → 声明角色 → 宏行标题。
@@ -3074,24 +3137,6 @@ export namespace cg::cli
             {
                 return a.disk_line != 0;
             }
-            const auto is_value = [](std::string_view kind)
-            { return cg::db::is_value_like(kind); };
-            // 内联类型标签（record/enum/enum_constant）无谓词承载：集合语义
-            // 是"同行噪音标签"而非 kind 身份档，保持显式比较。
-            const auto is_inline_tag = [](std::string_view kind)
-            {
-                return kind == "record" || kind == "enum"
-                       || kind == "enum_constant";
-            };
-            // 内联类型定义（`enum class Kind { ... } kind =`）里，被声明的是
-            // `}` 之后那个名字；tag 与枚举常量都只是同行噪音，不能靠
-            // kind_rank 压过字段（A#2 曾被 `Kind::None` 抢走）。
-            const auto value_beats_tag =
-                [&](const NearCandidate& value, const NearCandidate& tag)
-            {
-                return value.declarator && is_value(value.symbol.kind)
-                       && is_inline_tag(tag.symbol.kind);
-            };
             if (value_beats_tag(a, b))
             {
                 return true;
@@ -3120,17 +3165,19 @@ export namespace cg::cli
         }
 
         /** @brief 收集同文件窗口内的候选，并附上盘上声明证据。 */
-        void collect_near_candidates(
+        [[nodiscard]]
+        auto near_candidates(
             const std::vector<FileSymbol>&       matches,
             const std::string&                   want_file,
             const EditSpan&                      span,
             std::size_t                          window,
-            const std::vector<std::string_view>& lines,
-            std::vector<NearCandidate>*          out)
+            const std::vector<std::string_view>& lines)
+            -> std::vector<NearCandidate>
         {
-            if (out == nullptr || !span.have_line)
+            std::vector<NearCandidate> out;
+            if (!span.have_line)
             {
-                return;
+                return out;
             }
             const std::string  want = path_compare_key(want_file);
             const std::int64_t anchor = static_cast<std::int64_t>(span.line);
@@ -3161,16 +3208,18 @@ export namespace cg::cli
                 const std::string_view name =
                     s.name.empty() ? std::string_view{s.qualified_name}
                                    : std::string_view{s.name};
-                candidate.disk_line = declaration_evidence_line(
+                const EvidenceSpot spot = declaration_evidence(
                     lines,
                     name,
                     s.kind,
                     static_cast<std::size_t>(s.line),
                     /*back=*/2,
-                    /*forward=*/6,
-                    &candidate.declarator);
-                out->push_back(std::move(candidate));
+                    /*forward=*/6);
+                candidate.disk_line = spot.line;
+                candidate.declarator = spot.declarator;
+                out.push_back(std::move(candidate));
             }
+            return out;
         }
 
         /** @brief 从候选里取最优（含盘上声明核验）。 */
@@ -3183,14 +3232,8 @@ export namespace cg::cli
             const std::vector<std::string_view>& lines)
             -> std::optional<NearCandidate>
         {
-            std::vector<NearCandidate> candidates;
-            collect_near_candidates(
-                matches,
-                want_file,
-                span,
-                window,
-                lines,
-                &candidates);
+            std::vector<NearCandidate> candidates =
+                near_candidates(matches, want_file, span, window, lines);
             if (candidates.empty())
             {
                 return std::nullopt;
@@ -3348,28 +3391,24 @@ export namespace cg::cli
             return best;
         }
 
-        /** @brief 收集与选中符号同文件同行的其它声明（宏展开会一行叠多个）。 */
-        void collect_same_line(
+        /** @brief 与选中符号同文件同行的其它声明（宏展开会一行叠多个）。 */
+        [[nodiscard]]
+        auto same_line_symbols(
             const FileSymbol&              chosen,
-            const std::vector<FileSymbol>& source,
-            std::vector<FileSymbol>*       out)
+            const std::vector<FileSymbol>& source) -> std::vector<FileSymbol>
         {
-            if (out == nullptr)
-            {
-                return;
-            }
-            out->clear();
-            const std::string chosen_file = path_compare_key(chosen.file);
+            std::vector<FileSymbol> out;
+            const std::string       chosen_file = path_compare_key(chosen.file);
             for (const FileSymbol& s : source)
             {
                 if (s.uid != chosen.uid && s.line == chosen.line
                     && path_compare_key(s.file) == chosen_file)
                 {
-                    out->push_back(s);
+                    out.push_back(s);
                 }
             }
             std::ranges::sort(
-                *out,
+                out,
                 [](const FileSymbol& a, const FileSymbol& b)
                 {
                     const int rank_a = kind_rank(a.kind);
@@ -3378,21 +3417,23 @@ export namespace cg::cli
                                ? rank_a < rank_b
                                : a.qualified_name < b.qualified_name;
                 });
+            return out;
         }
 
         /**
-         * @brief 宏展开行（sqlpp 表宏、gtest TEST）会在一行叠出多个符号。
-         *        如果恰好一个候选的非限定名以标识符出现在该行文本里，它才是
-         *        这行字面声明的符号——优先于 kind_rank 的“外层 record”。
+         * @brief 宏展开行（sqlpp 表宏、gtest TEST）叠出的多个符号里，唯一
+         *        以标识符出现在该行文本中的候选——优先于 kind_rank 的
+         *        “外层 record”。
          */
-        void prefer_textual_candidate(
-            std::optional<FileSymbol>& chosen,
-            std::vector<FileSymbol>&   same_line,
-            std::string_view           line_text)
+        [[nodiscard]]
+        auto textual_candidate_in(
+            const std::optional<FileSymbol>& chosen,
+            const std::vector<FileSymbol>&   same_line,
+            std::string_view line_text) -> std::optional<FileSymbol>
         {
             if (!chosen.has_value() || line_text.empty())
             {
-                return;
+                return std::nullopt;
             }
             std::vector<FileSymbol> candidates;
             candidates.push_back(*chosen);
@@ -3421,12 +3462,9 @@ export namespace cg::cli
             }
             if (hits != 1 || !textual.has_value())
             {
-                return;
+                return std::nullopt;
             }
-            std::erase_if(
-                same_line,
-                [&](const FileSymbol& s) { return s.uid == textual->uid; });
-            chosen = std::move(*textual);
+            return textual;
         }
 
         /**
@@ -3468,6 +3506,77 @@ export namespace cg::cli
         }
 
         /**
+         * @brief 定位收尾：盘上声明行核验、字面候选优先与同线噪音清除。
+         *
+         * @internal 盘上核验到的声明行比库内行号可信：更新排队时库内行号
+         *           是编辑前的，注释插入还会把声明整体下推。主符号名已在
+         *           行文本中坐实时，同线符号多是宏展开噪音（_sqlpp_name_tag、
+         *           构造/析构、成员结构等），不再展示；gtest 宏生成的主符号
+         *           名不会字面出现，另按宏行/`_Test` 后缀判定。
+         */
+        auto finalize_located_symbol(
+            std::optional<FileSymbol>            found,
+            std::size_t                          disk_line,
+            std::size_t                          span_line,
+            const std::vector<std::string_view>& lines,
+            std::vector<FileSymbol>& out_same) -> std::optional<FileSymbol>
+        {
+            if (!found.has_value())
+            {
+                return found;
+            }
+            const std::size_t line_no =
+                disk_line != 0
+                    ? disk_line
+                    : (found->line > 0 ? static_cast<std::size_t>(found->line)
+                                       : span_line);
+            const std::string_view text = line_no > 0 && line_no <= lines.size()
+                                              ? lines[line_no - 1]
+                                              : std::string_view{};
+            if (const auto textual =
+                    textual_candidate_in(found, out_same, text))
+            {
+                std::erase_if(
+                    out_same,
+                    [&](const FileSymbol& s) { return s.uid == textual->uid; });
+                found = *textual;
+            }
+            const std::string_view chosen_name =
+                found->name.empty() ? std::string_view{found->qualified_name}
+                                    : found->name;
+            const bool synthetic_test_symbol =
+                chosen_name.ends_with("_Test")
+                && !line_has_identifier(text, chosen_name);
+            if (line_has_identifier(text, chosen_name)
+                || is_test_macro_line(text) || synthetic_test_symbol)
+            {
+                out_same.clear();
+            }
+            return found;
+        }
+
+        /** @brief 整文件回退路径的收尾：同线声明回填后走定位收尾。 */
+        auto finish_located_symbol(
+            std::optional<FileSymbol>            chosen,
+            std::size_t                          disk_line,
+            std::size_t                          span_line,
+            const std::vector<FileSymbol>&       all,
+            const std::vector<std::string_view>& lines,
+            std::vector<FileSymbol>& out_same) -> std::optional<FileSymbol>
+        {
+            if (chosen.has_value())
+            {
+                out_same = same_line_symbols(*chosen, all);
+            }
+            return finalize_located_symbol(
+                std::move(chosen),
+                disk_line,
+                span_line,
+                lines,
+                out_same);
+        }
+
+        /**
          * @brief 定位被编辑符号：落点 token → 向上声明提示 → 枚举整文件。
          *
          * `same_line`（可空）回填同文件同行的其它声明：宏展开（gtest TEST、
@@ -3499,44 +3608,6 @@ export namespace cg::cli
             const std::vector<std::string_view> lines =
                 file_text.has_value() ? split_lines(*file_text)
                                       : std::vector<std::string_view>{};
-            const auto finalize =
-                [&](std::optional<FileSymbol> found,
-                    std::size_t disk_line) -> std::optional<FileSymbol>
-            {
-                if (!found.has_value())
-                {
-                    return found;
-                }
-                // 盘上核验到的声明行比库内行号可信：更新排队时库内行号是编辑前
-                // 的，注释插入还会把声明整体下推。
-                const std::size_t line_no =
-                    disk_line != 0
-                        ? disk_line
-                        : (found->line > 0
-                               ? static_cast<std::size_t>(found->line)
-                               : info.span.line);
-                const std::string_view text =
-                    line_no > 0 && line_no <= lines.size() ? lines[line_no - 1]
-                                                           : std::string_view{};
-                prefer_textual_candidate(found, out_same, text);
-                const std::string_view chosen_name =
-                    found->name.empty()
-                        ? std::string_view{found->qualified_name}
-                        : found->name;
-                // 主符号名已在行文本中坐实时，同线符号多是宏展开噪音
-                // （_sqlpp_name_tag、构造/析构、成员结构等），不再展示。
-                // gtest 宏生成的主符号名不会字面出现，另按宏行/`_Test`
-                // 后缀判定。
-                const bool synthetic_test_symbol =
-                    chosen_name.ends_with("_Test")
-                    && !line_has_identifier(text, chosen_name);
-                if (line_has_identifier(text, chosen_name)
-                    || is_test_macro_line(text) || synthetic_test_symbol)
-                {
-                    out_same.clear();
-                }
-                return found;
-            };
             // 语义编辑若从 doc 注释开始（例如整体替换一个带注释的函数），
             // 落点行本身没有代码 token，函数签名在注释块之后。把匹配锚点
             // 前移到注释块后的第一行代码，否则窗口内一个候选都没有，最终
@@ -3588,10 +3659,9 @@ export namespace cg::cli
                     {
                         break;
                     }
-                    bool       query_timed_out = false;
-                    const auto matches =
-                        query_symbols(db, token, file_base, &query_timed_out);
-                    for (const FileSymbol& s : matches)
+                    const SymbolQuery query =
+                        query_symbols(db, token, file_base);
+                    for (const FileSymbol& s : query.symbols)
                     {
                         const bool seen = std::ranges::any_of(
                             pool,
@@ -3602,14 +3672,16 @@ export namespace cg::cli
                             pool.push_back(s);
                         }
                     }
-                    collect_near_candidates(
-                        matches,
-                        file_path,
-                        match_span,
-                        window,
-                        lines,
-                        &candidates);
-                    if (query_timed_out)
+                    for (NearCandidate& c : near_candidates(
+                             query.symbols,
+                             file_path,
+                             match_span,
+                             window,
+                             lines))
+                    {
+                        candidates.push_back(std::move(c));
+                    }
+                    if (query.yielded)
                     {
                         // 一次查询已用满上限：继续派生只会把 hook 推过宿主
                         // 截止，保留已收集的候选立即收手。
@@ -3631,8 +3703,13 @@ export namespace cg::cli
                         candidates.begin(),
                         candidates.end(),
                         better_near_candidate);
-                    collect_same_line(best.symbol, pool, &out_same);
-                    return finalize(best.symbol, best.disk_line);
+                    out_same = same_line_symbols(best.symbol, pool);
+                    return finalize_located_symbol(
+                        best.symbol,
+                        best.disk_line,
+                        info.span.line,
+                        lines,
+                        out_same);
                 }
                 // 语义编辑落在函数体内：向上找签名行，命中须紧贴该行。
                 if (!info.comment_only)
@@ -3649,17 +3726,13 @@ export namespace cg::cli
                         {
                             break;
                         }
-                        bool       hint_timed_out = false;
-                        const auto matches = query_symbols(
-                            db,
-                            hint.token,
-                            file_base,
-                            &hint_timed_out);
-                        if (hint_timed_out)
+                        const SymbolQuery hint_query =
+                            query_symbols(db, hint.token, file_base);
+                        if (hint_query.yielded)
                         {
                             break;
                         }
-                        for (const FileSymbol& s : matches)
+                        for (const FileSymbol& s : hint_query.symbols)
                         {
                             if (path_compare_key(s.file)
                                     != path_compare_key(file_path)
@@ -3678,21 +3751,27 @@ export namespace cg::cli
                                           - s.line);
                             if (distance <= 4)
                             {
-                                collect_same_line(s, matches, &out_same);
+                                out_same =
+                                    same_line_symbols(s, hint_query.symbols);
                                 const std::string_view name =
                                     s.name.empty()
                                         ? std::string_view{s.qualified_name}
                                         : std::string_view{s.name};
                                 const std::size_t disk_line =
-                                    declaration_evidence_line(
+                                    declaration_evidence(
                                         lines,
                                         name,
                                         s.kind,
                                         static_cast<std::size_t>(s.line),
                                         /*back=*/2,
-                                        /*forward=*/6,
-                                        nullptr);
-                                return finalize(s, disk_line);
+                                        /*forward=*/6)
+                                        .line;
+                                return finalize_located_symbol(
+                                    s,
+                                    disk_line,
+                                    info.span.line,
+                                    lines,
+                                    out_same);
                             }
                         }
                     }
@@ -3707,15 +3786,13 @@ export namespace cg::cli
             std::vector<FileSymbol> all;
             if (!hook_deadline_reached(HOOK_QUERY_TIMEOUT))
             {
-                bool all_timed_out = false;
-                all = query_symbols(db, "_", file_base, &all_timed_out);
-                if (!all_timed_out
-                    && !hook_deadline_reached(HOOK_QUERY_TIMEOUT))
+                SymbolQuery all_query = query_symbols(db, "_", file_base);
+                const bool  all_yielded = all_query.yielded;
+                all = std::move(all_query.symbols);
+                if (!all_yielded && !hook_deadline_reached(HOOK_QUERY_TIMEOUT))
                 {
-                    bool                    more_timed_out = false;
-                    std::vector<FileSymbol> more =
-                        query_symbols(db, "::", file_base, &more_timed_out);
-                    for (FileSymbol& s : more)
+                    SymbolQuery more_query = query_symbols(db, "::", file_base);
+                    for (FileSymbol& s : more_query.symbols)
                     {
                         const bool seen = std::ranges::any_of(
                             all,
@@ -3728,16 +3805,6 @@ export namespace cg::cli
                     }
                 }
             }
-            const auto finish = [&](std::optional<FileSymbol> chosen,
-                                    std::size_t               disk_line =
-                                        0) -> std::optional<FileSymbol>
-            {
-                if (chosen.has_value())
-                {
-                    collect_same_line(*chosen, all, &out_same);
-                }
-                return finalize(chosen, disk_line);
-            };
             if (auto near = pick_best_near(
                     all,
                     file_path,
@@ -3746,7 +3813,13 @@ export namespace cg::cli
                     lines);
                 near.has_value())
             {
-                return finish(near->symbol, near->disk_line);
+                return finish_located_symbol(
+                    near->symbol,
+                    near->disk_line,
+                    info.span.line,
+                    all,
+                    lines,
+                    out_same);
             }
             if (info.comment_only)
             {
@@ -3754,13 +3827,25 @@ export namespace cg::cli
                         pick_following_symbol(all, file_path, match_span.line);
                     next.has_value())
                 {
-                    return finish(std::move(next));
+                    return finish_located_symbol(
+                        std::move(next),
+                        0,
+                        info.span.line,
+                        all,
+                        lines,
+                        out_same);
                 }
-                return finish(pick_preceding_symbol(
+                return finish_located_symbol(
+                    pick_preceding_symbol(
+                        all,
+                        file_path,
+                        match_span.line,
+                        /*containers_only=*/false),
+                    0,
+                    info.span.line,
                     all,
-                    file_path,
-                    match_span.line,
-                    /*containers_only=*/false));
+                    lines,
+                    out_same);
             }
             if (auto container = pick_preceding_symbol(
                     all,
@@ -3769,13 +3854,25 @@ export namespace cg::cli
                     /*containers_only=*/true);
                 container.has_value())
             {
-                return finish(std::move(container));
+                return finish_located_symbol(
+                    std::move(container),
+                    0,
+                    info.span.line,
+                    all,
+                    lines,
+                    out_same);
             }
-            return finish(pick_preceding_symbol(
+            return finish_located_symbol(
+                pick_preceding_symbol(
+                    all,
+                    file_path,
+                    match_span.line,
+                    /*containers_only=*/false),
+                0,
+                info.span.line,
                 all,
-                file_path,
-                match_span.line,
-                /*containers_only=*/false));
+                lines,
+                out_same);
         }
 
         /** @brief 符号级影响面的注入所需字段。 */
@@ -3871,6 +3968,16 @@ export namespace cg::cli
             return found.matches.front();
         }
 
+        /** @brief impact 查询让位时的结论（已尝试、超时语义）。 */
+        [[nodiscard]]
+        auto impact_gave_up() -> ImpactInfo
+        {
+            ImpactInfo failed;
+            failed.attempted = true;
+            failed.reason = "impact 查询超时";
+            return failed;
+        }
+
         /**
          * @brief 对定位到的符号算上游影响面（深度 3，只列直接层）——进程内直连。
          *
@@ -3899,16 +4006,9 @@ export namespace cg::cli
             {
                 return ImpactInfo{};
             }
-            const auto gave_up = []
-            {
-                ImpactInfo failed;
-                failed.attempted = true;
-                failed.reason = "impact 查询超时";
-                return failed;
-            };
             if (!db.alive)
             {
-                return gave_up();
+                return impact_gave_up();
             }
             try
             {
@@ -3985,7 +4085,7 @@ export namespace cg::cli
             catch (const std::exception&)
             {
                 db.alive = false;
-                return gave_up();
+                return impact_gave_up();
             }
         }
 
@@ -4324,11 +4424,63 @@ export namespace cg::cli
             return cg::db::is_callable(kind);
         }
 
-        /** @brief 标识符字符判定。 */
+        /**
+         * @brief 成员链起点：从名字位置回跳 `.`/`->`/`::` 与接收者标识符。
+         *
+         * @internal `++counters_->session_calls` 的 `++` 并不紧贴名字，必须
+         *           跳过 `.`/`->`/`::` 与接收者标识符后再判断。
+         */
         [[nodiscard]]
-        auto is_ident_char(char c) -> bool
+        auto chain_begin_in_masked(std::string_view masked, std::size_t at)
+            -> std::size_t
         {
-            return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+            std::size_t chain = at;
+            while (true)
+            {
+                while (chain > 0
+                       && std::isspace(
+                           static_cast<unsigned char>(masked[chain - 1])))
+                {
+                    --chain;
+                }
+                if (chain > 0 && masked[chain - 1] == '.')
+                {
+                    --chain;
+                }
+                else if (
+                    chain >= 2 && masked[chain - 1] == '>'
+                    && masked[chain - 2] == '-')
+                {
+                    chain -= 2;
+                }
+                else if (
+                    chain >= 2 && masked[chain - 1] == ':'
+                    && masked[chain - 2] == ':')
+                {
+                    chain -= 2;
+                }
+                else
+                {
+                    break;
+                }
+                while (chain > 0
+                       && std::isspace(
+                           static_cast<unsigned char>(masked[chain - 1])))
+                {
+                    --chain;
+                }
+                while (chain > 0 && is_ident_char(masked[chain - 1]))
+                {
+                    --chain;
+                }
+            }
+            while (
+                chain > 0
+                && std::isspace(static_cast<unsigned char>(masked[chain - 1])))
+            {
+                --chain;
+            }
+            return chain;
         }
 
         /**
@@ -4358,16 +4510,7 @@ export namespace cg::cli
             }
             facts.found = true;
             const std::size_t pos = *found;
-            const auto        skip_space_forward = [&](std::size_t at)
-            {
-                while (at < masked.size()
-                       && std::isspace(static_cast<unsigned char>(masked[at])))
-                {
-                    ++at;
-                }
-                return at;
-            };
-            std::size_t before = pos;
+            std::size_t       before = pos;
             while (
                 before > 0
                 && std::isspace(static_cast<unsigned char>(masked[before - 1])))
@@ -4385,7 +4528,7 @@ export namespace cg::cli
             {
                 facts.member_access = true;
             }
-            std::size_t after = skip_space_forward(pos + name.size());
+            std::size_t after = skip_spaces_in(masked, pos + name.size());
             // `field[key] += 1` 的下标不改变语句性质：跳过配平的 `[...]` 再看
             // 真正的后缀（否则 B#5 的 map 写入会被标成“读取”）。
             if (after < masked.size() && masked[after] == '[')
@@ -4411,7 +4554,7 @@ export namespace cg::cli
                 }
                 if (closed)
                 {
-                    after = skip_space_forward(scan);
+                    after = skip_spaces_in(masked, scan);
                 }
             }
             const char suffix = after < masked.size() ? masked[after] : '\0';
@@ -4423,62 +4566,10 @@ export namespace cg::cli
                  || suffix == '/' || suffix == '%' || suffix == '&'
                  || suffix == '|' || suffix == '^')
                 && suffix2 == '=';
-            const bool inc_dec = (suffix == '+' && suffix2 == '+')
-                                 || (suffix == '-' && suffix2 == '-');
-            const bool call = suffix == '(';
-            // 成员链起点：`++counters_->session_calls` 的 `++` 并不紧贴名字，
-            // 必须跳过 `.`/`->`/`::` 与接收者标识符后再判断。
-            const auto chain_begin = [&](std::size_t at)
-            {
-                std::size_t chain = at;
-                while (true)
-                {
-                    while (chain > 0
-                           && std::isspace(
-                               static_cast<unsigned char>(masked[chain - 1])))
-                    {
-                        --chain;
-                    }
-                    if (chain > 0 && masked[chain - 1] == '.')
-                    {
-                        --chain;
-                    }
-                    else if (
-                        chain >= 2 && masked[chain - 1] == '>'
-                        && masked[chain - 2] == '-')
-                    {
-                        chain -= 2;
-                    }
-                    else if (
-                        chain >= 2 && masked[chain - 1] == ':'
-                        && masked[chain - 2] == ':')
-                    {
-                        chain -= 2;
-                    }
-                    else
-                    {
-                        break;
-                    }
-                    while (chain > 0
-                           && std::isspace(
-                               static_cast<unsigned char>(masked[chain - 1])))
-                    {
-                        --chain;
-                    }
-                    while (chain > 0 && is_ident_char(masked[chain - 1]))
-                    {
-                        --chain;
-                    }
-                }
-                while (chain > 0
-                       && std::isspace(
-                           static_cast<unsigned char>(masked[chain - 1])))
-                {
-                    --chain;
-                }
-                return chain;
-            };
-            const std::size_t chain = chain_begin(pos);
+            const bool        inc_dec = (suffix == '+' && suffix2 == '+')
+                                        || (suffix == '-' && suffix2 == '-');
+            const bool        call = suffix == '(';
+            const std::size_t chain = chain_begin_in_masked(masked, pos);
             const bool        prefix_inc_dec =
                 chain >= 2
                 && ((masked[chain - 1] == '+' && masked[chain - 2] == '+')
@@ -4947,18 +5038,14 @@ export namespace cg::cli
             }
             // 查询与随后的 impact 是两步：查询让位就不要再用剩余时间启动
             // impact，否则一次慢查询会把两步都推过截止。
-            bool       query_timed_out = false;
-            const auto matches = query_symbols(
-                db,
-                symbol.parent,
-                basename_of(file_filter),
-                &query_timed_out);
-            if (query_timed_out || hook_deadline_reached(HOOK_IMPACT_TIMEOUT))
+            const SymbolQuery query =
+                query_symbols(db, symbol.parent, basename_of(file_filter));
+            if (query.yielded || hook_deadline_reached(HOOK_IMPACT_TIMEOUT))
             {
                 return std::nullopt;
             }
             std::optional<FileSymbol> owner;
-            for (const FileSymbol& s : matches)
+            for (const FileSymbol& s : query.symbols)
             {
                 if ((s.kind != "record" && s.kind != "enum"
                      && s.kind != "type_alias")
@@ -5006,6 +5093,18 @@ export namespace cg::cli
             std::vector<Consumer> consumers; // 与 changes 的消费者序一致
         };
 
+        /** @brief 按 id 去重地把文件行加入 matches。 */
+        void push_unique_file_row(
+            std::vector<cg::db::FileRow>& matches,
+            const cg::db::FileRow&        f)
+        {
+            if (std::ranges::find(matches, f.id, &cg::db::FileRow::id)
+                == matches.end())
+            {
+                matches.push_back(f);
+            }
+        }
+
         /**
          * @brief 把喂入路径解析到 files 行（与 cli.commands resolve_input_path
          * 的 判据逐字一致）。
@@ -5049,14 +5148,6 @@ export namespace cg::cli
             }
 
             std::vector<cg::db::FileRow> matches;
-            const auto add_unique = [&](const cg::db::FileRow& f)
-            {
-                if (std::ranges::find(matches, f.id, &cg::db::FileRow::id)
-                    == matches.end())
-                {
-                    matches.push_back(f);
-                }
-            };
             for (std::size_t i = want.find('/'); i != std::string::npos;
                  i = want.find('/', i + 1))
             {
@@ -5073,7 +5164,7 @@ export namespace cg::cli
                             && have.ends_with(suffix)
                             && have[have.size() - suffix.size() - 1] == '/'))
                     {
-                        add_unique(f);
+                        push_unique_file_row(matches, f);
                     }
                 }
             }
@@ -5867,22 +5958,22 @@ export namespace cg::cli
          * @brief 文件级回退：`ccg changes --depth 1` 的直接/传递/风险/消费者
          *        （进程内直连）。
          */
-        inline void digest_file_fallback(
-            DigestRow&         row,
+        [[nodiscard]]
+        inline auto digest_file_fallback(
             HookQueryDb&       db,
-            const std::string& display)
+            const std::string& display) -> DigestRow
         {
+            DigestRow  row;
             const auto changes = hook_changes(db, display);
             if (!changes.has_value())
             {
                 row.note = "影响面查询超时";
-                return;
+                return row;
             }
             if (!changes->any_known)
             {
                 row.tracked = false;
-                row.note.clear();
-                return;
+                return row;
             }
             row.direct = changes->direct;
             row.transitive = changes->transitive;
@@ -5909,6 +6000,7 @@ export namespace cg::cli
                     break;
                 }
             }
+            return row;
         }
 
         /**
@@ -5997,7 +6089,14 @@ export namespace cg::cli
             }
             try
             {
-                digest_file_fallback(row, db, group.display);
+                DigestRow fallback = digest_file_fallback(db, group.display);
+                row.tracked = fallback.tracked;
+                row.note = std::move(fallback.note);
+                row.direct = fallback.direct;
+                row.transitive = fallback.transitive;
+                row.fan_in = fallback.fan_in;
+                row.risk = std::move(fallback.risk);
+                row.consumers = std::move(fallback.consumers);
             }
             catch (const std::exception&)
             {
@@ -6949,11 +7048,11 @@ export namespace cg::cli
             if ((field_like || method_like) && !out.refs.empty()
                 && !hook_deadline_reached(HOOK_QUERY_TIMEOUT))
             {
-                const auto declarations = query_symbols(
+                const SymbolQuery declared = query_symbols(
                     db,
                     std::string{symbol_name},
                     basename_of(source_file));
-                for (const FileSymbol& d : declarations)
+                for (const FileSymbol& d : declared.symbols)
                 {
                     if (d.name != symbol_name || d.line <= 0
                         || path_compare_key(d.file)
@@ -6981,6 +7080,30 @@ export namespace cg::cli
                 }
             }
             return out;
+        }
+
+        /** @brief 把同名归属名逐个追加（最多 3 个，余量计"等 N 个"）。 */
+        void append_owner_names(
+            std::string&                    line,
+            const std::vector<std::string>& same_name_owners)
+        {
+            std::size_t shown_owner = 0;
+            for (const std::string& owner : same_name_owners)
+            {
+                if (shown_owner != 0)
+                {
+                    line += "、";
+                }
+                line += clip(owner, 32);
+                if (++shown_owner >= 3)
+                {
+                    break;
+                }
+            }
+            if (same_name_owners.size() > shown_owner)
+            {
+                line += std::format(" 等 {} 个", same_name_owners.size());
+            }
         }
 
         /**
@@ -7011,26 +7134,6 @@ export namespace cg::cli
                 }
                 return;
             }
-            const auto append_owner_names = [&]()
-            {
-                std::size_t shown_owner = 0;
-                for (const std::string& owner : same_name_owners)
-                {
-                    if (shown_owner != 0)
-                    {
-                        line += "、";
-                    }
-                    line += clip(owner, 32);
-                    if (++shown_owner >= 3)
-                    {
-                        break;
-                    }
-                }
-                if (same_name_owners.size() > shown_owner)
-                {
-                    line += std::format(" 等 {} 个", same_name_owners.size());
-                }
-            };
             if (symbol.kind == "field")
             {
                 if (same_name_owners.size() > 1)
@@ -7038,7 +7141,7 @@ export namespace cg::cli
                     line += std::format(
                         "；同文件同名成员访问（同名 {} 处：",
                         same_name_owners.size());
-                    append_owner_names();
+                    append_owner_names(line, same_name_owners);
                     line = std::format(
                         "{}；接收者类型未解析，以下可能属于其它结构体）: ",
                         line);
@@ -7063,7 +7166,7 @@ export namespace cg::cli
                 line += std::format(
                     "；同文件同名调用（同名 {} 处：",
                     same_name_owners.size());
-                append_owner_names();
+                append_owner_names(line, same_name_owners);
                 line = std::format(
                     "{}；接收者类型未解析，以下可能属于其它类型）: ",
                     line);
@@ -7149,6 +7252,802 @@ export namespace cg::cli
             }
         }
 
+        /** @brief PostToolUse 事件解析产物（事件门全部通过才有效）。 */
+        struct PtuEvent
+        {
+            std::string                 file;
+            std::string                 tool_name;
+            bool                        project_file = false;
+            std::optional<LayoutChoice> choice;
+            EditInfo                    edit;
+        };
+
+        /**
+         * @brief 读 stdin 事件、过工具白名单与文件放行，解析编辑信息。
+         *
+         * @internal 每个拒绝路径都返回空——处理器静默退出 0。语料文件
+         *           与项目文件都放行：前者走符号影响面注入，后者只入队触
+         *           发重采集联动——项目文件的编辑改的是语料来源（TU 清
+         *           单/包含路径），不在库里产生任何符号；其余一切（配置、
+         *           文档、脚本、锁文件）照旧静默。
+         */
+        [[nodiscard]]
+        auto ptu_parse_event(const Invocation& inv) -> std::optional<PtuEvent>
+        {
+            if (!cg::util::platform::stdin_is_piped())
+            {
+                return std::nullopt;
+            }
+            const std::string input(
+                std::istreambuf_iterator<char>{std::cin},
+                {});
+            const json::Document doc = json::Document::parse(input);
+            const auto           root = doc.root();
+            const auto           tool = root.get("tool_name");
+            if (!tool.has_value() || !tool->is_string())
+            {
+                return std::nullopt;
+            }
+            const auto tool_name = tool->as_string();
+            // 工具名白名单与 HOOK_SPECS 的 matcher 镜像。Update 载荷
+            // 同为 file_path。
+            if (!tool_name.has_value()
+                || (*tool_name != "Edit" && *tool_name != "Write"
+                    && *tool_name != "MultiEdit" && *tool_name != "Update"))
+            {
+                return std::nullopt;
+            }
+            const auto tool_input = root.get("tool_input");
+            if (!tool_input.has_value() || !tool_input->is_object())
+            {
+                return std::nullopt;
+            }
+            const auto file_member = tool_input->get("file_path");
+            if (!file_member.has_value() || !file_member->is_string())
+            {
+                return std::nullopt;
+            }
+            const auto file_value = file_member->as_string();
+            if (!file_value.has_value() || file_value->empty()
+                || file_value->find('"') != std::string_view::npos
+                || (!is_corpus_file(*file_value)
+                    && !cg::util::is_project_file(*file_value)))
+            {
+                return std::nullopt;
+            }
+            PtuEvent out;
+            out.file = std::string{*file_value};
+            // 项目文件（.sln/.vcxproj/.props/...）：编辑改的是语料来源，
+            // 不产生符号——影响面查询全部跳过，注入只报联动事实。
+            out.project_file = cg::util::is_project_file(out.file);
+            out.choice = hook_resolved_db(inv);
+            if (!out.choice.has_value())
+            {
+                return std::nullopt;
+            }
+            out.tool_name = *tool_name;
+            const auto tool_response = root.get("tool_response");
+            out.edit = extract_edit_info(
+                *tool_input,
+                tool_response,
+                out.file,
+                out.tool_name);
+            return out;
+        }
+
+        /** @brief 编辑折入库一轮的全部会话态（快速标脏命中则整轮不存在）。 */
+        struct PtuSession
+        {
+            HookQueryDb                      qdb;
+            std::optional<DigestFlushResult> digest;
+            PtPreLocate                      pre;
+            std::string                      stale_note;
+            std::string                      refresh_state;
+            bool                             update_queued = false;
+            bool                             update_background = false;
+            bool                             update_started = true;
+            bool                             update_fallback_queued = false;
+        };
+
+        /**
+         * @brief 编辑折入库：快速标脏、进程内查询会话、积压汇报、纯注释
+         *        预定位与 update 派生。
+         *
+         * @internal 快速标脏命中（活租约在场就只入队写 journal 立即收工；
+         *           探测失败宁可诚实标脏也不赌一次长 update）返回空——处
+         *           理器静默退出 0。本次处理器的全部查询共用一条进程内会
+         *           话；update 子进程保持独立形态（写锁隔离 + 超时撒手）。
+         */
+        [[nodiscard]]
+        auto ptu_fold_edit_into_library(
+            const Invocation& inv,
+            const PtuEvent&   ev) -> std::optional<PtuSession>
+        {
+            const std::string norm = normalize_hook_path(ev.file);
+            if (pt_fast_dirty(
+                    ev.choice->db,
+                    ev.file,
+                    norm,
+                    ev.edit.span,
+                    *ev.choice,
+                    ev.project_file))
+            {
+                return std::nullopt;
+            }
+            const std::vector<std::string> db_args{
+                "-o",
+                ev.choice->root,
+                "--config",
+                ev.choice->config};
+            PtuSession s;
+            s.qdb = open_hook_query_db(ev.choice->db);
+            // 无活租约：机会式汇报积压——批次刚结束而会话仍在工具循环时，
+            // 下一次编辑即可看到结论，不必等用户输入。它与本次编辑的常规
+            // 影响面行合并进同一个 1200B 信封（积压上限 900B）。
+            s.digest = hook_digest_flush(
+                *ev.choice,
+                FlushMode::Opportunistic,
+                DIGEST_PTU_BUDGET,
+                &s.qdb);
+            // 纯注释编辑不动符号契约：趁 update 尚未占用数据库先完成预定位
+            // 与影响面/所属类型/族视图的预计算，detach 分支免查询。
+            if (!ev.project_file)
+            {
+                s.pre = pt_prelocate(s.qdb, ev.file, ev.edit);
+            }
+            const PtUpdate upd = pt_run_update(inv, ev.file, db_args);
+            s.stale_note = std::move(upd.stale_note);
+            s.refresh_state = std::move(upd.refresh_state);
+            s.update_queued = upd.queued;
+            s.update_background = upd.background;
+            s.update_started = upd.started;
+            s.update_fallback_queued = upd.fallback_queued;
+            return s;
+        }
+
+        /** @brief 注入发送状态（排队后缀与积压摘要拼装所需）。 */
+        struct PtuEmitState
+        {
+            bool                             update_started = false;
+            bool                             update_queued = false;
+            bool                             update_background = false;
+            bool                             project_file = false;
+            std::optional<DigestFlushResult> digest;
+        };
+
+        /**
+         * @brief 发送 PostToolUse 注入：常规行裁剪到预算，积压摘要随后拼进
+         *        同一信封，整体有界。
+         *
+         * @internal 排队状态是校验事实，不是影响面数据；压到行尾，避免挤
+         *           占开头最需要被读到的符号与计数。先认领、后发送、再删
+         *           除：到这里注入已写出，claimed 文件才可以消失。发送前
+         *           崩溃只会丢一轮，绝不重复。
+         */
+        void ptu_emit_context_line(const PtuEmitState& st, std::string text)
+        {
+            if (st.update_started && st.update_queued && !st.update_background
+                && !st.project_file)
+            {
+                text =
+                    std::format("{}；影响面基于编辑前索引（更新排队）", text);
+            }
+            const std::size_t digest_len =
+                st.digest.has_value() ? st.digest->text.size() : 0;
+            const std::size_t normal_max =
+                POST_TOOL_CONTEXT_BUDGET > digest_len + (st.digest ? 1 : 0)
+                    ? POST_TOOL_CONTEXT_BUDGET - digest_len
+                          - (st.digest ? 1 : 0)
+                    : 0;
+            std::string context = clip_injection(text, normal_max);
+            if (st.digest.has_value())
+            {
+                context = std::format("{}\n", context);
+                context += st.digest->text;
+            }
+            if (context.size() > POST_TOOL_CONTEXT_BUDGET)
+            {
+                context = clip_at_most(context, POST_TOOL_CONTEXT_BUDGET);
+            }
+            emit_hook_context("PostToolUse", context);
+            if (st.digest.has_value())
+            {
+                digest_flush_done(*st.digest);
+            }
+        }
+
+        /**
+         * @brief 项目文件分支的注入文案：按联动结论区分。
+         *
+         * @internal 符号定位/影响面/同文件引用对项目文件全部无意义（它们
+         *           不在库里、没有符号），注入只报联动事实。文案按联动结
+         *           论区分：captured（语料已刷新）、busy（重采集被互斥/未
+         *           启动/超时让行，本事件留队列）、failed（采集失败，库保
+         *           持上次完整语料）、untracked（无注册表联动，按未跟踪出
+         *           队）、以及超时 detach（refresh_state 为空但 update 仍
+         *           在后台跑）。
+         */
+        void ptu_apply_project_file_note(
+            std::string&      line,
+            const PtuEvent&   ev,
+            const PtuSession& s)
+        {
+            if (!s.update_started)
+            {
+                // update 派生失败：上方通用失败文案已构造（含兜底入队
+                // 状态），再点明这是项目文件、刷新未发生。
+                line += "；项目文件（工程重采集未能启动，语料未刷新）";
+            }
+            else if (s.refresh_state == "captured")
+            {
+                line = std::format(
+                    "[ccg] {}（项目文件；工程已重采集，新 TU/移除 TU 已"
+                    "随增量索引入库）",
+                    clip_tail(display_path(ev.file), 72));
+            }
+            else if (s.refresh_state == "failed")
+            {
+                line = std::format(
+                    "[ccg] {}（项目文件；工程重采集失败，库保持上次完整"
+                    "语料，下次编辑自动重试）",
+                    clip_tail(display_path(ev.file), 72));
+            }
+            else if (s.refresh_state == "busy")
+            {
+                line = std::format(
+                    "[ccg] 已记录 {}（项目文件；另一采集正在进行，本事件"
+                    "已入队待收敛）",
+                    clip_tail(display_path(ev.file), 72));
+            }
+            else if (s.refresh_state == "untracked")
+            {
+                line = std::format(
+                    "[ccg] {}（项目文件；本库无 msbuild 注册表，按未跟踪"
+                    "处理——如需联动请先 `ccg msbuild <solution>`）",
+                    clip_tail(display_path(ev.file), 72));
+            }
+            else
+            {
+                // 超时 detach（或占位轮）：重采集在后台继续。
+                line = std::format(
+                    "[ccg] 已记录 {}（项目文件；工程重采集与增量索引在"
+                    "后台进行）",
+                    clip_tail(display_path(ev.file), 72));
+            }
+        }
+
+        /** @brief 文件级 changes 直连查询的懒缓存（首次需要才查一次）。 */
+        struct PtuChangesLazy
+        {
+            std::optional<HookChanges> result;
+            bool                       tried = false;
+        };
+
+        /**
+         * @brief 文件级 changes 的懒查询。
+         *
+         * @internal 截止/后台写者优先时放弃并记空（返回空 optional），后续
+         *           再取直接拿到同一空结论。
+         */
+        [[nodiscard]]
+        auto ptu_fetch_changes(
+            PtuChangesLazy&    lazy,
+            HookQueryDb&       qdb,
+            const std::string& file,
+            bool update_background) -> const std::optional<HookChanges>&
+        {
+            if (!lazy.tried)
+            {
+                lazy.tried = true;
+                if (update_background
+                    || hook_deadline_reached(HOOK_CHANGES_TIMEOUT))
+                {
+                    return lazy.result; // 截止/后台写者优先：放弃回退
+                }
+                lazy.result = hook_changes(qdb, file);
+            }
+            return lazy.result;
+        }
+
+        /** @brief 符号级注入各段共享的输入面（引用绑定，由总装保证生存期）。 */
+        struct PtuSymbolCtx
+        {
+            HookQueryDb&                     qdb;
+            const FileSymbol&                symbol;
+            const EditInfo&                  edit;
+            const std::string&               file;
+            const std::vector<FileSymbol>&   same_line;
+            std::string&                     line;
+            const std::optional<FileSymbol>& pre_symbol;
+            const std::optional<ImpactInfo>& pre_impact;
+            const std::optional<ImpactInfo>& pre_merged_impact;
+            const std::optional<ImpactInfo>& pre_owner_impact;
+            bool                             field_like;
+            bool                             method_like;
+            bool                             update_queued;
+        };
+
+        /**
+         * @brief 符号注入的公共收尾：引用段、owner 代理与发送。
+         *
+         * @internal 缺位与零消费者两形态的行装配都以同一组尾段结束
+         *           （引用清单 → owner 代理 → 发送）。
+         */
+        void ptu_finish_symbol_line(
+            const PtuSymbolCtx& ctx,
+            const PtuEmitState& emit_state,
+            const PtSymbolRefs& srefs,
+            const std::string&  source_file)
+        {
+            append_pt_symbol_refs(
+                ctx.line,
+                srefs.refs,
+                srefs.same_name_owners,
+                ctx.symbol,
+                ctx.field_like,
+                ctx.method_like);
+            append_pt_owner_proxy(
+                ctx.line,
+                ctx.qdb,
+                ctx.symbol,
+                source_file,
+                ctx.pre_owner_impact,
+                ctx.pre_symbol,
+                ctx.field_like);
+            ptu_emit_context_line(emit_state, std::move(ctx.line));
+        }
+
+        /**
+         * @brief 影响面查询缺位（未查询/失败两种）的符号注入。
+         */
+        void ptu_emit_impact_unavailable(
+            const PtuSymbolCtx& ctx,
+            const PtuEmitState& emit_state,
+            const ImpactInfo&   impact,
+            const PtSymbolRefs& srefs,
+            const std::string&  source_file)
+        {
+            if (!impact.attempted)
+            {
+                // 没查询与查询失败是两件事：预算/背景更新让它没
+                // 发生，就不能写成"无法精确解析"。
+                ctx.line = std::format(
+                    "{}；影响面未查询（索引更新占用，已跳过）",
+                    ctx.line);
+                ptu_finish_symbol_line(ctx, emit_state, srefs, source_file);
+                return;
+            }
+            // 同名重载/名字歧义时 impact 绑定不到 uid。文件级
+            // `changes` 报出的可能是整文件数百个消费者（B#1 的
+            // 498），那不是这个符号的消费者；宁可不给大数。
+            ctx.line = std::format("{}；符号级影响无法精确解析", ctx.line);
+            if (!impact.reason.empty())
+            {
+                ctx.line += std::format("（{}）", impact.reason);
+            }
+            ctx.line = std::format(
+                "{}；已省略文件级消费者（文件级计数不代表该"
+                "符号）",
+                ctx.line);
+            ptu_finish_symbol_line(ctx, emit_state, srefs, source_file);
+        }
+
+        /**
+         * @brief 直接消费者为 0 的符号注入：按符号形态给未建模边界说明。
+         */
+        void ptu_emit_impact_zero(
+            const PtuSymbolCtx& ctx,
+            const PtuEmitState& emit_state,
+            const ImpactInfo&   impact,
+            const PtSymbolRefs& srefs,
+            const std::string&  source_file)
+        {
+            // 数字与边界说明各只出现一次：字段的“0”必须紧跟未建模
+            // 说明，否则会被读成“该字段无人使用”；其余类型同理，
+            // 不先写一个孤立的“直接 0，传递 0”再补一句解释。
+            if (srefs.test_like)
+            {
+                // gtest 用例由测试框架注册，图内 0 外部消费者是
+                // 构造使然；如实说明，避免读者把它当成遗漏。
+                ctx.line = std::format(
+                    "{}；上游消费者 0（直接 0）；该符号是 gtest "
+                    "测试用例（仅由测试框架注册，图内无外部消费"
+                    "者属预期）",
+                    ctx.line);
+            }
+            else if (ctx.field_like)
+            {
+                // 图只记录 calls 与类型 uses；字段/变量的读写没有
+                // 边。这里如实说明未建模，而不是断言“无消费者”。
+                ctx.line = std::format(
+                    "{}；上游消费者 0（直接 0；图未建模字段读取，"
+                    "uses 只指向类型声明，不能据此断言无消费者）",
+                    ctx.line);
+            }
+            else if (ctx.method_like)
+            {
+                // 接口方法、虚函数与导出符号的调用者常在图外；
+                // 只能陈述“图内无调用边”，不能断言无人调用。
+                ctx.line = std::format(
+                    "{}；上游消费者 0（直接 0；图内无调用边，虚派"
+                    "发、取址与接口/导出消费者未建模，不能据此"
+                    "断言无消费者）",
+                    ctx.line);
+            }
+            else if (ctx.symbol.kind == "enum")
+            {
+                // uses 边只接纳 record/struct/union（extract 侧
+                // is_record_kind），枚举的入边恒为 0；不能写成
+                // “uses 已计入”来断言无使用。
+                ctx.line = std::format(
+                    "{}；上游消费者 0（直接 0；图未建模枚举作为"
+                    "类型的 uses，uses 只指向 record，不能据此断"
+                    "言无使用）",
+                    ctx.line);
+            }
+            else if (cg::db::is_type_like(ctx.symbol.kind))
+            {
+                ctx.line = std::format(
+                    "{}；上游消费者 0（直接 0；类型 uses 已计入，"
+                    "模板实例化/文本引用未建模）",
+                    ctx.line);
+            }
+            else
+            {
+                ctx.line = std::format(
+                    "{}；上游消费者 0（直接 0；同文件 CALLS 已计"
+                    "入，取址/字段访问未建模）",
+                    ctx.line);
+            }
+            bool refs_have_call = false;
+            for (const TextReference& ref : srefs.refs)
+            {
+                if (ref.nature == ReferenceNature::Call)
+                {
+                    refs_have_call = true;
+                    break;
+                }
+            }
+            if (ctx.method_like && refs_have_call)
+            {
+                // 调用点就在同文件，但图里没有到本符号的边：这是
+                // 接口/虚派发解析边界，不是“无人调用”。
+                ctx.line = std::format(
+                    "{}；文本调用点未解析到本符号（接口/虚派发）"
+                    "，图内 0 不代表无人调用",
+                    ctx.line);
+            }
+            if (ctx.method_like && ctx.edit.comment_only)
+            {
+                // 纯注释编辑默认用 --no-merge；虚方法/接口实现的
+                // 消费者经基类派发，自身直接边为 0。用预定位阶段
+                // 算好的族视图，使 detach
+                // 后也能看到“接口契约消费者”。
+                std::optional<ImpactInfo> merged = ctx.pre_merged_impact;
+                if (!merged.has_value()
+                    && !hook_deadline_reached(HOOK_IMPACT_TIMEOUT))
+                {
+                    merged = symbol_impact(ctx.qdb, ctx.symbol, true);
+                }
+                if (merged.has_value() && merged->ok && merged->direct > 0)
+                {
+                    ctx.line += std::format(
+                        "；虚函数族/接口派发视角直接消费者 {}（经基类"
+                        "派发；本符号自身直接 0）",
+                        merged->direct);
+                    append_consumers(
+                        ctx.line,
+                        merged->direct_symbols,
+                        source_file,
+                        5,
+                        "；族消费者: ");
+                }
+            }
+            ptu_finish_symbol_line(ctx, emit_state, srefs, source_file);
+        }
+
+        /**
+         * @brief 常规影响面注入：消费者计数、直接风险与截断标注。
+         */
+        void ptu_emit_impact_report(
+            const PtuSymbolCtx& ctx,
+            const PtuEmitState& emit_state,
+            const ImpactInfo&   impact,
+            std::int64_t        self_direct)
+        {
+            // 深度 3 被截断时 impacted/transitive 只是下界，不能
+            // 写成精确计数。虚函数族合并必须标注：合并后的 direct
+            // 不是本符号自身的直接消费者数。
+            std::string family_note;
+            if (impact.family_size > 1)
+            {
+                family_note =
+                    std::format("，含虚函数家族 {} 个实现", impact.family_size);
+                if (self_direct == 0)
+                {
+                    family_note =
+                        std::format("{}；本符号自身直接 0", family_note);
+                }
+                else if (self_direct > 0)
+                {
+                    family_note +=
+                        std::format("；本符号自身直接 {}", self_direct);
+                }
+            }
+            ctx.line += std::format(
+                "；上游消费者 {}{}（直接 {}{}，传递 {}）",
+                impact.truncated ? "≥" : "",
+                impact.impacted,
+                impact.direct,
+                family_note,
+                impact.transitive);
+            ctx.line += std::format(
+                "，直接风险 {}",
+                direct_risk_name(impact.direct, impact.fan_in));
+            if (impact.truncated)
+            {
+                ctx.line = std::format("{}（深度 3 内）", ctx.line);
+            }
+            if (impact.dispatch_stale > 0)
+            {
+                ctx.line += std::format(
+                    "；派发分析滞后 {} 文件（虚调用计数含旧数据，ccg "
+                    "update --drain 收敛）",
+                    impact.dispatch_stale);
+            }
+            append_consumers(ctx.line, impact.direct_symbols, ctx.file, 5);
+            if (impact.direct > 5)
+            {
+                ctx.line += std::format(" 等 {} 项", impact.direct);
+            }
+            ptu_emit_context_line(emit_state, std::move(ctx.line));
+        }
+
+        /**
+         * @brief 符号级主路径：报告被编辑符号自己的上游影响面。
+         *
+         * @internal 纯注释编辑另有标注（符号契约未变）。行号按盘上文本校
+         *           正后才进引用收集（collect_pt_refs）；影响面预计算结果
+         *           优先，截止余量内现查兜底。
+         */
+        void ptu_report_symbol(
+            const PtuSymbolCtx& ctx,
+            const PtuEmitState& emit_state)
+        {
+            ImpactInfo impact;
+            if (ctx.pre_impact.has_value() && ctx.pre_symbol.has_value()
+                && ctx.pre_symbol->uid == ctx.symbol.uid)
+            {
+                impact = ctx.pre_impact.value();
+            }
+            else if (!hook_deadline_reached(HOOK_IMPACT_TIMEOUT))
+            {
+                impact = symbol_impact(
+                    ctx.qdb,
+                    ctx.symbol,
+                    /*merge_family=*/!ctx.edit.comment_only);
+            }
+            // 非注释编辑保留族合并视图（契约改动确实波及族内实现），
+            // 但另取一次 no-merge 计数，避免把族合计写成自身直接消费者。
+            std::int64_t self_direct = -1;
+            if (!ctx.edit.comment_only && impact.ok && impact.family_size > 1
+                && !hook_deadline_reached(HOOK_IMPACT_TIMEOUT))
+            {
+                if (const ImpactInfo own =
+                        symbol_impact(ctx.qdb, ctx.symbol, false);
+                    own.ok)
+                {
+                    self_direct = own.direct;
+                }
+            }
+            const std::string shown_file =
+                ctx.symbol.file.empty() ? ctx.file : ctx.symbol.file;
+            // 库内行号可能滞后于本次编辑；盘上声明行更可信。纯注释编辑
+            // 会让声明整体下移，即使更新已执行也要按磁盘校正，否则注入
+            // 会展示旧行号并把自己的声明当成引用。
+            std::int64_t shown_line = ctx.symbol.line;
+            if ((ctx.update_queued || ctx.edit.comment_only)
+                && ctx.symbol.line > 0)
+            {
+                if (const auto text = read_text_file(shown_file);
+                    text.has_value())
+                {
+                    const std::string_view name =
+                        ctx.symbol.name.empty()
+                            ? std::string_view{ctx.symbol.qualified_name}
+                            : std::string_view{ctx.symbol.name};
+                    const std::size_t window =
+                        3 + (ctx.edit.span.have_line ? ctx.edit.span.lines : 0);
+                    if (const std::size_t actual = declaration_line_near(
+                            *text,
+                            name,
+                            ctx.symbol.kind,
+                            static_cast<std::size_t>(ctx.symbol.line),
+                            window);
+                        actual != 0)
+                    {
+                        shown_line = static_cast<std::int64_t>(actual);
+                    }
+                }
+            }
+            ctx.line += std::format(
+                "；被编辑符号 {}（{}，{}:{}）",
+                clip_display_symbol(ctx.symbol.qualified_name, 80),
+                ctx.symbol.kind,
+                clip(basename_of(shown_file), 40),
+                shown_line);
+            if (!ctx.same_line.empty())
+            {
+                ctx.line = std::format("{}；同线符号: ", ctx.line);
+                std::size_t extra = 0;
+                for (const FileSymbol& sibling : ctx.same_line)
+                {
+                    if (extra != 0)
+                    {
+                        ctx.line += "、";
+                    }
+                    ctx.line += clip(
+                        sibling.name.empty() ? sibling.qualified_name
+                                             : sibling.name,
+                        40);
+                    ctx.line += std::format("（{}）", sibling.kind);
+                    if (++extra >= 5)
+                    {
+                        break;
+                    }
+                }
+                if (ctx.same_line.size() > extra)
+                {
+                    ctx.line += std::format(" 等 {} 个", ctx.same_line.size());
+                }
+            }
+            if (ctx.edit.comment_only)
+            {
+                // 只在此处说一次：注释/空白编辑不动契约，风险也不变。
+                ctx.line = std::format(
+                    "{}；仅注释/空白改动（符号契约不变，风险: 不变）",
+                    ctx.line);
+            }
+            const std::string source_file =
+                ctx.symbol.file.empty() ? ctx.file : ctx.symbol.file;
+            const std::string_view symbol_name =
+                ctx.symbol.name.empty()
+                    ? std::string_view{ctx.symbol.qualified_name}
+                    : std::string_view{ctx.symbol.name};
+            // 同文件文本证据（引用行/同名多归属/gtest 判定）整体在
+            // collect_pt_refs 收集。
+            const PtSymbolRefs srefs = collect_pt_refs(
+                ctx.qdb,
+                ctx.symbol,
+                ctx.edit,
+                shown_line,
+                source_file,
+                symbol_name,
+                ctx.field_like,
+                ctx.method_like,
+                ctx.update_queued);
+            if (!impact.ok)
+            {
+                ptu_emit_impact_unavailable(
+                    ctx,
+                    emit_state,
+                    impact,
+                    srefs,
+                    source_file);
+                return;
+            }
+            if (impact.direct == 0)
+            {
+                ptu_emit_impact_zero(
+                    ctx,
+                    emit_state,
+                    impact,
+                    srefs,
+                    source_file);
+                return;
+            }
+            if (ctx.edit.comment_only)
+            {
+                // 注释/空白编辑不动契约：传递扇出对本次编辑没有行动
+                // 价值，只报直接消费者，也不带截断提示。
+                ctx.line += std::format("；直接消费者 {}", impact.direct);
+                append_consumers(ctx.line, impact.direct_symbols, ctx.file, 5);
+                if (impact.direct > 5)
+                {
+                    ctx.line += std::format(" 等 {} 项", impact.direct);
+                }
+                ptu_emit_context_line(emit_state, std::move(ctx.line));
+                return;
+            }
+            ptu_emit_impact_report(ctx, emit_state, impact, self_direct);
+        }
+
+        /**
+         * @brief 文件级回退：未能定位符号或符号级计数不可用时的
+         *        changes --depth 1 注入。
+         *
+         * @internal 深度 1 只取直接消费者——传递扇出正是旧文本噪音的主因。
+         */
+        void ptu_fallback_file_report(
+            const PtuEmitState&              emit_state,
+            std::string&                     line,
+            PtuChangesLazy&                  changes_lazy,
+            HookQueryDb&                     qdb,
+            const std::string&               file,
+            const std::optional<FileSymbol>& symbol)
+        {
+            const std::optional<HookChanges>& changes = ptu_fetch_changes(
+                changes_lazy,
+                qdb,
+                file,
+                emit_state.update_background);
+            if (!changes.has_value())
+            {
+                // 回退查询失败（后台写者/截止）时仍要说话：更新本身已经
+                // 给出可核查的事实（已入库 / 排队 / 后台继续），吞掉它
+                // 只会让读者把 hook 失效与“无影响面”混为一谈。符号定位
+                // 成功时 line 里已带符号；失败时至少保留首行状态。
+                ptu_emit_context_line(emit_state, std::move(line));
+                return;
+            }
+            if (!changes->any_known)
+            {
+                // 新建/未跟踪文件此前完全静默；一行说明比“无输出”更有用，
+                // 也避免读者把缺失当成 hook 失效。
+                line = std::format(
+                    "{}；本文件未被索引（新建或不在 compile_commands），"
+                    "暂无影响面",
+                    line);
+                ptu_emit_context_line(emit_state, std::move(line));
+                return;
+            }
+            if (!symbol.has_value())
+            {
+                line = std::format("{}；未能从本次编辑定位符号", line);
+            }
+            const std::int64_t count =
+                static_cast<std::int64_t>(changes->consumers.size());
+            if (count == 0)
+            {
+                line += "；文件级直接消费者 0（可能仅测试内部/未解析调用；"
+                        "同文件调用者见 depth 1）";
+            }
+            else
+            {
+                line += std::format("；文件级直接消费者 {}（depth 1）", count);
+                line = std::format("{}；最相关: ", line);
+                std::size_t shown = 0;
+                for (std::size_t i = 0;
+                     i < changes->consumers.size() && shown < 3;
+                     ++i)
+                {
+                    const HookChanges::Consumer& consumer =
+                        changes->consumers[i];
+                    if (consumer.qualified_name.empty())
+                    {
+                        continue;
+                    }
+                    if (shown != 0)
+                    {
+                        line += "、";
+                    }
+                    line += clip_display_symbol(consumer.qualified_name, 60);
+                    // 旧 JSON 的 file/line 与 qualified_name 同条件在场（行
+                    // 物化成功即三字段齐写），此处非空名字即同此条件。
+                    line += std::format(
+                        "（定义于 {}:{}）",
+                        clip(basename_of(consumer.file), 32),
+                        consumer.line);
+                    ++shown;
+                }
+                if (count > 3)
+                {
+                    line += std::format(" 等 {} 项", count);
+                }
+            }
+            ptu_emit_context_line(emit_state, std::move(line));
+        }
+
         /**
          * @brief PostToolUse 处理器：刷新被编辑文件的库，再把该文件的影响面
          *        浓缩为一行有界上下文。
@@ -7172,150 +8071,39 @@ export namespace cg::cli
         {
             try
             {
-                if (!cg::util::platform::stdin_is_piped())
+                const std::optional<PtuEvent> ev = ptu_parse_event(inv);
+                if (!ev.has_value())
                 {
                     return 0;
                 }
-                const std::string input(
-                    std::istreambuf_iterator<char>{std::cin},
-                    {});
-                const json::Document doc = json::Document::parse(input);
-                const auto           root = doc.root();
-                const auto           tool = root.get("tool_name");
-                if (!tool.has_value() || !tool->is_string())
+                std::optional<PtuSession> session =
+                    ptu_fold_edit_into_library(inv, *ev);
+                if (!session.has_value())
                 {
                     return 0;
                 }
-                const auto tool_name = tool->as_string();
-                // 工具名白名单与 HOOK_SPECS 的 matcher 镜像。Update 载荷
-                // 同为 file_path。
-                if (!tool_name.has_value()
-                    || (*tool_name != "Edit" && *tool_name != "Write"
-                        && *tool_name != "MultiEdit" && *tool_name != "Update"))
-                {
-                    return 0;
-                }
-                const auto tool_input = root.get("tool_input");
-                if (!tool_input.has_value() || !tool_input->is_object())
-                {
-                    return 0;
-                }
-                const auto file_member = tool_input->get("file_path");
-                if (!file_member.has_value() || !file_member->is_string())
-                {
-                    return 0;
-                }
-                const auto file_value = file_member->as_string();
-                // 语料文件与项目文件都放行：前者走符号影响面注入，后者只入队
-                // 触发重采集联动（见下方 project_file 分支）——项目文件的编辑
-                // 改的是语料来源（TU 清单/包含路径），不在库里产生任何符号；
-                // 其余一切（配置、文档、脚本、锁文件）照旧静默。
-                if (!file_value.has_value() || file_value->empty()
-                    || file_value->find('"') != std::string_view::npos
-                    || (!is_corpus_file(*file_value)
-                        && !cg::util::is_project_file(*file_value)))
-                {
-                    return 0;
-                }
-                const std::string file{*file_value};
-                // 项目文件（.sln/.vcxproj/.props/...）：编辑改的是语料来源，
-                // 不产生符号——影响面查询全部跳过，注入只报联动事实（下方
-                // project_file 分支）。
-                const bool project_file = cg::util::is_project_file(file);
-                const auto choice = hook_resolved_db(inv);
-                if (!choice.has_value())
-                {
-                    return 0;
-                }
-                const std::vector<std::string> db_args{
-                    "-o",
-                    choice->root,
-                    "--config",
-                    choice->config};
-
-                const auto     tool_response = root.get("tool_response");
-                const EditInfo edit = extract_edit_info(
-                    *tool_input,
-                    tool_response,
-                    file,
-                    *tool_name);
-
-                // 快速标脏（需求 1）：活租约在场就只入队写 journal 立即收工；
-                // 探测失败宁可诚实标脏也不赌一次长 update。入队前先过
-                // 文件级门：语料面外的编辑当场拒收，工程文件走联动通道
-                // （细节见 pt_fast_dirty 与 corpus_gate_pass）。
-                const std::string norm = normalize_hook_path(file);
-                if (pt_fast_dirty(
-                        choice->db,
-                        file,
-                        norm,
-                        edit.span,
-                        *choice,
-                        project_file))
-                {
-                    return 0;
-                }
-
-                // 进程内直连的混合形态：本次处理器的全部查询（定位/探
-                // 针/枚举/影响面/
-                // changes 回退/digest 重算）共用这一条进程内会话；db_args 只剩
-                // update 子进程还在用（写锁隔离 + 超时撒手保持子进程形态）。
-                HookQueryDb qdb = open_hook_query_db(choice->db);
-
-                // 无活租约：机会式汇报积压——批次刚结束而会话仍在工具循环时，
-                // 下一次编辑即可看到结论，不必等用户输入。它与本次编辑的常规
-                // 影响面行合并进同一个 1200B 信封（积压上限 900B）。
-                std::optional<DigestFlushResult> digest = hook_digest_flush(
-                    *choice,
-                    FlushMode::Opportunistic,
-                    DIGEST_PTU_BUDGET,
-                    &qdb);
-                // 纯注释编辑不动符号契约：趁 update 尚未占用数据库先完成预定位
-                // 与影响面/所属类型/族视图的预计算，detach 分支免查询（细节见
-                // pt_prelocate）。
-                PtPreLocate pre;
-                if (!project_file)
-                {
-                    pre = pt_prelocate(qdb, file, edit);
-                }
-                const std::optional<FileSymbol>& pre_symbol = pre.symbol;
-                const std::vector<FileSymbol>&   pre_same_line = pre.same_line;
-                const std::optional<ImpactInfo>& pre_impact = pre.impact;
-                const std::optional<ImpactInfo>& pre_merged_impact =
-                    pre.merged_impact;
-                const std::optional<ImpactInfo>& pre_owner_impact =
-                    pre.owner_impact;
-
-                // 联动结论（update --json 的 projectRefresh）：captured / busy
-                // / failed / untracked；空 = 本轮没触发（普通 TU 批或超时
-                // detach）。
-                const PtUpdate upd = pt_run_update(inv, file, db_args);
-                std::string    stale_note = std::move(upd.stale_note);
-                std::string    refresh_state = std::move(upd.refresh_state);
-                const bool     update_queued = upd.queued;
-                const bool     update_background = upd.background;
-                const bool     update_started = upd.started;
-                const bool     update_fallback_queued = upd.fallback_queued;
 
                 std::string line;
-                if (!update_started)
+                if (!session->update_started)
                 {
-                    // 诚实提示：更新没有启动，绝不写"已入库"。入队兜底成功时
+                    // 诚实提示：更新没有启动，绝不写“已入库”。入队兜底成功时
                     // 说明下一次刷新会补上，失败时连这句也不承诺。
                     line = std::format(
                         "[ccg] {} 未能启动索引更新{}（影响面基于编辑前索引）",
-                        clip_tail(display_path(file), 72),
-                        update_fallback_queued ? "，已入队待下次刷新" : "");
+                        clip_tail(display_path(ev->file), 72),
+                        session->update_fallback_queued ? "，已入队待下次刷新"
+                                                        : "");
                 }
-                else if (update_background)
+                else if (session->update_background)
                 {
-                    // 只有预定位阶段真的算过影响面，才能说"基于既有索引"；
-                    // 预算连预计算都没留下时如实写"未查询"，避免暗示下面
+                    // 只有预定位阶段真的算过影响面，才能说“基于既有索引”；
+                    // 预算连预计算都没留下时如实写“未查询”，避免暗示下面
                     // 会有一份省略了的影响面。
                     line = std::format(
                         "[ccg] 已记录 {}（索引更新在后台继续；{}）",
-                        clip_tail(display_path(file), 72),
-                        (pre_impact.has_value() && pre_impact->attempted)
+                        clip_tail(display_path(ev->file), 72),
+                        (session->pre.impact.has_value()
+                         && session->pre.impact->attempted)
                             ? "影响面基于既有索引"
                             : "影响面未查询（索引更新占用，已跳过）");
                 }
@@ -7323,102 +8111,24 @@ export namespace cg::cli
                 {
                     line = std::format(
                         "[ccg] {} {}",
-                        update_queued ? "已记录" : "已入库",
-                        clip_tail(display_path(file), 72));
+                        session->update_queued ? "已记录" : "已入库",
+                        clip_tail(display_path(ev->file), 72));
                 }
-                if (!stale_note.empty())
+                if (!session->stale_note.empty())
                 {
-                    line += std::format("（{}）", stale_note);
+                    line += std::format("（{}）", session->stale_note);
                 }
-                // 排队状态是校验事实，不是影响面数据；压到行尾，避免挤占开头
-                // 最需要被读到的符号与计数。后台继续的提示已在首行写明，不重复。
-                const auto emit_line = [&](std::string text)
-                {
-                    if (update_started && update_queued && !update_background
-                        && !project_file)
-                    {
-                        text = std::format(
-                            "{}；影响面基于编辑前索引（更新排队）",
-                            text);
-                    }
-                    const std::size_t digest_len =
-                        digest.has_value() ? digest->text.size() : 0;
-                    const std::size_t normal_max =
-                        POST_TOOL_CONTEXT_BUDGET > digest_len + (digest ? 1 : 0)
-                            ? POST_TOOL_CONTEXT_BUDGET - digest_len
-                                  - (digest ? 1 : 0)
-                            : 0;
-                    std::string context = clip_injection(text, normal_max);
-                    if (digest.has_value())
-                    {
-                        context = std::format("{}\n", context);
-                        context += digest->text;
-                    }
-                    if (context.size() > POST_TOOL_CONTEXT_BUDGET)
-                    {
-                        context =
-                            clip_at_most(context, POST_TOOL_CONTEXT_BUDGET);
-                    }
-                    emit_hook_context("PostToolUse", context);
-                    // 先认领、后发送、再删除：到这里注入已写出，claimed 文件
-                    // 才可以消失。发送前崩溃只会丢一轮，绝不重复。
-                    if (digest.has_value())
-                    {
-                        digest_flush_done(*digest);
-                    }
-                };
+                PtuEmitState emit_state{
+                    .update_started = session->update_started,
+                    .update_queued = session->update_queued,
+                    .update_background = session->update_background,
+                    .project_file = ev->project_file,
+                    .digest = std::move(session->digest)};
 
-                // 项目文件分支：符号定位/影响面/同文件引用对项目文件全部无意
-                // 义（它们不在库里、没有符号）；注入只报联动事实。文案按联动
-                // 结论区分：captured（语料已刷新）、busy（重采集被互斥/未启动/
-                // 超时让行，本事件留队列）、failed（采集失败，库保持上次完整
-                // 语料）、untracked（无注册表联动，按未跟踪出队）、以及超时
-                // detach（refresh_state 为空但 update 仍在后台跑）。
-                if (project_file)
+                if (ev->project_file)
                 {
-                    if (!update_started)
-                    {
-                        // update 派生失败：上方通用失败文案已构造（含兜底入队
-                        // 状态），再点明这是项目文件、刷新未发生。
-                        line += "；项目文件（工程重采集未能启动，语料未刷新）";
-                    }
-                    else if (refresh_state == "captured")
-                    {
-                        line = std::format(
-                            "[ccg] {}（项目文件；工程已重采集，新 TU/移除 TU 已"
-                            "随增量索引入库）",
-                            clip_tail(display_path(file), 72));
-                    }
-                    else if (refresh_state == "failed")
-                    {
-                        line = std::format(
-                            "[ccg] {}（项目文件；工程重采集失败，库保持上次完整"
-                            "语料，下次编辑自动重试）",
-                            clip_tail(display_path(file), 72));
-                    }
-                    else if (refresh_state == "busy")
-                    {
-                        line = std::format(
-                            "[ccg] 已记录 {}（项目文件；另一采集正在进行，本事件"
-                            "已入队待收敛）",
-                            clip_tail(display_path(file), 72));
-                    }
-                    else if (refresh_state == "untracked")
-                    {
-                        line = std::format(
-                            "[ccg] {}（项目文件；本库无 msbuild 注册表，按未跟踪"
-                            "处理——如需联动请先 `ccg msbuild <solution>`）",
-                            clip_tail(display_path(file), 72));
-                    }
-                    else
-                    {
-                        // 超时 detach（或占位轮）：重采集在后台继续。
-                        line = std::format(
-                            "[ccg] 已记录 {}（项目文件；工程重采集与增量索引在"
-                            "后台进行）",
-                            clip_tail(display_path(file), 72));
-                    }
-                    emit_line(std::move(line));
+                    ptu_apply_project_file_note(line, *ev, *session);
+                    ptu_emit_context_line(emit_state, std::move(line));
                     return 0;
                 }
 
@@ -7426,24 +8136,11 @@ export namespace cg::cli
                 // 路径（`query --file` 的路径过滤是大小写敏感的，而 Claude Code
                 // 传来的 file_path 可能是模型自行拼的小写形态）和文件级回退所
                 // 需的消费者——主路径失败或走到回退时才真正需要。
-                std::optional<HookChanges> changes_result;
-                bool                       changes_tried = false;
-                const auto                 fetch_changes =
-                    [&]() -> const std::optional<HookChanges>&
-                {
-                    if (!changes_tried)
-                    {
-                        changes_tried = true;
-                        if (update_background
-                            || hook_deadline_reached(HOOK_CHANGES_TIMEOUT))
-                        {
-                            return changes_result; // 截止/后台写者优先：放弃回退
-                        }
-                        changes_result = hook_changes(qdb, file);
-                    }
-                    return changes_result;
-                };
-
+                PtuChangesLazy                   changes_lazy;
+                const std::optional<FileSymbol>& pre_symbol =
+                    session->pre.symbol;
+                const std::vector<FileSymbol>& pre_same_line =
+                    session->pre.same_line;
                 // 符号级主路径：报告被编辑符号自己的上游影响面，而不是整文件
                 // 全部符号的扇出。纯注释编辑另有标注（符号契约未变）。
                 std::vector<FileSymbol>   same_line;
@@ -7452,476 +8149,68 @@ export namespace cg::cli
                 {
                     // 纯注释编辑的符号契约未变：update 前定位到的符号就是答案，
                     // 不再重复查询。这同时覆盖 detach 分支（后台写者会让新查询
-                    // 阻塞）与"update 用满预算、截止余量已不够再查询"的分支。
+                    // 阻塞）与“update 用满预算、截止余量已不够再查询”的分支。
                     symbol = pre_symbol;
                     same_line = pre_same_line;
                 }
                 else
                 {
-                    symbol = locate_edited_symbol(qdb, file, edit, &same_line);
+                    symbol = locate_edited_symbol(
+                        session->qdb,
+                        ev->file,
+                        ev->edit,
+                        &same_line);
                 }
-                if (!symbol.has_value() && !update_background)
+                if (!symbol.has_value() && !session->update_background)
                 {
-                    const auto& changes = fetch_changes();
+                    const std::optional<HookChanges>& changes =
+                        ptu_fetch_changes(
+                            changes_lazy,
+                            session->qdb,
+                            ev->file,
+                            session->update_background);
                     if (changes.has_value() && !changes->canonical.empty()
-                        && basename_of(changes->canonical) != basename_of(file))
+                        && basename_of(changes->canonical)
+                               != basename_of(ev->file))
                     {
                         same_line.clear();
                         symbol = locate_edited_symbol(
-                            qdb,
+                            session->qdb,
                             changes->canonical,
-                            edit,
+                            ev->edit,
                             &same_line);
                     }
                 }
                 if (symbol.has_value())
                 {
-                    // 纯注释编辑只需要本符号自身的影响面：虚方法默认的族合并
-                    // 会把整个覆盖族的调用方写成"直接消费者"，与本次编辑无关。
-                    // 预定位阶段已经算好的结果优先；否则在截止余量内现查。
-                    // detach 本身不再是跳过查询的理由——预计算结果已就绪时，
-                    // 后台写者根本不会被碰到。
-                    ImpactInfo impact;
-                    if (pre_impact.has_value() && pre_symbol.has_value()
-                        && pre_symbol->uid == symbol->uid)
-                    {
-                        impact = pre_impact.value();
-                    }
-                    else if (!hook_deadline_reached(HOOK_IMPACT_TIMEOUT))
-                    {
-                        impact = symbol_impact(
-                            qdb,
-                            *symbol,
-                            /*merge_family=*/!edit.comment_only);
-                    }
-                    // 非注释编辑保留族合并视图（契约改动确实波及族内实现），
-                    // 但另取一次 no-merge
-                    // 计数，避免把族合计写成自身直接消费者。
-                    std::int64_t self_direct = -1;
-                    if (!edit.comment_only && impact.ok
-                        && impact.family_size > 1
-                        && !hook_deadline_reached(HOOK_IMPACT_TIMEOUT))
-                    {
-                        if (const ImpactInfo own =
-                                symbol_impact(qdb, *symbol, false);
-                            own.ok)
-                        {
-                            self_direct = own.direct;
-                        }
-                    }
-                    const std::string shown_file =
-                        symbol->file.empty() ? file : symbol->file;
-                    // 库内行号可能滞后于本次编辑；盘上声明行更可信。纯注释编辑
-                    // 会让声明整体下移，即使更新已执行也要按磁盘校正，否则注入
-                    // 会展示旧行号并把自己的声明当成引用。
-                    std::int64_t shown_line = symbol->line;
-                    if ((update_queued || edit.comment_only)
-                        && symbol->line > 0)
-                    {
-                        if (const auto text = read_text_file(shown_file);
-                            text.has_value())
-                        {
-                            const std::string_view name =
-                                symbol->name.empty()
-                                    ? std::string_view{symbol->qualified_name}
-                                    : std::string_view{symbol->name};
-                            const std::size_t window =
-                                3 + (edit.span.have_line ? edit.span.lines : 0);
-                            if (const std::size_t actual =
-                                    declaration_line_near(
-                                        *text,
-                                        name,
-                                        symbol->kind,
-                                        static_cast<std::size_t>(symbol->line),
-                                        window);
-                                actual != 0)
-                            {
-                                shown_line = static_cast<std::int64_t>(actual);
-                            }
-                        }
-                    }
-                    line += std::format(
-                        "；被编辑符号 {}（{}，{}:{}）",
-                        clip_display_symbol(symbol->qualified_name, 80),
-                        symbol->kind,
-                        clip(basename_of(shown_file), 40),
-                        shown_line);
-                    if (!same_line.empty())
-                    {
-                        line = std::format("{}；同线符号: ", line);
-                        std::size_t extra = 0;
-                        for (const FileSymbol& sibling : same_line)
-                        {
-                            if (extra != 0)
-                            {
-                                line += "、";
-                            }
-                            line += clip(
-                                sibling.name.empty() ? sibling.qualified_name
-                                                     : sibling.name,
-                                40);
-                            line += std::format("（{}）", sibling.kind);
-                            if (++extra >= 5)
-                            {
-                                break;
-                            }
-                        }
-                        if (same_line.size() > extra)
-                        {
-                            line += std::format(" 等 {} 个", same_line.size());
-                        }
-                    }
-                    if (edit.comment_only)
-                    {
-                        // 只在此处说一次：注释/空白编辑不动契约，风险也不变。
-                        line = std::format(
-                            "{}；仅注释/空白改动（符号契约不变，风险: 不变）",
-                            line);
-                    }
                     const bool field_like = cg::db::is_value_like(symbol->kind);
                     const bool method_like =
                         cg::db::is_method_like(symbol->kind);
-                    const bool type_like = cg::db::is_type_like(symbol->kind);
-                    const std::string source_file =
-                        symbol->file.empty() ? file : symbol->file;
-                    const std::string_view symbol_name =
-                        symbol->name.empty()
-                            ? std::string_view{symbol->qualified_name}
-                            : std::string_view{symbol->name};
-                    // 同文件文本证据（引用行/同名多归属/gtest 判定）整体在
-                    // collect_pt_refs 收集。
-                    const PtSymbolRefs srefs = collect_pt_refs(
-                        qdb,
-                        *symbol,
-                        edit,
-                        shown_line,
-                        source_file,
-                        symbol_name,
-                        field_like,
-                        method_like,
-                        update_queued);
-                    const bool test_like = srefs.test_like;
-                    const std::vector<TextReference>& refs = srefs.refs;
-                    const std::vector<std::string>&   same_name_owners =
-                        srefs.same_name_owners;
-                    if (!impact.ok)
-                    {
-                        if (!impact.attempted)
-                        {
-                            // 没查询与查询失败是两件事：预算/背景更新让它没
-                            // 发生，就不能写成"无法精确解析"。
-                            line = std::format(
-                                "{}；影响面未查询（索引更新占用，已跳过）",
-                                line);
-                            append_pt_symbol_refs(
-                                line,
-                                refs,
-                                same_name_owners,
-                                *symbol,
-                                field_like,
-                                method_like);
-                            append_pt_owner_proxy(
-                                line,
-                                qdb,
-                                *symbol,
-                                source_file,
-                                pre_owner_impact,
-                                pre_symbol,
-                                field_like);
-                            emit_line(std::move(line));
-                            return 0;
-                        }
-                        // 同名重载/名字歧义时 impact 绑定不到 uid。文件级
-                        // `changes` 报出的可能是整文件数百个消费者（B#1 的
-                        // 498），那不是这个符号的消费者；宁可不给大数。
-                        line = std::format("{}；符号级影响无法精确解析", line);
-                        if (!impact.reason.empty())
-                        {
-                            line += std::format("（{}）", impact.reason);
-                        }
-                        line = std::format(
-                            "{}；已省略文件级消费者（文件级计数不代表该"
-                            "符号）",
-                            line);
-                        append_pt_symbol_refs(
-                            line,
-                            refs,
-                            same_name_owners,
-                            *symbol,
-                            field_like,
-                            method_like);
-                        append_pt_owner_proxy(
-                            line,
-                            qdb,
-                            *symbol,
-                            source_file,
-                            pre_owner_impact,
-                            pre_symbol,
-                            field_like);
-                        emit_line(std::move(line));
-                        return 0;
-                    }
-                    else if (impact.direct == 0)
-                    {
-                        // 数字与边界说明各只出现一次：字段的“0”必须紧跟未建模
-                        // 说明，否则会被读成“该字段无人使用”；其余类型同理，
-                        // 不先写一个孤立的“直接 0，传递 0”再补一句解释。
-                        if (test_like)
-                        {
-                            // gtest 用例由测试框架注册，图内 0 外部消费者是
-                            // 构造使然；如实说明，避免读者把它当成遗漏。
-                            line = std::format(
-                                "{}；上游消费者 0（直接 0）；该符号是 gtest "
-                                "测试用例（仅由测试框架注册，图内无外部消费"
-                                "者属预期）",
-                                line);
-                        }
-                        else if (field_like)
-                        {
-                            // 图只记录 calls 与类型 uses；字段/变量的读写没有
-                            // 边。这里如实说明未建模，而不是断言“无消费者”。
-                            line = std::format(
-                                "{}；上游消费者 0（直接 0；图未建模字段读取，"
-                                "uses 只指向类型声明，不能据此断言无消费者）",
-                                line);
-                        }
-                        else if (method_like)
-                        {
-                            // 接口方法、虚函数与导出符号的调用者常在图外；
-                            // 只能陈述“图内无调用边”，不能断言无人调用。
-                            line = std::format(
-                                "{}；上游消费者 0（直接 0；图内无调用边，虚派"
-                                "发、取址与接口/导出消费者未建模，不能据此"
-                                "断言无消费者）",
-                                line);
-                        }
-                        else if (symbol->kind == "enum")
-                        {
-                            // uses 边只接纳 record/struct/union（extract 侧
-                            // is_record_kind），枚举的入边恒为 0；不能写成
-                            // “uses 已计入”来断言无使用。
-                            line = std::format(
-                                "{}；上游消费者 0（直接 0；图未建模枚举作为"
-                                "类型的 uses，uses 只指向 record，不能据此断"
-                                "言无使用）",
-                                line);
-                        }
-                        else if (type_like)
-                        {
-                            line = std::format(
-                                "{}；上游消费者 0（直接 0；类型 uses 已计入，"
-                                "模板实例化/文本引用未建模）",
-                                line);
-                        }
-                        else
-                        {
-                            line = std::format(
-                                "{}；上游消费者 0（直接 0；同文件 CALLS 已计"
-                                "入，取址/字段访问未建模）",
-                                line);
-                        }
-                        bool refs_have_call = false;
-                        for (const TextReference& ref : refs)
-                        {
-                            if (ref.nature == ReferenceNature::Call)
-                            {
-                                refs_have_call = true;
-                                break;
-                            }
-                        }
-                        if (method_like && refs_have_call)
-                        {
-                            // 调用点就在同文件，但图里没有到本符号的边：这是
-                            // 接口/虚派发解析边界，不是“无人调用”。
-                            line = std::format(
-                                "{}；文本调用点未解析到本符号（接口/虚派发）"
-                                "，图内 0 不代表无人调用",
-                                line);
-                        }
-                        if (method_like && edit.comment_only)
-                        {
-                            // 纯注释编辑默认用 --no-merge；虚方法/接口实现的
-                            // 消费者经基类派发，自身直接边为 0。用预定位阶段
-                            // 算好的族视图，使 detach
-                            // 后也能看到“接口契约消费者”。
-                            std::optional<ImpactInfo> merged =
-                                pre_merged_impact;
-                            if (!merged.has_value()
-                                && !hook_deadline_reached(HOOK_IMPACT_TIMEOUT))
-                            {
-                                merged = symbol_impact(qdb, *symbol, true);
-                            }
-                            if (merged.has_value() && merged->ok
-                                && merged->direct > 0)
-                            {
-                                line += std::format(
-                                    "；虚函数族/接口派发视角直接消费者 {}（经基类"
-                                    "派发；本符号自身直接 0）",
-                                    merged->direct);
-                                append_consumers(
-                                    line,
-                                    merged->direct_symbols,
-                                    source_file,
-                                    5,
-                                    "；族消费者: ");
-                            }
-                        }
-                        append_pt_symbol_refs(
-                            line,
-                            refs,
-                            same_name_owners,
-                            *symbol,
-                            field_like,
-                            method_like);
-                        append_pt_owner_proxy(
-                            line,
-                            qdb,
-                            *symbol,
-                            source_file,
-                            pre_owner_impact,
-                            pre_symbol,
-                            field_like);
-                        emit_line(std::move(line));
-                        return 0;
-                    }
-                    else if (edit.comment_only)
-                    {
-                        // 注释/空白编辑不动契约：传递扇出对本次编辑没有行动
-                        // 价值，只报直接消费者，也不带截断提示。
-                        line += std::format("；直接消费者 {}", impact.direct);
-                        append_consumers(line, impact.direct_symbols, file, 5);
-                        if (impact.direct > 5)
-                        {
-                            line += std::format(" 等 {} 项", impact.direct);
-                        }
-                        emit_line(std::move(line));
-                        return 0;
-                    }
-                    else
-                    {
-                        // 深度 3 被截断时 impacted/transitive 只是下界，不能
-                        // 写成精确计数。虚函数族合并必须标注：合并后的 direct
-                        // 不是本符号自身的直接消费者数。
-                        std::string family_note;
-                        if (impact.family_size > 1)
-                        {
-                            family_note = std::format(
-                                "，含虚函数家族 {} 个实现",
-                                impact.family_size);
-                            if (self_direct == 0)
-                            {
-                                family_note = std::format(
-                                    "{}；本符号自身直接 0",
-                                    family_note);
-                            }
-                            else if (self_direct > 0)
-                            {
-                                family_note += std::format(
-                                    "；本符号自身直接 {}",
-                                    self_direct);
-                            }
-                        }
-                        line += std::format(
-                            "；上游消费者 {}{}（直接 {}{}，传递 {}）",
-                            impact.truncated ? "≥" : "",
-                            impact.impacted,
-                            impact.direct,
-                            family_note,
-                            impact.transitive);
-                        line += std::format(
-                            "，直接风险 {}",
-                            direct_risk_name(impact.direct, impact.fan_in));
-                        if (impact.truncated)
-                        {
-                            line = std::format("{}（深度 3 内）", line);
-                        }
-                        if (impact.dispatch_stale > 0)
-                        {
-                            line += std::format(
-                                "；派发分析滞后 {} 文件（虚调用计数含旧数据，ccg "
-                                "update --drain 收敛）",
-                                impact.dispatch_stale);
-                        }
-                        append_consumers(line, impact.direct_symbols, file, 5);
-                        if (impact.direct > 5)
-                        {
-                            line += std::format(" 等 {} 项", impact.direct);
-                        }
-                        emit_line(std::move(line));
-                        return 0;
-                    }
+                    PtuSymbolCtx ctx{
+                        .qdb = session->qdb,
+                        .symbol = *symbol,
+                        .edit = ev->edit,
+                        .file = ev->file,
+                        .same_line = same_line,
+                        .line = line,
+                        .pre_symbol = pre_symbol,
+                        .pre_impact = session->pre.impact,
+                        .pre_merged_impact = session->pre.merged_impact,
+                        .pre_owner_impact = session->pre.owner_impact,
+                        .field_like = field_like,
+                        .method_like = method_like,
+                        .update_queued = session->update_queued};
+                    ptu_report_symbol(ctx, emit_state);
+                    return 0;
                 }
 
-                // 文件级回退：未能定位符号，或同名重载令符号级计数不可用。
-                // 深度 1 只取直接消费者——传递扇出正是旧文本噪音的主因。
-                const auto& changes = fetch_changes();
-                if (!changes.has_value())
-                {
-                    // 回退查询失败（后台写者/截止）时仍要说话：更新本身已经
-                    // 给出可核查的事实（已入库 / 排队 / 后台继续），吞掉它
-                    // 只会让读者把 hook 失效与"无影响面"混为一谈。符号定位
-                    // 成功时 line 里已带符号；失败时至少保留首行状态。
-                    emit_line(std::move(line));
-                    return 0;
-                }
-                if (!changes->any_known)
-                {
-                    // 新建/未跟踪文件此前完全静默；一行说明比“无输出”更有用，
-                    // 也避免读者把缺失当成 hook 失效。
-                    line = std::format(
-                        "{}；本文件未被索引（新建或不在 compile_commands），"
-                        "暂无影响面",
-                        line);
-                    emit_line(std::move(line));
-                    return 0;
-                }
-                if (!symbol.has_value())
-                {
-                    line = std::format("{}；未能从本次编辑定位符号", line);
-                }
-                const std::int64_t count =
-                    static_cast<std::int64_t>(changes->consumers.size());
-                if (count == 0)
-                {
-                    line += "；文件级直接消费者 0（可能仅测试内部/未解析调用；"
-                            "同文件调用者见 depth 1）";
-                }
-                else
-                {
-                    line +=
-                        std::format("；文件级直接消费者 {}（depth 1）", count);
-                    line = std::format("{}；最相关: ", line);
-                    std::size_t shown = 0;
-                    for (std::size_t i = 0;
-                         i < changes->consumers.size() && shown < 3;
-                         ++i)
-                    {
-                        const HookChanges::Consumer& consumer =
-                            changes->consumers[i];
-                        if (consumer.qualified_name.empty())
-                        {
-                            continue;
-                        }
-                        if (shown != 0)
-                        {
-                            line += "、";
-                        }
-                        line +=
-                            clip_display_symbol(consumer.qualified_name, 60);
-                        // 旧 JSON 的 file/line 与 qualified_name 同条件在场（行
-                        // 物化成功即三字段齐写），此处非空名字即同此条件。
-                        line += std::format(
-                            "（定义于 {}:{}）",
-                            clip(basename_of(consumer.file), 32),
-                            consumer.line);
-                        ++shown;
-                    }
-                    if (count > 3)
-                    {
-                        line += std::format(" 等 {} 项", count);
-                    }
-                }
-                emit_line(std::move(line));
+                ptu_fallback_file_report(
+                    emit_state,
+                    line,
+                    changes_lazy,
+                    session->qdb,
+                    ev->file,
+                    symbol);
                 return 0;
             }
             catch (const std::exception&)
@@ -7996,7 +8285,7 @@ export namespace cg::cli
             // 行为）。日历合法性（2 月 30 日等不存在的日子）由
             // year_month_day.ok() 后验拒绝；尾随垃圾由流尾读拒绝；
             // 非零填充等非规范形态由还原比对拒绝。
-            std::tm parts{};
+            std::tm            parts{};
             std::istringstream in{std::string{iso}};
             in >> std::get_time(&parts, "%Y-%m-%dT%H:%M:%SZ");
             char trailing = '\0';
@@ -8006,10 +8295,8 @@ export namespace cg::cli
             }
             const std::chrono::year_month_day ymd{
                 std::chrono::year{parts.tm_year + 1900},
-                std::chrono::month{
-                    static_cast<unsigned>(parts.tm_mon + 1)},
-                std::chrono::day{
-                    static_cast<unsigned>(parts.tm_mday)}};
+                std::chrono::month{static_cast<unsigned>(parts.tm_mon + 1)},
+                std::chrono::day{static_cast<unsigned>(parts.tm_mday)}};
             if (!ymd.ok() || parts.tm_hour > 23 || parts.tm_min > 59
                 || parts.tm_sec > 59)
             {
@@ -8018,8 +8305,7 @@ export namespace cg::cli
             const std::chrono::sys_seconds indexed{
                 std::chrono::sys_days{ymd}
                 + std::chrono::seconds{
-                      parts.tm_hour * 3600 + parts.tm_min * 60
-                      + parts.tm_sec}};
+                    parts.tm_hour * 3600 + parts.tm_min * 60 + parts.tm_sec}};
             if (std::format("{:%Y-%m-%dT%H:%M:%SZ}", indexed) != iso)
             {
                 // 非零填充等非规范形态经还原比对拒绝：写入口径为
@@ -8235,6 +8521,13 @@ export namespace cg::cli
         /** @brief 注入文本的字节预算（规格 budget_bytes；降级梯的判定线）。 */
         inline constexpr std::size_t PTU_INJECTION_BUDGET = 1400;
 
+        /** @brief 注入文本是否已超预算（降级梯各档的公共判据）。 */
+        [[nodiscard]]
+        auto over_injection_budget(std::string_view text) -> bool
+        {
+            return text.size() > PTU_INJECTION_BUDGET;
+        }
+
         /** @brief 各查询阶段前给截止探针留的余量（毫秒）。 */
         inline constexpr auto PTU_QUERY_MARGIN = std::chrono::milliseconds{800};
 
@@ -8338,22 +8631,34 @@ export namespace cg::cli
             return text.substr(0, bytes);
         }
 
+        /** @brief 六类 ASCII 空白（空格/制表/换行/回车/换页/纵表）。 */
+        [[nodiscard]]
+        auto is_ascii_space(char c) -> bool
+        {
+            return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'
+                   || c == '\v';
+        }
+
+        /** @brief 整串是否全为 ASCII 空白（空串视为全空白）。 */
+        [[nodiscard]]
+        auto all_spaces(std::string_view s) -> bool
+        {
+            return std::ranges::all_of(
+                s,
+                [](char c) { return is_ascii_space(c); });
+        }
+
         /**
          * @brief 规格的 shorten：去首尾空白，超长截到 limit-1 码点再加省略号。
          */
         [[nodiscard]]
         auto shorten_cp(std::string_view text, std::size_t limit) -> std::string
         {
-            const auto spaces = [](char c)
-            {
-                return c == ' ' || c == '\t' || c == '\n' || c == '\r'
-                       || c == '\f' || c == '\v';
-            };
-            while (!text.empty() && spaces(text.front()))
+            while (!text.empty() && is_ascii_space(text.front()))
             {
                 text.remove_prefix(1);
             }
-            while (!text.empty() && spaces(text.back()))
+            while (!text.empty() && is_ascii_space(text.back()))
             {
                 text.remove_suffix(1);
             }
@@ -8694,9 +8999,7 @@ export namespace cg::cli
                 text += lines[i];
             }
             // 降级梯（正常事实不会触发；保留以兑现规格的预算承诺）。
-            const auto over = [&]
-            { return text.size() > PTU_INJECTION_BUDGET; };
-            if (over())
+            if (over_injection_budget(text))
             {
                 // 1) 全限定名换两段短名（全文替换）。
                 const std::string full =
@@ -8721,7 +9024,8 @@ export namespace cg::cli
                     text = std::move(replaced);
                 }
             }
-            while (over() && text.find(" (+") != std::string::npos)
+            while (over_injection_budget(text)
+                   && text.find(" (+") != std::string::npos)
             {
                 // 2) 删除首个 "(+N more)" 尾注（从 " (+" 到其后首个 ')'）。
                 const std::size_t cut = text.find(" (+");
@@ -8732,13 +9036,14 @@ export namespace cg::cli
                 }
                 text.erase(cut, end - cut + 1);
             }
-            while (over() && text.find(';') != std::string::npos)
+            while (over_injection_budget(text)
+                   && text.find(';') != std::string::npos)
             {
                 // 3) 最后一个 ';' 起截为 " …)"。
                 const std::size_t cut = text.rfind(';');
                 text = text.substr(0, cut) + " …)";
             }
-            if (over())
+            if (over_injection_budget(text))
             {
                 // 4) 字节硬截（不切断多字节序列）加截断标记。
                 constexpr std::size_t tail_room = 20;
@@ -8772,75 +9077,81 @@ export namespace cg::cli
         }
 
         /**
-         * @brief 候选清单渲染（多命中形态）。
+         * @brief 候选清单文本（多命中形态）。
          *
          * @internal 结构：
          * 首行 "matches N same-name symbols (no dominant one)"；候选行按 refs
          * 降序最多 5 个，尾注 " (+M more)" 挂在最后一个候选行上；末行教收敛
-         * 动作（限定名 / 路径过滤，示例名取头部候选的限定名）。预算沿用
-         * 1400B：超限时从尾部裁候选行
-         * （尾注计数随之增大），首行与末行永不裁。
+         * 动作（限定名 / 路径过滤，示例名取头部候选的限定名）。
+         */
+        [[nodiscard]]
+        auto build_candidate_list_text(
+            const CandidateListFacts& f,
+            std::size_t               count) -> std::string
+        {
+            std::vector<std::string> lines;
+            lines.push_back(
+                std::format(
+                    "[ccg] \"{}\" matches {} same-name symbols (no dominant one) "
+                    "— candidates by references:",
+                    f.name,
+                    f.entries.size()));
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                const InjectionListEntry& e = f.entries[i];
+                std::string               line = std::format(
+                    "[ccg] - {} — {}, {} refs @{}:{}",
+                    e.qualified,
+                    e.kind,
+                    e.refs,
+                    e.rel_file,
+                    e.line);
+                if (i + 1 == count && f.entries.size() > count)
+                {
+                    line +=
+                        std::format("  (+{} more)", f.entries.size() - count);
+                }
+                lines.push_back(std::move(line));
+            }
+            lines.push_back(
+                std::format(
+                    "[ccg] re-grep with a qualified name (e.g. {}) or a path "
+                    "filter to pin one symbol",
+                    f.entries.empty() ? f.name : f.entries.front().qualified));
+            // 一发全量提示：同名符号靠换 pattern 硬拼代价高，而 query
+            // 一条命令即得全表——此行只点名这条确定正确的命令。
+            lines.push_back(
+                std::format(
+                    "[ccg] full same-name list in one shot: ccg query {}",
+                    f.name));
+            std::string text;
+            for (std::size_t i = 0; i < lines.size(); ++i)
+            {
+                if (i > 0)
+                {
+                    text += "\n";
+                }
+                text += lines[i];
+            }
+            return text;
+        }
+
+        /**
+         * @brief 候选清单渲染（多命中形态）。
+         *
+         * @internal 预算沿用 1400B：超限时从尾部裁候选行（尾注计数随之
+         * 增大），首行与末行永不裁。
          */
         [[nodiscard]]
         auto render_candidate_list(const CandidateListFacts& f) -> std::string
         {
             const std::size_t shown_max = 5;
             std::size_t       shown = std::min(f.entries.size(), shown_max);
-            const auto        build = [&](std::size_t count)
-            {
-                std::vector<std::string> lines;
-                lines.push_back(
-                    std::format(
-                        "[ccg] \"{}\" matches {} same-name symbols (no dominant one) "
-                        "— candidates by references:",
-                        f.name,
-                        f.entries.size()));
-                for (std::size_t i = 0; i < count; ++i)
-                {
-                    const InjectionListEntry& e = f.entries[i];
-                    std::string               line = std::format(
-                        "[ccg] - {} — {}, {} refs @{}:{}",
-                        e.qualified,
-                        e.kind,
-                        e.refs,
-                        e.rel_file,
-                        e.line);
-                    if (i + 1 == count && f.entries.size() > count)
-                    {
-                        line += std::format(
-                            "  (+{} more)",
-                            f.entries.size() - count);
-                    }
-                    lines.push_back(std::move(line));
-                }
-                lines.push_back(
-                    std::format(
-                        "[ccg] re-grep with a qualified name (e.g. {}) or a path "
-                        "filter to pin one symbol",
-                        f.entries.empty() ? f.name
-                                          : f.entries.front().qualified));
-                // 一发全量提示：同名符号靠换 pattern 硬拼代价高，而 query
-                // 一条命令即得全表——此行只点名这条确定正确的命令。
-                lines.push_back(
-                    std::format(
-                        "[ccg] full same-name list in one shot: ccg query {}",
-                        f.name));
-                std::string text;
-                for (std::size_t i = 0; i < lines.size(); ++i)
-                {
-                    if (i > 0)
-                    {
-                        text += "\n";
-                    }
-                    text += lines[i];
-                }
-                return text;
-            };
-            std::string text = build(shown);
+            std::string       text = build_candidate_list_text(f, shown);
             while (text.size() > PTU_INJECTION_BUDGET && shown > 1)
             {
                 --shown;
-                text = build(shown);
+                text = build_candidate_list_text(f, shown);
             }
             return text;
         }
@@ -8871,6 +9182,87 @@ export namespace cg::cli
             std::string  rel_file;  ///< 展示相对路径（display_path 口径）
             int          line = 0;
         };
+
+        /** @brief term 在首见次序表中的位次。 */
+        [[nodiscard]]
+        auto term_rank_in(
+            const std::vector<std::string_view>& term_order,
+            std::string_view                     term) -> std::size_t
+        {
+            return static_cast<std::size_t>(
+                std::ranges::find(term_order, term) - term_order.begin());
+        }
+
+        /** @brief 多词条目排序：term 首见序优先，term 内 refs 降序，再
+         *        路径/行号升序。 */
+        [[nodiscard]]
+        auto multi_entry_before(
+            const std::vector<std::string_view>& term_order,
+            const MultiLookupEntry&              a,
+            const MultiLookupEntry&              b) -> bool
+        {
+            const std::size_t ra = term_rank_in(term_order, a.term);
+            const std::size_t rb = term_rank_in(term_order, b.term);
+            if (ra != rb)
+            {
+                return ra < rb;
+            }
+            if (a.refs != b.refs)
+            {
+                return a.refs > b.refs;
+            }
+            if (a.rel_file != b.rel_file)
+            {
+                return a.rel_file < b.rel_file;
+            }
+            return a.line < b.line;
+        }
+
+        /** @brief 按显示条数构建多词清单文本（首行模式披露 + 条目 + 收尾行）。
+         */
+        [[nodiscard]]
+        auto multi_lookup_text(
+            const std::vector<MultiLookupEntry>& sorted,
+            std::string_view                     pattern_disp,
+            std::string_view                     terms_note,
+            std::size_t                          count) -> std::string
+        {
+            std::vector<std::string> lines;
+            lines.push_back(
+                std::format(
+                    "[ccg] \"{}\" matched {} symbols across {} — candidates "
+                    "by references:",
+                    pattern_disp,
+                    sorted.size(),
+                    terms_note));
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                const MultiLookupEntry& e = sorted[i];
+                std::string             line = std::format(
+                    "[ccg] - {} — {}, {} refs @{}:{}",
+                    display_clip(e.qualified, 96),
+                    e.kind,
+                    e.refs,
+                    display_clip(e.rel_file, 64),
+                    e.line);
+                if (i + 1 == count && sorted.size() > count)
+                {
+                    line += std::format("  (+{} more)", sorted.size() - count);
+                }
+                lines.push_back(std::move(line));
+            }
+            lines.push_back("[ccg] re-grep with one term to pin its facts");
+            std::string text;
+            for (std::size_t i = 0; i < lines.size(); ++i)
+            {
+                if (i > 0)
+                {
+                    text += "\n";
+                }
+                text += lines[i];
+            }
+            return text;
+        }
 
         /**
          * @brief 多词候选清单渲染（交替分支 / 多 pattern / 正则多名共用）。
@@ -8904,78 +9296,20 @@ export namespace cg::cli
                     term_order.push_back(e.term);
                 }
             }
-            const auto term_rank = [&](std::string_view term)
-            {
-                return static_cast<std::size_t>(
-                    std::ranges::find(term_order, term) - term_order.begin());
-            };
             std::vector<MultiLookupEntry> sorted = entries;
             std::ranges::stable_sort(
                 sorted,
                 [&](const MultiLookupEntry& a, const MultiLookupEntry& b)
-                {
-                    const std::size_t ra = term_rank(a.term);
-                    const std::size_t rb = term_rank(b.term);
-                    if (ra != rb)
-                    {
-                        return ra < rb;
-                    }
-                    if (a.refs != b.refs)
-                    {
-                        return a.refs > b.refs;
-                    }
-                    if (a.rel_file != b.rel_file)
-                    {
-                        return a.rel_file < b.rel_file;
-                    }
-                    return a.line < b.line;
-                });
+                { return multi_entry_before(term_order, a, b); });
             const std::string pattern_disp = display_clip(display_pattern, 64);
-            const auto        build = [&](std::size_t count)
-            {
-                std::vector<std::string> lines;
-                lines.push_back(
-                    std::format(
-                        "[ccg] \"{}\" matched {} symbols across {} — candidates "
-                        "by references:",
-                        pattern_disp,
-                        sorted.size(),
-                        terms_note));
-                for (std::size_t i = 0; i < count; ++i)
-                {
-                    const MultiLookupEntry& e = sorted[i];
-                    std::string             line = std::format(
-                        "[ccg] - {} — {}, {} refs @{}:{}",
-                        display_clip(e.qualified, 96),
-                        e.kind,
-                        e.refs,
-                        display_clip(e.rel_file, 64),
-                        e.line);
-                    if (i + 1 == count && sorted.size() > count)
-                    {
-                        line +=
-                            std::format("  (+{} more)", sorted.size() - count);
-                    }
-                    lines.push_back(std::move(line));
-                }
-                lines.push_back("[ccg] re-grep with one term to pin its facts");
-                std::string text;
-                for (std::size_t i = 0; i < lines.size(); ++i)
-                {
-                    if (i > 0)
-                    {
-                        text += "\n";
-                    }
-                    text += lines[i];
-                }
-                return text;
-            };
             std::size_t shown = std::min(sorted.size(), PTU_LOOKUP_HITS_MAX);
-            std::string text = build(shown);
+            std::string text =
+                multi_lookup_text(sorted, pattern_disp, terms_note, shown);
             while (text.size() > PTU_INJECTION_BUDGET && shown > 1)
             {
                 --shown;
-                text = build(shown);
+                text =
+                    multi_lookup_text(sorted, pattern_disp, terms_note, shown);
             }
             if (text.size() > PTU_INJECTION_BUDGET)
             {
@@ -9083,6 +9417,21 @@ export namespace cg::cli
             std::vector<std::string> keys;
         };
 
+        /** @brief 从 JSON 对象视图取字符串字段的值（缺失/非字符串为空）。 */
+        [[nodiscard]]
+        auto string_field(const json::ValueView& entry, std::string_view key)
+            -> std::optional<std::string>
+        {
+            if (const auto v = entry.get(key); v.has_value() && v->is_string())
+            {
+                if (const auto s = v->as_string(); s.has_value())
+                {
+                    return std::string{*s};
+                }
+            }
+            return std::nullopt;
+        }
+
         /**
          * @brief 从配置目录的索引档案读编译数据库，收集其条目
          *        "directory" 字段并筛出可当生成物根的子集。
@@ -9149,21 +9498,9 @@ export namespace cg::cli
                     {
                         continue;
                     }
-                    const json::ValueView entry = *entry_view;
-                    const auto            field = [&entry](std::string_view key)
-                        -> std::optional<std::string>
-                    {
-                        if (const auto v = entry.get(key);
-                            v.has_value() && v->is_string())
-                        {
-                            if (const auto s = v->as_string(); s.has_value())
-                            {
-                                return std::string{*s};
-                            }
-                        }
-                        return std::nullopt;
-                    };
-                    const std::optional<std::string> dir = field("directory");
+                    const json::ValueView            entry = *entry_view;
+                    const std::optional<std::string> dir =
+                        string_field(entry, "directory");
                     if (!dir.has_value() || dir->empty())
                     {
                         continue;
@@ -9188,7 +9525,8 @@ export namespace cg::cli
                     {
                         dir_keys.push_back(dir_key);
                     }
-                    const std::optional<std::string> file = field("file");
+                    const std::optional<std::string> file =
+                        string_field(entry, "file");
                     if (!file.has_value() || file->empty())
                     {
                         continue;
@@ -9268,6 +9606,36 @@ export namespace cg::cli
             return cg::db::is_callable(kind);
         }
 
+        /** @brief 查找模式首尾剥除口径的空白（空格/制表/换行/回车）。 */
+        [[nodiscard]]
+        auto is_pattern_space(char c) -> bool
+        {
+            return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+        }
+
+        /**
+         * @brief 整段是否为纯标识符（字母/下划线起头，余为字母数字或
+         *        下划线）。
+         */
+        [[nodiscard]]
+        auto is_identifier(std::string_view seg) -> bool
+        {
+            if (seg.empty()
+                || !(
+                    std::isalpha(static_cast<unsigned char>(seg[0]))
+                    || seg[0] == '_'))
+            {
+                return false;
+            }
+            return std::ranges::all_of(
+                seg.substr(1),
+                [](char c)
+                {
+                    return std::isalnum(static_cast<unsigned char>(c))
+                           || c == '_';
+                });
+        }
+
         /**
          * @brief 把 Grep 的正则意图剥回标识符链（A::b 形态），剥不动则放弃。
          *
@@ -9281,13 +9649,11 @@ export namespace cg::cli
         auto grep_pattern_identifier(std::string_view pattern) -> std::string
         {
             std::string s{pattern};
-            const auto  spaces = [](char c)
-            { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
-            while (!s.empty() && spaces(s.front()))
+            while (!s.empty() && is_pattern_space(s.front()))
             {
                 s.erase(s.begin());
             }
-            while (!s.empty() && spaces(s.back()))
+            while (!s.empty() && is_pattern_space(s.back()))
             {
                 s.pop_back();
             }
@@ -9338,23 +9704,6 @@ export namespace cg::cli
                     break;
                 }
             }
-            const auto ident = [](std::string_view seg)
-            {
-                if (seg.empty()
-                    || !(
-                        std::isalpha(static_cast<unsigned char>(seg[0]))
-                        || seg[0] == '_'))
-                {
-                    return false;
-                }
-                return std::ranges::all_of(
-                    seg.substr(1),
-                    [](char c)
-                    {
-                        return std::isalnum(static_cast<unsigned char>(c))
-                               || c == '_';
-                    });
-            };
             std::size_t start = 0;
             bool        ok = !s.empty();
             while (ok)
@@ -9364,7 +9713,7 @@ export namespace cg::cli
                     at == std::string::npos
                         ? std::string_view{s}.substr(start)
                         : std::string_view{s}.substr(start, at - start);
-                if (!ident(seg))
+                if (!is_identifier(seg))
                 {
                     ok = false;
                     break;
@@ -9393,15 +9742,10 @@ export namespace cg::cli
         auto split_top_alternation(std::string_view pattern)
             -> std::vector<std::string>
         {
-            const auto blank = [](char c)
-            {
-                return c == ' ' || c == '\t' || c == '\n' || c == '\r'
-                       || c == '\f' || c == '\v';
-            };
             bool all_blank = true;
             for (const char c : pattern)
             {
-                if (!blank(c))
+                if (!is_ascii_space(c))
                 {
                     all_blank = false;
                     break;
@@ -9459,7 +9803,7 @@ export namespace cg::cli
                 bool only_blank = true;
                 for (const char c : b)
                 {
-                    if (!blank(c))
+                    if (!is_ascii_space(c))
                     {
                         only_blank = false;
                         break;
@@ -9475,6 +9819,13 @@ export namespace cg::cli
                 return {};
             }
             return branches;
+        }
+
+        /** @brief 正则量词的起始字符（* + ? {）。 */
+        [[nodiscard]]
+        auto is_quantifier_start(char c) -> bool
+        {
+            return c == '*' || c == '+' || c == '?' || c == '{';
         }
 
         /**
@@ -9501,16 +9852,11 @@ export namespace cg::cli
             }
             // 纯装饰拒：剥锚点与空白后无实质内容（空正则、^$、^^^ 类），
             // 不为其白付一次开库与全表扫描。
-            const auto is_space = [](char c)
-            {
-                return c == ' ' || c == '\t' || c == '\n' || c == '\r'
-                       || c == '\f' || c == '\v';
-            };
             bool has_content = false;
             for (std::size_t i = 0; i < pattern.size() && !has_content; ++i)
             {
                 const char c = pattern[i];
-                if (is_space(c) || c == '^' || c == '$')
+                if (is_ascii_space(c) || c == '^' || c == '$')
                 {
                     continue;
                 }
@@ -9526,16 +9872,14 @@ export namespace cg::cli
             {
                 return false;
             }
-            const auto quantifier_start = [](char c)
-            { return c == '*' || c == '+' || c == '?' || c == '{'; };
             for (std::size_t i = 0; i < pattern.size(); ++i)
             {
                 const char c = pattern[i];
-                if (quantifier_start(c))
+                if (is_quantifier_start(c))
                 {
                     // 第一道：相邻量词（a**、a*+、a+?、a?{2} …）。
                     if (i + 1 < pattern.size()
-                        && quantifier_start(pattern[i + 1]))
+                        && is_quantifier_start(pattern[i + 1]))
                     {
                         return false;
                     }
@@ -9543,7 +9887,7 @@ export namespace cg::cli
                 // 第二道（含"量词修饰含量词分组"细分口径的全集）：`)` 后
                 // 紧跟量词起始字符的一切组合。
                 if (c == ')' && i + 1 < pattern.size()
-                    && quantifier_start(pattern[i + 1]))
+                    && is_quantifier_start(pattern[i + 1]))
                 {
                     return false;
                 }
@@ -9578,22 +9922,10 @@ export namespace cg::cli
         auto classify_lookup_patterns(const std::vector<std::string>& patterns)
             -> std::optional<LookupBranchIntent>
         {
-            const auto blank = [](std::string_view s)
-            {
-                for (const char c : s)
-                {
-                    if (!(c == ' ' || c == '\t' || c == '\n' || c == '\r'
-                          || c == '\f' || c == '\v'))
-                    {
-                        return false;
-                    }
-                }
-                return true;
-            };
             if (patterns.empty()
                 || std::ranges::all_of(
                     patterns,
-                    [&](const std::string& p) { return blank(p); }))
+                    [](const std::string& p) { return all_spaces(p); }))
             {
                 return std::nullopt;
             }
@@ -9722,6 +10054,38 @@ export namespace cg::cli
             return f;
         }
 
+        /** @brief 一个调用站点（展示相对路径、行号与该站出现次数）。 */
+        struct CallerSite
+        {
+            std::string  rel_file;
+            int          line = 0;
+            std::int64_t occ = 0;
+        };
+
+        /** @brief 同一调用者的原始边聚合（站点先截前 12 个，再按 occ 降序）。
+         */
+        struct CallerAgg
+        {
+            cg::db::SymId           id = 0;
+            std::int64_t            occ = 0;
+            std::vector<CallerSite> sites;
+        };
+
+        /** @brief 取 id 对应的聚合项；没有则追加一项并返回它。 */
+        auto caller_agg_of(std::vector<CallerAgg>& agg, cg::db::SymId id)
+            -> CallerAgg&
+        {
+            for (CallerAgg& a : agg)
+            {
+                if (a.id == id)
+                {
+                    return a;
+                }
+            }
+            agg.push_back(CallerAgg{id, 0, {}});
+            return agg.back();
+        }
+
         /**
          * @brief 收集目标的渲染事实（只读查库；处处受截止探针约束）。
          *
@@ -9835,35 +10199,11 @@ export namespace cg::cli
 
             // 调用者：calls + virtual_dispatch 原始边按 edge_id 升序聚合（并列
             // occ 的次序与"先见到者先列"的口径一致），站点按 occ 降序取首。
-            struct CallerSite
-            {
-                std::string  rel_file;
-                int          line = 0;
-                std::int64_t occ = 0;
-            };
-            struct CallerAgg
-            {
-                cg::db::SymId           id = 0;
-                std::int64_t            occ = 0;
-                std::vector<CallerSite> sites; // 先截前 12 个，再按 occ 降序
-            };
             std::vector<CallerAgg> agg;
-            const auto             agg_of = [&](cg::db::SymId id) -> CallerAgg&
-            {
-                for (CallerAgg& a : agg)
-                {
-                    if (a.id == id)
-                    {
-                        return a;
-                    }
-                }
-                agg.push_back(CallerAgg{id, 0, {}});
-                return agg.back();
-            };
             for (const cg::db::EdgeRow& e :
                  cg::db::caller_edge_rows(store, target.id))
             {
-                CallerAgg& a = agg_of(e.src);
+                CallerAgg& a = caller_agg_of(agg, e.src);
                 a.occ += e.occurrences;
                 if (a.sites.size() < 12)
                 {
@@ -10214,6 +10554,32 @@ export namespace cg::cli
          *           时的宁漏整集兜底）；多词并查与正则路径复用同一装载口
          *           径，保证四臂同名集合逐字节同源。
          */
+        /** @brief 按裸名拉同名候选的轻量投影（七字段、不做限定名）。 */
+        [[nodiscard]]
+        auto briefs_by_name(cg::db::GraphStore& store, const std::string& name)
+            -> std::vector<PreToolUseBrief>
+        {
+            std::vector<PreToolUseBrief> out;
+            for (const cg::db::SymbolBrief& brief : cg::db::symbol_briefs(
+                     store,
+                     cg::db::symbol_ids_by_name(store, name)))
+            {
+                if (brief.name != name)
+                {
+                    continue;
+                }
+                PreToolUseBrief b;
+                b.id = brief.id;
+                b.kind = brief.kind;
+                b.unique_key = brief.unique_key;
+                b.name = brief.name;
+                b.file = brief.file;
+                b.line = brief.line;
+                out.push_back(std::move(b));
+            }
+            return out;
+        }
+
         [[nodiscard]]
         auto load_briefs_for_ident(
             cg::db::GraphStore& store,
@@ -10224,32 +10590,10 @@ export namespace cg::cli
                 sep == std::string::npos ? ident : ident.substr(sep + 2);
             const std::string chain =
                 sep == std::string::npos ? std::string{} : ident.substr(0, sep);
-            const auto load = [&]()
-            {
-                // 批量轻量投影一次拉齐（七字段、不做限定名）。
-                std::vector<PreToolUseBrief> out;
-                for (const cg::db::SymbolBrief& brief : cg::db::symbol_briefs(
-                         store,
-                         cg::db::symbol_ids_by_name(store, name)))
-                {
-                    if (brief.name != name)
-                    {
-                        continue;
-                    }
-                    PreToolUseBrief b;
-                    b.id = brief.id;
-                    b.kind = brief.kind;
-                    b.unique_key = brief.unique_key;
-                    b.name = brief.name;
-                    b.file = brief.file;
-                    b.line = brief.line;
-                    out.push_back(std::move(b));
-                }
-                return out;
-            };
             // 链过滤在内存副本上做；筛空退回用全集重试，不回数据库重查。
-            const std::vector<PreToolUseBrief> all = load();
-            std::vector<PreToolUseBrief>       briefs = all;
+            const std::vector<PreToolUseBrief> all =
+                briefs_by_name(store, name);
+            std::vector<PreToolUseBrief> briefs = all;
             if (!chain.empty())
             {
                 std::erase_if(
@@ -10287,17 +10631,15 @@ export namespace cg::cli
             {
                 return;
             }
-            const auto norm_lower = [](std::string s)
-            { return norm_path_filter(std::move(s)); };
-            const std::string f = norm_lower(path_filter);
+            const std::string f = norm_path_filter(path_filter);
             const bool        abs_filter =
                 f.find(':') != std::string::npos || f.starts_with("/");
             std::erase_if(
                 briefs,
                 [&](const PreToolUseBrief& b)
                 {
-                    const std::string cmp =
-                        norm_lower(abs_filter ? b.file : display_path(b.file));
+                    const std::string cmp = norm_path_filter(
+                        abs_filter ? b.file : display_path(b.file));
                     return !(
                         cmp == f || cmp.starts_with(f + "/")
                         || cmp.ends_with("/" + f));

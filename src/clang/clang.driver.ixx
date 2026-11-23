@@ -885,6 +885,21 @@ export namespace cg::clang
             return {};
         }
 
+        /** @brief CMakeCache 行若以 key 为前缀则返回 '=' 之后的值段。 */
+        [[nodiscard]]
+        auto cmake_cache_value_after(
+            const std::string& line,
+            std::string_view   key) -> std::string
+        {
+            if (!line.starts_with(key))
+            {
+                return {};
+            }
+            const std::size_t eq = line.find('=');
+            return eq == std::string::npos ? std::string{}
+                                           : line.substr(eq + 1);
+        }
+
         /**
          * @brief 从 cdb 目录的 CMakeCache.txt 读目标 Windows SDK 版本。
          *
@@ -916,24 +931,15 @@ export namespace cg::clang
                 {
                     line.pop_back();
                 }
-                const auto value_after =
-                    [&line](std::string_view key) -> std::string
-                {
-                    if (!line.starts_with(key))
-                    {
-                        return {};
-                    }
-                    const std::size_t eq = line.find('=');
-                    return eq == std::string::npos ? std::string{}
-                                                   : line.substr(eq + 1);
-                };
-                if (std::string v = value_after(
+                if (std::string v = cmake_cache_value_after(
+                        line,
                         "CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION:");
                     !v.empty())
                 {
                     return v;
                 }
-                if (std::string v = value_after("CMAKE_SYSTEM_VERSION:");
+                if (std::string v =
+                        cmake_cache_value_after(line, "CMAKE_SYSTEM_VERSION:");
                     !v.empty())
                 {
                     fallback = std::move(v);
@@ -943,13 +949,97 @@ export namespace cg::clang
         }
 
         /**
+         * @brief 写出并运行一次 vcvars 探询脚本，捕获其 stdout。
+         *
+         * 脚本经唯一临时 .cmd 调用（cmd.exe 对引号的解析规则与 CRT argv
+         * 不同，直接把带空格路径塞进 /c 会碎）。
+         */
+        [[nodiscard]]
+        auto run_vcvars_probe(
+            const std::string&           vcvars_native,
+            const std::filesystem::path& tmp,
+            const std::string&           vcvars_ver) -> ProcResult
+        {
+            std::string script = "@echo off\r\ncall \"";
+            script += vcvars_native;
+            script += "\" -vcvars_ver=";
+            script += vcvars_ver;
+            script +=
+                " >nul 2>&1\r\nif errorlevel 1 exit /b 1\r\nset INCLUDE\r\n";
+            {
+                std::ofstream file{tmp, std::ios::binary | std::ios::trunc};
+                if (!file)
+                {
+                    return {};
+                }
+                file << script;
+            }
+            return run_process(
+                L"cmd.exe",
+                {L"/d", L"/s", L"/c", to_wide(tmp.generic_string())},
+                {},
+                std::chrono::milliseconds{10'000});
+        }
+
+        /**
+         * @brief 用某个 -vcvars_ver 试捕获 INCLUDE 并做三项校验。
+         *
+         * @return 成功携带 INCLUDE 行；失败携带人读缘由。
+         */
+        [[nodiscard]]
+        auto try_vcvars_version(
+            const std::string&           vcvars_native,
+            const std::filesystem::path& tmp,
+            const std::string&           want_sdk,
+            const std::string& ver) -> std::expected<std::string, std::string>
+        {
+            const ProcResult r = run_vcvars_probe(vcvars_native, tmp, ver);
+            if (!r.started || r.exit_code != 0)
+            {
+                return std::unexpected(
+                    std::format(
+                        "vcvars start={} rc={} out={} err={}",
+                        static_cast<int>(r.started),
+                        r.exit_code,
+                        r.out.size(),
+                        r.err.size()));
+            }
+            std::string include = parse_include_line(r.out);
+            if (include.empty())
+            {
+                return std::unexpected(
+                    std::format(
+                        "vcvars rc=0 but no INCLUDE line (out={})",
+                        r.out.size()));
+            }
+            // vcvars 对未知 -vcvars_ver 会静默只给 SDK 目录（rc=0）：必须
+            // 确认请求的工具集 include 真的在集合里，否则宁可降级。
+            const std::string lower =
+                cg::util::ascii_lower(cg::util::to_forward_slashes(include));
+            const std::string want =
+                "/vc/tools/msvc/" + cg::util::ascii_lower(ver);
+            if (lower.find(want) == std::string::npos)
+            {
+                return std::unexpected(
+                    std::string{"vcvars did not select the requested toolset"});
+            }
+            // CMakeCache 的目标 SDK 校验：vcvars 不能可靠地钉 SDK，版本
+            // 不符时宁可不假装精确。
+            if (!want_sdk.empty() && lower.find(want_sdk) == std::string::npos)
+            {
+                return std::unexpected(
+                    std::format("vcvars SDK mismatch (wanted {})", want_sdk));
+            }
+            return include;
+        }
+
+        /**
          * @brief 用 vcvars 子进程复现某个工具集版本的 INCLUDE 环境。
          *
          * 先按 cl 路径推出的 VS 根找 `VC\Auxiliary\Build\vcvars*.bat`；找不到
-         * 时用 vswhere 定位安装根。脚本经唯一临时 .cmd 调用（cmd.exe 对引号
-         * 的解析规则与 CRT argv 不同，直接把带空格路径塞进 /c 会碎）。
-         * `-vcvars_ver` 先试完整版本，失败再试 `14.minor`（部分 vcvars 版本
-         * 只接受两段）。每个（版本, 架构）只做一次并缓存。
+         * 时用 vswhere 定位安装根。`-vcvars_ver` 先试完整版本，失败再试
+         * `14.minor`（部分 vcvars 版本只接受两段）。每个（版本, 架构）只
+         * 做一次并缓存。
          */
         [[nodiscard]]
         auto capture_msvc_include_once(
@@ -1003,76 +1093,7 @@ export namespace cg::clang
                     c = '\\';
                 }
             }
-            const auto invoke = [&](const std::string& vcvars_ver) -> ProcResult
-            {
-                std::string script = "@echo off\r\ncall \"";
-                script += vcvars_native;
-                script += "\" -vcvars_ver=";
-                script += vcvars_ver;
-                script +=
-                    " >nul 2>&1\r\nif errorlevel 1 exit /b 1\r\nset INCLUDE\r\n";
-                {
-                    std::ofstream file{tmp, std::ios::binary | std::ios::trunc};
-                    if (!file)
-                    {
-                        return {};
-                    }
-                    file << script;
-                }
-                return run_process(
-                    L"cmd.exe",
-                    {L"/d", L"/s", L"/c", to_wide(tmp.generic_string())},
-                    {},
-                    std::chrono::milliseconds{10'000});
-            };
             std::string last_reason;
-            auto        try_version = [&](const std::string& ver) -> bool
-            {
-                const ProcResult r = invoke(ver);
-                if (!r.started || r.exit_code != 0)
-                {
-                    last_reason = std::format(
-                        "vcvars start={} rc={} out={} err={}",
-                        static_cast<int>(r.started),
-                        r.exit_code,
-                        r.out.size(),
-                        r.err.size());
-                    return false;
-                }
-                std::string include = parse_include_line(r.out);
-                if (include.empty())
-                {
-                    last_reason = std::format(
-                        "vcvars rc=0 but no INCLUDE line (out={})",
-                        r.out.size());
-                    return false;
-                }
-                // vcvars 对未知 -vcvars_ver 会静默只给 SDK 目录（rc=0）：必须
-                // 确认请求的工具集 include 真的在集合里，否则宁可降级。
-                const std::string lower = cg::util::ascii_lower(
-                    cg::util::to_forward_slashes(include));
-                const std::string want =
-                    "/vc/tools/msvc/" + cg::util::ascii_lower(ver);
-                if (lower.find(want) == std::string::npos)
-                {
-                    last_reason = "vcvars did not select the requested toolset";
-                    return false;
-                }
-                // CMakeCache 的目标 SDK 校验：vcvars 不能可靠地钉 SDK，版本
-                // 不符时宁可不假装精确。
-                if (!want_sdk.empty()
-                    && lower.find(want_sdk) == std::string::npos)
-                {
-                    last_reason = std::format(
-                        "vcvars SDK mismatch (wanted {})",
-                        want_sdk);
-                    return false;
-                }
-                out.ok = true;
-                out.include_env = std::move(include);
-                out.reason.clear();
-                return true;
-            };
             // 14.44.35207 -> 先完整，再 14.44。
             const std::vector<std::string> candidates = [&]
             {
@@ -1091,10 +1112,16 @@ export namespace cg::clang
             }();
             for (const std::string& ver : candidates)
             {
-                if (try_version(ver))
+                std::expected<std::string, std::string> include =
+                    try_vcvars_version(vcvars_native, tmp, want_sdk, ver);
+                if (include.has_value())
                 {
+                    out.ok = true;
+                    out.include_env = std::move(*include);
+                    out.reason.clear();
                     break;
                 }
+                last_reason = std::move(include.error());
             }
             fs::remove(tmp, ec);
             if (!out.ok)

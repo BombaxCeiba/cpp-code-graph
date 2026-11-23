@@ -10,6 +10,7 @@ module;
 #else
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -1068,6 +1069,52 @@ export namespace cg::util::platform
             const std::filesystem::path&,
             std::string_view,
             std::int64_t) -> FileLock;
+
+        /// 原子创建锁文件并写入持有者三行内容（O_EXCL / CREATE_NEW：
+        /// 并发争抢恰有一个赢家）；已存在时返回 false 且本对象不变。
+        bool create_exclusive(
+            const std::filesystem::path& lock_path,
+            const std::string&           content)
+        {
+#if defined(_WIN32)
+            const std::wstring native = detail::extended_win_path(lock_path);
+            const HANDLE       handle = CreateFileW(
+                native.c_str(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                nullptr,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                nullptr);
+            if (handle == INVALID_HANDLE_VALUE)
+            {
+                return false;
+            }
+            DWORD written = 0;
+            (void)WriteFile(
+                handle,
+                content.data(),
+                static_cast<DWORD>(content.size()),
+                &written,
+                nullptr);
+            handle_ = handle;
+#else
+            const int fd = ::open(
+                lock_path.native().c_str(),
+                O_CREAT | O_EXCL | O_WRONLY,
+                0600);
+            if (fd < 0)
+            {
+                return false;
+            }
+            (void)::write(fd, content.data(), content.size());
+            fd_ = fd;
+#endif
+            path_ = lock_path;
+            held_ = true;
+            return true;
+        }
+
         std::filesystem::path path_;
         bool                  held_ = false;
 #if defined(_WIN32)
@@ -1103,49 +1150,9 @@ export namespace cg::util::platform
             current_pid(),
             cg::util::cstd::epoch_ms(),
             token);
-        const auto create = [&](FileLock& lock) -> bool
-        {
-#if defined(_WIN32)
-            const std::wstring native = detail::extended_win_path(lock_path);
-            const HANDLE       handle = CreateFileW(
-                native.c_str(),
-                GENERIC_READ | GENERIC_WRITE,
-                0,
-                nullptr,
-                CREATE_NEW,
-                FILE_ATTRIBUTE_NORMAL,
-                nullptr);
-            if (handle == INVALID_HANDLE_VALUE)
-            {
-                return false;
-            }
-            DWORD written = 0;
-            (void)WriteFile(
-                handle,
-                content.data(),
-                static_cast<DWORD>(content.size()),
-                &written,
-                nullptr);
-            lock.handle_ = handle;
-#else
-            const int fd = ::open(
-                lock_path.native().c_str(),
-                O_CREAT | O_EXCL | O_WRONLY,
-                0600);
-            if (fd < 0)
-            {
-                return false;
-            }
-            (void)::write(fd, content.data(), content.size());
-            lock.fd_ = fd;
-#endif
-            lock.path_ = lock_path;
-            lock.held_ = true;
-            return true;
-        };
 
         FileLock lock;
-        if (create(lock))
+        if (lock.create_exclusive(lock_path, content))
         {
             return lock;
         }
@@ -1236,7 +1243,7 @@ export namespace cg::util::platform
 #else
         (void)::unlink(lock_path.native().c_str());
 #endif
-        (void)create(lock);
+        (void)lock.create_exclusive(lock_path, content);
         return lock;
     }
 
@@ -1606,6 +1613,14 @@ export namespace cg::util::platform
         return out;
     }
 
+    /// capture_exec 的产出：out 为捕获到的 stdout 字节，exit_code 为
+    /// 子进程状态（平台无法表达时为 -1）。
+    struct CaptureExecOut
+    {
+        std::string out;
+        int         exit_code = -1;
+    };
+
     /**
      * @brief 以直接子进程运行 exe（args 为 UTF-8），只捕获 STDOUT。
      *
@@ -1613,8 +1628,8 @@ export namespace cg::util::platform
      * 上：ccg 的机器模式在 stdout 上恰打印一行 JSON，调用方消费的仅此
      * 而已。
      *
-     * @return 进程无法孵化时返回 false；否则 out 持捕获到的字节、
-     *         exit_code 持子进程状态（平台无法表达时为 -1）。
+     * @return 进程无法孵化时返回 nullopt；否则持捕获到的字节与子进程
+     *         状态（平台无法表达时 exit_code 为 -1）。
      *
      * @internal
      * 参数不得内嵌引号或 NUL（调用方早在到达这里之前就会拒绝）。Windows
@@ -1623,12 +1638,8 @@ export namespace cg::util::platform
     [[nodiscard]]
     inline auto capture_exec(
         const std::filesystem::path&    exe,
-        const std::vector<std::string>& args,
-        std::string&                    out,
-        int&                            exit_code) -> bool
+        const std::vector<std::string>& args) -> std::optional<CaptureExecOut>
     {
-        out.clear();
-        exit_code = -1;
 #if defined(_WIN32)
         std::wstring cmdline = quote_for_command_line(exe.wstring());
         for (const std::string& arg : args)
@@ -1644,9 +1655,10 @@ export namespace cg::util::platform
         HANDLE write_end = nullptr;
         if (!CreatePipe(&read_end, &write_end, &inheritable, 0))
         {
-            return false;
+            return std::nullopt;
         }
-        STARTUPINFOW si{};
+        CaptureExecOut captured;
+        STARTUPINFOW   si{};
         si.cb = sizeof(si);
         si.dwFlags = STARTF_USESTDHANDLES;
         si.hStdOutput = write_end;
@@ -1720,21 +1732,21 @@ export namespace cg::util::platform
             {
                 CloseHandle(null_error);
             }
-            return false;
+            return std::nullopt;
         }
         char  buffer[4096];
         DWORD got = 0;
         while (ReadFile(read_end, buffer, sizeof(buffer), &got, nullptr)
                && got != 0)
         {
-            out.append(buffer, got);
+            captured.out.append(buffer, got);
         }
         CloseHandle(read_end);
         WaitForSingleObject(pi.hProcess, INFINITE);
         DWORD code = 0;
         if (GetExitCodeProcess(pi.hProcess, &code))
         {
-            exit_code = static_cast<int>(code);
+            captured.exit_code = static_cast<int>(code);
         }
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
@@ -1746,12 +1758,13 @@ export namespace cg::util::platform
         {
             CloseHandle(null_error);
         }
-        return true;
+        return captured;
 #else
-        int fds[2];
+        CaptureExecOut captured;
+        int            fds[2];
         if (::pipe(fds) != 0)
         {
-            return false;
+            return std::nullopt;
         }
         const std::string        exe_native = exe.native();
         std::vector<std::string> storage;
@@ -1781,22 +1794,22 @@ export namespace cg::util::platform
         {
             ::close(fds[0]);
             ::close(fds[1]);
-            return false;
+            return std::nullopt;
         }
         ::close(fds[1]);
         char    buffer[4096];
         ssize_t got = 0;
         while ((got = ::read(fds[0], buffer, sizeof(buffer))) > 0)
         {
-            out.append(buffer, static_cast<std::size_t>(got));
+            captured.out.append(buffer, static_cast<std::size_t>(got));
         }
         ::close(fds[0]);
         int status = 0;
         if (::waitpid(pid, &status, 0) == pid && WIFEXITED(status))
         {
-            exit_code = WEXITSTATUS(status);
+            captured.exit_code = WEXITSTATUS(status);
         }
-        return true;
+        return captured;
 #endif
     }
 
@@ -1853,26 +1866,15 @@ export namespace cg::util::platform
      * 终端，并关闭 3 号以上全部 fd（宿主的管道写端不得被后台子进程持
      * 有）；父进程用 waitpid(WNOHANG) 轮询，不 kill、超时后不再 wait。
      */
-    [[nodiscard]]
-    inline auto capture_exec_timed(
-        const std::filesystem::path&    exe,
-        const std::vector<std::string>& args,
-        std::chrono::milliseconds       timeout) -> TimedExecResult
+    namespace detail
     {
-        TimedExecResult result;
-#if defined(_WIN32)
-        std::wstring cmdline = quote_for_command_line(exe.wstring());
-        for (const std::string& arg : args)
-        {
-            cmdline += L" ";
-            cmdline += quote_for_command_line(widen_utf8(arg));
-        }
 
-        SECURITY_ATTRIBUTES inheritable{
-            sizeof(SECURITY_ATTRIBUTES),
-            nullptr,
-            TRUE};
-        const auto make_temp = [&inheritable]() -> HANDLE
+#if defined(_WIN32)
+
+        /// 重定向用的临时文件（DELETE_ON_CLOSE、句柄可继承）；失败
+        /// 返回 INVALID_HANDLE_VALUE。
+        [[nodiscard]]
+        auto make_temp_capture_file(SECURITY_ATTRIBUTES& inheritable) -> HANDLE
         {
             std::error_code             ec;
             const std::filesystem::path dir =
@@ -1899,135 +1901,11 @@ export namespace cg::util::platform
                 DeleteFileW(name);
             }
             return handle;
-        };
-        const HANDLE out_file = make_temp();
-        const HANDLE err_file = make_temp();
-        const HANDLE dev_null = CreateFileW(
-            L"NUL",
-            GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            &inheritable,
-            OPEN_EXISTING,
-            0,
-            nullptr);
-        if (out_file == INVALID_HANDLE_VALUE || err_file == INVALID_HANDLE_VALUE
-            || dev_null == INVALID_HANDLE_VALUE)
-        {
-            if (out_file != INVALID_HANDLE_VALUE)
-            {
-                CloseHandle(out_file);
-            }
-            if (err_file != INVALID_HANDLE_VALUE)
-            {
-                CloseHandle(err_file);
-            }
-            if (dev_null != INVALID_HANDLE_VALUE)
-            {
-                CloseHandle(dev_null);
-            }
-            return result;
         }
 
-        // 句柄白名单：bInheritHandles=TRUE 让子进程拿到重定向句柄，但没有
-        // PROC_THREAD_ATTRIBUTE_HANDLE_LIST 时它同时继承宿主的 stdout/
-        // stderr 管道（以及任何其它可继承句柄）。hook 退出后宿主读管道要
-        // 等后台 update 结束才见 EOF。白名单把可继承集收窄到这三个文件。
-        STARTUPINFOEXW si{};
-        si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-        si.StartupInfo.hStdOutput = out_file;
-        si.StartupInfo.hStdError = err_file;
-        si.StartupInfo.hStdInput = dev_null;
-        LPPROC_THREAD_ATTRIBUTE_LIST attributes = nullptr;
-        bool                         listed = false;
-        // lpValue 必须存活到 DeleteProcThreadAttributeList（属性列表只保存
-        // 指针而非拷贝），故句柄数组放在函数作用域而不是属性初始化块内。
-        HANDLE inherited_handles[] = {out_file, err_file, dev_null};
-        {
-            SIZE_T bytes = 0;
-            // 首射只取所需缓冲区大小（文档化的 ERROR_INSUFFICIENT_BUFFER
-            // 探测）；属性列表的内存在 CreateProcess 返回前必须保持有效。
-            (void)InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
-            if (bytes > 0)
-            {
-                attributes = static_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(
-                    std::malloc(bytes));
-            }
-            if (attributes != nullptr
-                && InitializeProcThreadAttributeList(attributes, 1, 0, &bytes))
-            {
-                listed = UpdateProcThreadAttribute(
-                             attributes,
-                             0,
-                             PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-                             inherited_handles,
-                             sizeof(inherited_handles),
-                             nullptr,
-                             nullptr)
-                         != 0;
-                if (!listed)
-                {
-                    DeleteProcThreadAttributeList(attributes);
-                }
-            }
-        }
-        // 属性列表必须挂到 STARTUPINFOEXW::lpAttributeList 上，否则
-        // CreateProcess 根本看不到白名单（只初始化不挂接 = 白名单静默失效，
-        // 全继承语义照旧）。未列为扩展时保持 STARTUPINFOW 的旧 ABI（cb 与
-        // 创建旗标必须一致）。
-        si.lpAttributeList = listed ? attributes : nullptr;
-        si.StartupInfo.cb =
-            listed ? sizeof(STARTUPINFOEXW) : sizeof(STARTUPINFOW);
-        const DWORD extended = listed ? EXTENDED_STARTUPINFO_PRESENT : 0;
-        PROCESS_INFORMATION pi{};
-        const DWORD detached = CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS;
-        BOOL        spawned = CreateProcessW(
-            nullptr,
-            cmdline.data(),
-            nullptr,
-            nullptr,
-            TRUE,
-            detached | extended,
-            nullptr,
-            nullptr,
-            &si.StartupInfo,
-            &pi);
-        if (!spawned)
-        {
-            // job 不允许 breakaway，或平台拒绝 DETACHED_PROCESS 组合：退回
-            // 无窗口但仍在 job 内的普通派生（父进程正常退出时子进程通常
-            // 仍然存活；只有 kill-on-close 的 job 会连带杀死它）。
-            spawned = CreateProcessW(
-                nullptr,
-                cmdline.data(),
-                nullptr,
-                nullptr,
-                TRUE,
-                CREATE_NO_WINDOW | extended,
-                nullptr,
-                nullptr,
-                &si.StartupInfo,
-                &pi);
-        }
-        if (listed)
-        {
-            DeleteProcThreadAttributeList(attributes);
-        }
-        std::free(attributes);
-        result.restricted_handles = listed;
-        CloseHandle(dev_null);
-        if (!spawned)
-        {
-            CloseHandle(out_file);
-            CloseHandle(err_file);
-            return result;
-        }
-        result.started = true;
-
-        const DWORD wait_ms = static_cast<DWORD>(std::min<std::int64_t>(
-            timeout.count(),
-            static_cast<std::int64_t>(0xFFFFFFFFLL)));
-        const DWORD waited = WaitForSingleObject(pi.hProcess, wait_ms);
-        const auto  read_back = [](HANDLE handle, std::string& sink)
+        /// 回读临时文件全部内容（读前复位于文件头；定位失败返回空串）。
+        [[nodiscard]]
+        std::string read_back_capture_file(HANDLE handle)
         {
             SetLastError(
                 ERROR_SUCCESS); // INVALID_SET_FILE_POINTER 也是合法偏移
@@ -2035,39 +1913,192 @@ export namespace cg::util::platform
                     == INVALID_SET_FILE_POINTER
                 && GetLastError() != ERROR_SUCCESS)
             {
-                return;
+                return {};
             }
-            char  buffer[4096];
-            DWORD got = 0;
+            std::string out;
+            char        buffer[4096];
+            DWORD       got = 0;
             while (ReadFile(handle, buffer, sizeof(buffer), &got, nullptr)
                    && got != 0)
             {
-                sink.append(buffer, got);
+                out.append(buffer, got);
             }
-        };
-        if (waited == WAIT_OBJECT_0)
+            return out;
+        }
+
+        /// capture_exec_timed 的 Windows 分支：句柄白名单与脱离 job 的
+        /// 机制说明随 capture_exec_timed 的文档块。
+        [[nodiscard]]
+        auto capture_exec_timed_windows(
+            std::wstring&             cmdline,
+            std::chrono::milliseconds timeout) -> TimedExecResult
         {
-            DWORD code = 0;
-            if (GetExitCodeProcess(pi.hProcess, &code))
+            TimedExecResult result;
+
+            SECURITY_ATTRIBUTES inheritable{
+                sizeof(SECURITY_ATTRIBUTES),
+                nullptr,
+                TRUE};
+            const HANDLE out_file = make_temp_capture_file(inheritable);
+            const HANDLE err_file = make_temp_capture_file(inheritable);
+            const HANDLE dev_null = CreateFileW(
+                L"NUL",
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                &inheritable,
+                OPEN_EXISTING,
+                0,
+                nullptr);
+            if (out_file == INVALID_HANDLE_VALUE
+                || err_file == INVALID_HANDLE_VALUE
+                || dev_null == INVALID_HANDLE_VALUE)
             {
-                result.exit_code = static_cast<int>(code);
+                if (out_file != INVALID_HANDLE_VALUE)
+                {
+                    CloseHandle(out_file);
+                }
+                if (err_file != INVALID_HANDLE_VALUE)
+                {
+                    CloseHandle(err_file);
+                }
+                if (dev_null != INVALID_HANDLE_VALUE)
+                {
+                    CloseHandle(dev_null);
+                }
+                return result;
             }
-            read_back(out_file, result.out);
-            read_back(err_file, result.err);
+
+            // 句柄白名单：bInheritHandles=TRUE 让子进程拿到重定向句柄，但没有
+            // PROC_THREAD_ATTRIBUTE_HANDLE_LIST 时它同时继承宿主的 stdout/
+            // stderr 管道（以及任何其它可继承句柄）。hook 退出后宿主读管道要
+            // 等后台 update 结束才见 EOF。白名单把可继承集收窄到这三个文件。
+            STARTUPINFOEXW si{};
+            si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            si.StartupInfo.hStdOutput = out_file;
+            si.StartupInfo.hStdError = err_file;
+            si.StartupInfo.hStdInput = dev_null;
+            LPPROC_THREAD_ATTRIBUTE_LIST attributes = nullptr;
+            bool                         listed = false;
+            // lpValue 必须存活到 DeleteProcThreadAttributeList（属性列表只保存
+            // 指针而非拷贝），故句柄数组放在函数作用域而不是属性初始化块内。
+            HANDLE inherited_handles[] = {out_file, err_file, dev_null};
+            {
+                SIZE_T bytes = 0;
+                // 首射只取所需缓冲区大小（文档化的 ERROR_INSUFFICIENT_BUFFER
+                // 探测）；属性列表的内存在 CreateProcess 返回前必须保持有效。
+                (void)InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
+                if (bytes > 0)
+                {
+                    attributes = static_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(
+                        std::malloc(bytes));
+                }
+                if (attributes != nullptr
+                    && InitializeProcThreadAttributeList(
+                        attributes,
+                        1,
+                        0,
+                        &bytes))
+                {
+                    listed = UpdateProcThreadAttribute(
+                                 attributes,
+                                 0,
+                                 PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                 inherited_handles,
+                                 sizeof(inherited_handles),
+                                 nullptr,
+                                 nullptr)
+                             != 0;
+                    if (!listed)
+                    {
+                        DeleteProcThreadAttributeList(attributes);
+                    }
+                }
+            }
+            // 属性列表必须挂到 STARTUPINFOEXW::lpAttributeList 上，否则
+            // CreateProcess 根本看不到白名单（只初始化不挂接 = 白名单静默失效，
+            // 全继承语义照旧）。未列为扩展时保持 STARTUPINFOW 的旧 ABI（cb 与
+            // 创建旗标必须一致）。
+            si.lpAttributeList = listed ? attributes : nullptr;
+            si.StartupInfo.cb =
+                listed ? sizeof(STARTUPINFOEXW) : sizeof(STARTUPINFOW);
+            const DWORD extended = listed ? EXTENDED_STARTUPINFO_PRESENT : 0;
+            PROCESS_INFORMATION pi{};
+            const DWORD detached = CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS;
+            BOOL        spawned = CreateProcessW(
+                nullptr,
+                cmdline.data(),
+                nullptr,
+                nullptr,
+                TRUE,
+                detached | extended,
+                nullptr,
+                nullptr,
+                &si.StartupInfo,
+                &pi);
+            if (!spawned)
+            {
+                // job 不允许 breakaway，或平台拒绝 DETACHED_PROCESS 组合：退回
+                // 无窗口但仍在 job 内的普通派生（父进程正常退出时子进程通常
+                // 仍然存活；只有 kill-on-close 的 job 会连带杀死它）。
+                spawned = CreateProcessW(
+                    nullptr,
+                    cmdline.data(),
+                    nullptr,
+                    nullptr,
+                    TRUE,
+                    CREATE_NO_WINDOW | extended,
+                    nullptr,
+                    nullptr,
+                    &si.StartupInfo,
+                    &pi);
+            }
+            if (listed)
+            {
+                DeleteProcThreadAttributeList(attributes);
+            }
+            std::free(attributes);
+            result.restricted_handles = listed;
+            CloseHandle(dev_null);
+            if (!spawned)
+            {
+                CloseHandle(out_file);
+                CloseHandle(err_file);
+                return result;
+            }
+            result.started = true;
+
+            const DWORD wait_ms = static_cast<DWORD>(std::min<std::int64_t>(
+                timeout.count(),
+                static_cast<std::int64_t>(0xFFFFFFFFLL)));
+            const DWORD waited = WaitForSingleObject(pi.hProcess, wait_ms);
+            if (waited == WAIT_OBJECT_0)
+            {
+                DWORD code = 0;
+                if (GetExitCodeProcess(pi.hProcess, &code))
+                {
+                    result.exit_code = static_cast<int>(code);
+                }
+                result.out = read_back_capture_file(out_file);
+                result.err = read_back_capture_file(err_file);
+            }
+            else if (waited == WAIT_TIMEOUT)
+            {
+                result.timed_out = true;
+            }
+            // 超时分支刻意不读输出、不等待：本进程的两个读端一关，子进程的
+            // 独立写端继续存活，临时文件在它退出时随最后一个句柄一起删除。
+            CloseHandle(out_file);
+            CloseHandle(err_file);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            return result;
         }
-        else if (waited == WAIT_TIMEOUT)
-        {
-            result.timed_out = true;
-        }
-        // 超时分支刻意不读输出、不等待：本进程的两个读端一关，子进程的
-        // 独立写端继续存活，临时文件在它退出时随最后一个句柄一起删除。
-        CloseHandle(out_file);
-        CloseHandle(err_file);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        return result;
+
 #else
-        const auto make_temp = []() -> int
+
+        /// 重定向用的临时文件描述符（先 unlink 后用：进程退出
+        /// 不留盘上文件）；失败返回 -1。
+        auto make_temp_capture_fd() -> int
         {
             std::error_code       ec;
             std::filesystem::path dir =
@@ -2098,215 +2129,255 @@ export namespace cg::util::platform
                 }
             }
             return -1;
-        };
-        const int out_fd = make_temp();
-        const int err_fd = make_temp();
-        if (out_fd < 0 || err_fd < 0)
-        {
-            if (out_fd >= 0)
-            {
-                ::close(out_fd);
-            }
-            if (err_fd >= 0)
-            {
-                ::close(err_fd);
-            }
-            return result;
         }
 
-        // exec 失败哨兵：写端带 FD_CLOEXEC，exec 成功即在子进程里关闭，
-        // 父进程读端看到 EOF；失败时子进程先把 errno 写进来。没有它，
-        // fork 成功而 execv 失败会以 exit 127/空输出伪装成"已启动"。
-        int        exec_ctl[2] = {-1, -1};
-        const bool have_exec_ctl = ::pipe(exec_ctl) == 0;
-        if (have_exec_ctl)
+        /// 回读临时文件描述符的全部内容（读前复位于文件头；定位失败
+        /// 返回空串）。
+        [[nodiscard]]
+        std::string read_back_capture_fd(int fd)
         {
-            (void)::fcntl(exec_ctl[0], F_SETFD, FD_CLOEXEC);
-            (void)::fcntl(exec_ctl[1], F_SETFD, FD_CLOEXEC);
+            if (::lseek(fd, 0, SEEK_SET) < 0)
+            {
+                return {};
+            }
+            std::string out;
+            char        buffer[4096];
+            ssize_t     got = 0;
+            while ((got = ::read(fd, buffer, sizeof(buffer))) > 0)
+            {
+                out.append(buffer, static_cast<std::size_t>(got));
+            }
+            return out;
         }
 
-        const std::string        exe_native = exe.native();
-        std::vector<std::string> storage;
-        storage.reserve(args.size() + 1);
-        storage.push_back(exe_native);
-        for (const std::string& arg : args)
+        /// capture_exec_timed 的 POSIX 分支：会话脱离与 fd 收窄的机制
+        /// 说明随 capture_exec_timed 的文档块。
+        [[nodiscard]]
+        auto capture_exec_timed_posix(
+            const std::filesystem::path&    exe,
+            const std::vector<std::string>& args,
+            std::chrono::milliseconds       timeout) -> TimedExecResult
         {
-            storage.push_back(arg);
-        }
-        const pid_t pid = ::fork();
-        if (pid == 0)
-        {
+            TimedExecResult result;
+
+            const int out_fd = make_temp_capture_fd();
+            const int err_fd = make_temp_capture_fd();
+            if (out_fd < 0 || err_fd < 0)
+            {
+                if (out_fd >= 0)
+                {
+                    ::close(out_fd);
+                }
+                if (err_fd >= 0)
+                {
+                    ::close(err_fd);
+                }
+                return result;
+            }
+
+            // exec 失败哨兵：写端带 FD_CLOEXEC，exec 成功即在子进程里关闭，
+            // 父进程读端看到 EOF；失败时子进程先把 errno 写进来。没有它，
+            // fork 成功而 execv 失败会以 exit 127/空输出伪装成"已启动"。
+            int        exec_ctl[2] = {-1, -1};
+            const bool have_exec_ctl = ::pipe(exec_ctl) == 0;
             if (have_exec_ctl)
             {
-                ::close(exec_ctl[0]);
+                (void)::fcntl(exec_ctl[0], F_SETFD, FD_CLOEXEC);
+                (void)::fcntl(exec_ctl[1], F_SETFD, FD_CLOEXEC);
             }
-            // 新会话：脱离父进程的进程组与控制终端，父进程退出后继续运行。
-            (void)::setsid();
-            const int dev_null = ::open("/dev/null", O_RDONLY);
-            if (dev_null >= 0)
+
+            const std::string        exe_native = exe.native();
+            std::vector<std::string> storage;
+            storage.reserve(args.size() + 1);
+            storage.push_back(exe_native);
+            for (const std::string& arg : args)
             {
-                ::dup2(dev_null, STDIN_FILENO);
-                if (dev_null > STDERR_FILENO)
+                storage.push_back(arg);
+            }
+            const pid_t pid = ::fork();
+            if (pid == 0)
+            {
+                if (have_exec_ctl)
                 {
-                    ::close(dev_null);
+                    ::close(exec_ctl[0]);
                 }
-            }
-            ::dup2(out_fd, STDOUT_FILENO);
-            ::dup2(err_fd, STDERR_FILENO);
-            if (out_fd > STDERR_FILENO)
-            {
-                ::close(out_fd);
-            }
-            if (err_fd > STDERR_FILENO)
-            {
-                ::close(err_fd);
-            }
-            // 关闭 3 号以上全部 fd：detached 子进程不得继承宿主的管道/套接
-            // 字写端，否则宿主读端要等后台 update 退出才见到 EOF。stdin/
-            // stdout/stderr 已换成 /dev/null 与临时文件。Linux 用
-            // /proc/self/fd 精确枚举；其它 POSIX 扫描 RLIMIT_NOFILE。
-#if defined(__linux__)
-            if (DIR* fds = ::opendir("/proc/self/fd"))
-            {
-                const int scan = ::dirfd(fds);
-                while (const dirent* entry = ::readdir(fds))
+                // 新会话：脱离父进程的进程组与控制终端，父进程退出后继续运行。
+                (void)::setsid();
+                const int dev_null = ::open("/dev/null", O_RDONLY);
+                if (dev_null >= 0)
                 {
-                    const int fd = std::atoi(entry->d_name);
-                    if (fd > STDERR_FILENO && fd != scan
-                        && (!have_exec_ctl || fd != exec_ctl[1]))
+                    ::dup2(dev_null, STDIN_FILENO);
+                    if (dev_null > STDERR_FILENO)
                     {
+                        ::close(dev_null);
+                    }
+                }
+                ::dup2(out_fd, STDOUT_FILENO);
+                ::dup2(err_fd, STDERR_FILENO);
+                if (out_fd > STDERR_FILENO)
+                {
+                    ::close(out_fd);
+                }
+                if (err_fd > STDERR_FILENO)
+                {
+                    ::close(err_fd);
+                }
+                // 关闭 3 号以上全部 fd：detached 子进程不得继承宿主的管道/套接
+                // 字写端，否则宿主读端要等后台 update 退出才见到 EOF。stdin/
+                // stdout/stderr 已换成 /dev/null 与临时文件。Linux 用
+                // /proc/self/fd 精确枚举；其它 POSIX 扫描 RLIMIT_NOFILE。
+#if defined(__linux__)
+                if (DIR* fds = ::opendir("/proc/self/fd"))
+                {
+                    const int scan = ::dirfd(fds);
+                    while (const dirent* entry = ::readdir(fds))
+                    {
+                        const int fd = std::atoi(entry->d_name);
+                        if (fd > STDERR_FILENO && fd != scan
+                            && (!have_exec_ctl || fd != exec_ctl[1]))
+                        {
+                            ::close(fd);
+                        }
+                    }
+                    ::closedir(fds);
+                }
+                else
+#endif
+                {
+                    long limit = ::sysconf(_SC_OPEN_MAX);
+                    if (limit < 0 || limit > 65536)
+                    {
+                        limit = 65536;
+                    }
+                    for (int fd = STDERR_FILENO + 1;
+                         fd < static_cast<int>(limit);
+                         ++fd)
+                    {
+                        if (have_exec_ctl && fd == exec_ctl[1])
+                        {
+                            continue; // 哨兵写端：exec 成功时由 FD_CLOEXEC 关闭
+                        }
                         ::close(fd);
                     }
                 }
-                ::closedir(fds);
+                std::vector<char*> argv;
+                argv.reserve(storage.size() + 1);
+                for (const std::string& arg : storage)
+                {
+                    argv.push_back(const_cast<char*>(arg.c_str()));
+                }
+                argv.push_back(nullptr);
+                ::execv(exe_native.c_str(), argv.data());
+                if (have_exec_ctl)
+                {
+                    const int exec_errno = errno;
+                    (void)::write(exec_ctl[1], &exec_errno, sizeof(exec_errno));
+                }
+                ::_exit(127);
+            }
+            if (have_exec_ctl)
+            {
+                ::close(exec_ctl[1]); // 父进程只留读端
+            }
+            if (pid < 0)
+            {
+                if (have_exec_ctl)
+                {
+                    ::close(exec_ctl[0]);
+                }
+                ::close(out_fd);
+                ::close(err_fd);
+                return result;
+            }
+            result.started = true;
+            // exec 前的关闭循环保证子进程只拿到 0/1/2。
+            result.restricted_handles = true;
+
+            const auto start = std::chrono::steady_clock::now();
+            int        status = 0;
+            bool       reaped = false;
+            for (;;)
+            {
+                const pid_t waited = ::waitpid(pid, &status, WNOHANG);
+                if (waited == pid)
+                {
+                    reaped = true;
+                    break;
+                }
+                if (waited < 0 && errno != EINTR)
+                {
+                    break; // 无法再观察（ECHILD 等）：按已分离处理
+                }
+                if (std::chrono::steady_clock::now() - start >= timeout)
+                {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds{5});
+            }
+            // 哨兵判定：4 字节 errno = execv 失败（子进程从未变成目标程序）；
+            // EOF（0 字节）或 EAGAIN（超时前还没轮到它 exec）都按已启动处理。
+            bool exec_failed = false;
+            if (have_exec_ctl)
+            {
+                int     exec_errno = 0;
+                ssize_t got = -1;
+                do
+                {
+                    got = ::read(exec_ctl[0], &exec_errno, sizeof(exec_errno));
+                } while (got < 0 && errno == EINTR);
+                exec_failed = got == static_cast<ssize_t>(sizeof(exec_errno));
+                ::close(exec_ctl[0]);
+            }
+            if (reaped)
+            {
+                if (WIFEXITED(status))
+                {
+                    result.exit_code = WEXITSTATUS(status);
+                }
+                result.out = read_back_capture_fd(out_fd);
+                result.err = read_back_capture_fd(err_fd);
             }
             else
-#endif
             {
-                long limit = ::sysconf(_SC_OPEN_MAX);
-                if (limit < 0 || limit > 65536)
-                {
-                    limit = 65536;
-                }
-                for (int fd = STDERR_FILENO + 1; fd < static_cast<int>(limit);
-                     ++fd)
-                {
-                    if (have_exec_ctl && fd == exec_ctl[1])
-                    {
-                        continue; // 哨兵写端：exec 成功时由 FD_CLOEXEC 关闭
-                    }
-                    ::close(fd);
-                }
+                result.timed_out = true; // 不 kill、不 wait：让它跑完
             }
-            std::vector<char*> argv;
-            argv.reserve(storage.size() + 1);
-            for (const std::string& arg : storage)
+            if (exec_failed
+                || (!have_exec_ctl && reaped && result.exit_code == 127
+                    && result.out.empty() && result.err.empty()))
             {
-                argv.push_back(const_cast<char*>(arg.c_str()));
-            }
-            argv.push_back(nullptr);
-            ::execv(exe_native.c_str(), argv.data());
-            if (have_exec_ctl)
-            {
-                const int exec_errno = errno;
-                (void)::write(exec_ctl[1], &exec_errno, sizeof(exec_errno));
-            }
-            ::_exit(127);
-        }
-        if (have_exec_ctl)
-        {
-            ::close(exec_ctl[1]); // 父进程只留读端
-        }
-        if (pid < 0)
-        {
-            if (have_exec_ctl)
-            {
-                ::close(exec_ctl[0]);
+                // 没有可观察的输出、且退出码正是 execv 失败约定值：保守地
+                // 报"未启动"，绝不向 hook 谎报"已入库"。
+                result.started = false;
+                result.timed_out = false;
+                result.exit_code = -1;
+                result.out.clear();
+                result.err.clear();
             }
             ::close(out_fd);
             ::close(err_fd);
             return result;
         }
-        result.started = true;
-        // exec 前的关闭循环保证子进程只拿到 0/1/2。
-        result.restricted_handles = true;
 
-        const auto start = std::chrono::steady_clock::now();
-        int        status = 0;
-        bool       reaped = false;
-        for (;;)
+#endif
+
+    } // namespace detail
+
+    [[nodiscard]]
+    inline auto capture_exec_timed(
+        const std::filesystem::path&    exe,
+        const std::vector<std::string>& args,
+        std::chrono::milliseconds       timeout) -> TimedExecResult
+    {
+#if defined(_WIN32)
+        std::wstring cmdline = quote_for_command_line(exe.wstring());
+        for (const std::string& arg : args)
         {
-            const pid_t waited = ::waitpid(pid, &status, WNOHANG);
-            if (waited == pid)
-            {
-                reaped = true;
-                break;
-            }
-            if (waited < 0 && errno != EINTR)
-            {
-                break; // 无法再观察（ECHILD 等）：按已分离处理
-            }
-            if (std::chrono::steady_clock::now() - start >= timeout)
-            {
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+            cmdline += L" ";
+            cmdline += quote_for_command_line(widen_utf8(arg));
         }
-        const auto read_back = [](int fd, std::string& sink)
-        {
-            if (::lseek(fd, 0, SEEK_SET) < 0)
-            {
-                return;
-            }
-            char    buffer[4096];
-            ssize_t got = 0;
-            while ((got = ::read(fd, buffer, sizeof(buffer))) > 0)
-            {
-                sink.append(buffer, static_cast<std::size_t>(got));
-            }
-        };
-        // 哨兵判定：4 字节 errno = execv 失败（子进程从未变成目标程序）；
-        // EOF（0 字节）或 EAGAIN（超时前还没轮到它 exec）都按已启动处理。
-        bool exec_failed = false;
-        if (have_exec_ctl)
-        {
-            int     exec_errno = 0;
-            ssize_t got = -1;
-            do
-            {
-                got = ::read(exec_ctl[0], &exec_errno, sizeof(exec_errno));
-            } while (got < 0 && errno == EINTR);
-            exec_failed = got == static_cast<ssize_t>(sizeof(exec_errno));
-            ::close(exec_ctl[0]);
-        }
-        if (reaped)
-        {
-            if (WIFEXITED(status))
-            {
-                result.exit_code = WEXITSTATUS(status);
-            }
-            read_back(out_fd, result.out);
-            read_back(err_fd, result.err);
-        }
-        else
-        {
-            result.timed_out = true; // 不 kill、不 wait：让它跑完
-        }
-        if (exec_failed
-            || (!have_exec_ctl && reaped && result.exit_code == 127
-                && result.out.empty() && result.err.empty()))
-        {
-            // 没有可观察的输出、且退出码正是 execv 失败约定值：保守地
-            // 报"未启动"，绝不向 hook 谎报"已入库"。
-            result.started = false;
-            result.timed_out = false;
-            result.exit_code = -1;
-            result.out.clear();
-            result.err.clear();
-        }
-        ::close(out_fd);
-        ::close(err_fd);
-        return result;
+        return detail::capture_exec_timed_windows(cmdline, timeout);
+#else
+        return detail::capture_exec_timed_posix(exe, args, timeout);
 #endif
     }
 

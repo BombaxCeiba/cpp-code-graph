@@ -86,21 +86,21 @@ export namespace cg::util::cshost
      */
     enum class ObjErr : std::int32_t
     {
-        Ok = 0,           ///< 成功
-        Channel = -1,     ///< 共享内存/结构体通道异常
-        Payload = -2,     ///< 命令载荷非法（坏 JSON/形参缺失/长度越界）
-        UnknownClass = -3,   ///< ObjCreate 类名未知
-        Construct = -4,      ///< 静态工厂构造异常（诊断文本随通道回传）
-        TableFull = -5,      ///< 垫片句柄表满
-        Abi = -6,            ///< 结构体桥 ABI 不匹配（尺寸/版本判据）
-        BadHandle = -10,     ///< 句柄值形态非法（非数字/越界）
-        StaleHandle = -11,   ///< 句柄已失效（拆除后或从未存在的 token）
-        UnknownMethod = -12, ///< 方法名未知或签名不符协议
-        MethodFailure = -13, ///< 实例方法执行异常（诊断文本随通道回传）
-        Overflow = -14,      ///< 结果超出该句柄级的通道视图容量
-        NotOnLine = -20,     ///< 类不被本线承载（7 线请求 MsbuildEval）
+        Ok = 0,                ///< 成功
+        Channel = -1,          ///< 共享内存/结构体通道异常
+        Payload = -2,          ///< 命令载荷非法（坏 JSON/形参缺失/长度越界）
+        UnknownClass = -3,     ///< ObjCreate 类名未知
+        Construct = -4,        ///< 静态工厂构造异常（诊断文本随通道回传）
+        TableFull = -5,        ///< 垫片句柄表满
+        Abi = -6,              ///< 结构体桥 ABI 不匹配（尺寸/版本判据）
+        BadHandle = -10,       ///< 句柄值形态非法（非数字/越界）
+        StaleHandle = -11,     ///< 句柄已失效（拆除后或从未存在的 token）
+        UnknownMethod = -12,   ///< 方法名未知或签名不符协议
+        MethodFailure = -13,   ///< 实例方法执行异常（诊断文本随通道回传）
+        Overflow = -14,        ///< 结果超出该句柄级的通道视图容量
+        NotOnLine = -20,       ///< 类不被本线承载（7 线请求 MsbuildEval）
         LineUnavailable = -30, ///< 宿主侧：目标线的引擎不可用
-        CmdTooLarge = -31,    ///< 宿主侧：命令载荷超出通道档位容量
+        CmdTooLarge = -31,     ///< 宿主侧：命令载荷超出通道档位容量
     };
 
     /** @brief 协议面（宿主内两面各自独立记账与择线）。 */
@@ -196,6 +196,25 @@ export namespace cg::util::cshost
      */
     void reset_for_tests();
 
+    /// 命令名词边界的成分字节：ASCII 字母、数字、下划线、连字符。
+    /// PowerShell 命令名词与 shell 命令词的边界判定共用此集。
+    [[nodiscard]]
+    constexpr auto is_command_word_byte(char c) -> bool
+    {
+        const unsigned char u = static_cast<unsigned char>(c);
+        return (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z')
+               || (u >= '0' && u <= '9') || u == '_' || u == '-';
+    }
+
+    /// ASCII 大写折叠为小写（其余字节原样；UTF-8 多字节序列不含
+    /// ASCII 字母字节，字节级折叠安全）。本模块无法导入 cg.util 核心
+    /// （核心再导出本模块，反向导入成环），字节级折叠的单点在此。
+    [[nodiscard]]
+    constexpr auto ascii_lower_byte(char c) -> char
+    {
+        return static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    }
+
 } // namespace cg::util::cshost
 
 namespace cg::util::cshost
@@ -281,17 +300,13 @@ export namespace cg::util::cshost
          *         错误码、payload 为诊断文本。
          */
         [[nodiscard]]
-        auto call(
-            std::string_view        method,
-            std::span<const ObjArg> args) const -> ObjOutcome;
+        auto call(std::string_view method, std::span<const ObjArg> args) const
+            -> ObjOutcome;
 
     private:
         friend struct CsRefFactory;
 
-        explicit CsRef(HandleBox* box) noexcept
-            : box_{box}
-        {
-        }
+        explicit CsRef(HandleBox* box) noexcept : box_{box} {}
 
         HandleBox* box_ = nullptr;
     };
@@ -331,10 +346,8 @@ export namespace cg::util::cshost
      *
      * @return token（正数）或负错误码。
      */
-    auto obj_create(
-        Face                face,
-        ObjClass            cls,
-        std::wstring_view   assembly_dir) -> std::int32_t;
+    auto obj_create(Face face, ObjClass cls, std::wstring_view assembly_dir)
+        -> std::int32_t;
 
     /**
      * @brief ObjCall 通道原语：按句柄与方法名反射分派实例方法。
@@ -346,11 +359,11 @@ export namespace cg::util::cshost
      *         错误码、payload 为诊断文本。
      */
     auto obj_call(
-        Face                     face,
-        ObjClass                 cls,
-        std::int32_t             token,
-        std::string_view         method,
-        std::span<const ObjArg>  args) -> ObjOutcome;
+        Face                    face,
+        ObjClass                cls,
+        std::int32_t            token,
+        std::string_view        method,
+        std::span<const ObjArg> args) -> ObjOutcome;
 
     /**
      * @brief ObjDestroy 通道原语：垫片拆除三件套（条目移除 →
@@ -377,8 +390,7 @@ namespace cg::util::cshost
         static auto adopt(HandleBox* box) -> CsRef { return CsRef{box}; }
     };
 
-    CsRef::CsRef(const CsRef& other) noexcept
-        : box_{other.box_}
+    CsRef::CsRef(const CsRef& other) noexcept : box_{other.box_}
     {
         if (box_ != nullptr)
         {
@@ -460,9 +472,8 @@ namespace cg::util::cshost
         }
     }
 
-    auto CsRef::call(
-        std::string_view        method,
-        std::span<const ObjArg> args) const -> ObjOutcome
+    auto CsRef::call(std::string_view method, std::span<const ObjArg> args)
+        const -> ObjOutcome
     {
         if (box_ == nullptr)
         {
@@ -472,7 +483,7 @@ namespace cg::util::cshost
         if (box_->stale.load(std::memory_order_seq_cst))
         {
             return ObjOutcome{
-                .rc      = static_cast<std::int32_t>(ObjErr::StaleHandle),
+                .rc = static_cast<std::int32_t>(ObjErr::StaleHandle),
                 .payload = "session abandoned (watchdog short-circuit)"};
         }
         return obj_call(box_->face, box_->cls, box_->token, method, args);
@@ -679,10 +690,10 @@ namespace cg::util::cshost
         struct NativeCallV1
         {
             std::uint32_t size;        // 调用方填结构体总字节数（判据字段）
-            std::uint32_t abi_version;  // 协议版本（当前 1）
-            void*         cmd;          // 载荷指针（UTF-8 JSON / token 串）
-            std::uint64_t cmd_len;      // 载荷字节数
-            void*         out_slot;     // 出参槽：垫片就地写回结果指针
+            std::uint32_t abi_version; // 协议版本（当前 1）
+            void*         cmd;         // 载荷指针（UTF-8 JSON / token 串）
+            std::uint64_t cmd_len;     // 载荷字节数
+            void*         out_slot;    // 出参槽：垫片就地写回结果指针
         };
         static_assert(sizeof(NativeCallV1) == 32, "结构体桥布局漂移");
         static_assert(offsetof(NativeCallV1, out_slot) == 24, "出参槽偏移漂移");
@@ -699,10 +710,10 @@ namespace cg::util::cshost
         //    全量即按大档解释），坏句柄路径不产生档位歧义。
         struct ChannelLayout
         {
-            std::size_t cmd_cap;   // 命令区 wchar 容量
-            std::size_t res_off;   // 结果区偏移（字节）
+            std::size_t cmd_cap;    // 命令区 wchar 容量
+            std::size_t res_off;    // 结果区偏移（字节）
             std::size_t view_bytes; // 映射总大小（字节）
-            std::size_t res_cap;   // 结果区容量（字节）
+            std::size_t res_cap;    // 结果区容量（字节）
         };
 
         constexpr std::size_t CMD_OFF = 8; // 头部两个 int32
@@ -733,9 +744,9 @@ namespace cg::util::cshost
             IMyICLRRuntimeHost* clr = nullptr;
             std::wstring        shim51_path;
             // 7 路线对象协议三件的函数指针（hostfxr 委托，进程级不卸载）。
-            ObjFn7 create7  = nullptr;
-            ObjFn7 call7    = nullptr;
-            ObjFn7 destroy7 = nullptr;
+            ObjFn7                     create7 = nullptr;
+            ObjFn7                     call7 = nullptr;
+            ObjFn7                     destroy7 = nullptr;
             std::atomic<std::uint64_t> map_seq{0};
         };
 
@@ -754,10 +765,9 @@ namespace cg::util::cshost
         /**
          * @brief 加载前微秒级预筛：命令文本是否提及 Select-String / sls。
          *
-         * 字节级大小写不敏感扫描（UTF-8 多字节序列不含 ASCII 字母字节）；
-         * 三字母别名 sls 要求词边界（前后字节不是字母/数字/下划线/连字符），
-         * 避免把普通子串误当命中。预筛只是成本闸门，误命中最多白付一次
-         * 引擎解析，方向安全。
+         * 字节级大小写不敏感扫描；三字母别名 sls 要求词边界（前后字节不是
+         * 字母/数字/下划线/连字符），避免把普通子串误当命中。预筛只是成本
+         * 闸门，误命中最多白付一次引擎解析，方向安全。
          */
         [[nodiscard]]
         auto mentions_search_cmdlet(std::string_view text) -> bool
@@ -767,19 +777,7 @@ namespace cg::util::cshost
             {
                 return false;
             }
-            const auto is_word_byte = [](char c)
-            {
-                const unsigned char u = static_cast<unsigned char>(c);
-                return (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z')
-                       || (u >= '0' && u <= '9') || u == '_' || u == '-';
-            };
-            const auto lower = [](char c)
-            {
-                return static_cast<char>(
-                    c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
-            };
-            // 循环上界按三字母别名（短于 select-string 的命令也必须能命中，
-            // 实测教训：上界取长针时 "sls foo" 整条被跳过）。
+            // 循环上界按三字母别名（短于 select-string 的命令也必须能命中）。
             for (std::size_t i = 0; i + 3 <= text.size(); ++i)
             {
                 if (i + needle.size() <= text.size())
@@ -787,7 +785,7 @@ namespace cg::util::cshost
                     bool match = true;
                     for (std::size_t j = 0; j < needle.size(); ++j)
                     {
-                        if (lower(text[i + j]) != needle[j])
+                        if (ascii_lower_byte(text[i + j]) != needle[j])
                         {
                             match = false;
                             break;
@@ -799,12 +797,14 @@ namespace cg::util::cshost
                     }
                 }
                 // 独立词 "sls"。
-                if (lower(text[i]) == 's' && lower(text[i + 1]) == 'l'
-                    && lower(text[i + 2]) == 's')
+                if (ascii_lower_byte(text[i]) == 's'
+                    && ascii_lower_byte(text[i + 1]) == 'l'
+                    && ascii_lower_byte(text[i + 2]) == 's')
                 {
-                    const bool left_ok = i == 0 || !is_word_byte(text[i - 1]);
-                    const bool right_ok =
-                        i + 3 >= text.size() || !is_word_byte(text[i + 3]);
+                    const bool left_ok =
+                        i == 0 || !is_command_word_byte(text[i - 1]);
+                    const bool right_ok = i + 3 >= text.size()
+                                          || !is_command_word_byte(text[i + 3]);
                     if (left_ok && right_ok)
                     {
                         return true;
@@ -890,6 +890,16 @@ namespace cg::util::cshost
             return dll;
         }
 
+        /// 追加一条英文诊断进 detail 链（分号分隔；首条直接落位）。
+        void append_detail(EngineState& state, const std::string& text)
+        {
+            if (!state.detail.empty())
+            {
+                state.detail += "; ";
+            }
+            state.detail += text;
+        }
+
         /// 垫片缺席诊断（英文，进 detail 诊断链）：点名期望的
         /// dll 文件名与找过的可执行文件目录，并给出修复途径（同目录
         /// 直载是唯一装载路线，缺席即整条引擎路线不可用）。降级链的
@@ -910,16 +920,11 @@ namespace cg::util::cshost
             text += dir.empty()
                         ? "; executable directory unavailable"
                         : "; looked in \""
-                              + cg::util::platform::narrow_utf8(
-                                    dir.wstring())
+                              + cg::util::platform::narrow_utf8(dir.wstring())
                               + "\"";
             text += "; reinstall the published layout or rebuild so the "
                     "shim dll is copied beside the executable";
-            if (!state.detail.empty())
-            {
-                state.detail += "; ";
-            }
-            state.detail += text;
+            append_detail(state, text);
         }
 
         // ---------------------------------------------------------------------------
@@ -1198,17 +1203,9 @@ namespace cg::util::cshost
             const std::filesystem::path& a,
             const std::filesystem::path& b) -> bool
         {
-            WIN32_FILE_ATTRIBUTE_DATA aa{};
-            WIN32_FILE_ATTRIBUTE_DATA bb{};
-            if (!GetFileAttributesExW(a.c_str(), GetFileExInfoStandard, &aa)
-                || !GetFileAttributesExW(b.c_str(), GetFileExInfoStandard, &bb))
-            {
-                return false;
-            }
-            return aa.ftLastWriteTime.dwLowDateTime
-                       == bb.ftLastWriteTime.dwLowDateTime
-                   && aa.ftLastWriteTime.dwHighDateTime
-                          == bb.ftLastWriteTime.dwHighDateTime;
+            const auto ma = cg::util::platform::file_meta(a);
+            const auto mb = cg::util::platform::file_meta(b);
+            return ma.ok && mb.ok && ma.mtime_ticks == mb.mtime_ticks;
         }
 
         /// 把源的 LastWriteTime 抄给目标（镜像回退路径专用）。
@@ -1485,8 +1482,8 @@ namespace cg::util::cshost
             const auto load = reinterpret_cast<HxLoadAssemblyFn>(loader);
             // 对象协议三件逐一取 [UnmanagedCallersOnly] 原生指针；三件
             // 必须齐活才算该线可用（残缺线不可分派）。
-            void* create  = nullptr;
-            void* call    = nullptr;
+            void* create = nullptr;
+            void* call = nullptr;
             void* destroy = nullptr;
             if (load(
                     shim->c_str(),
@@ -1529,20 +1526,12 @@ namespace cg::util::cshost
 
         /// 5.1 主路径初始化（mscoree → CLR 4.0 → GAC 引擎）。
         ///
-        /// 各步失败都把含错误码数值的原因追加进 detail 链（与
-        /// note_shim_missing 同款追加记法）：求值面钉此线，失败即整面
-        /// 不可用，无降级链兜底，诊断必须能指认卡在哪一步。
+        /// 各步失败都把含错误码数值的原因经 append_detail 追加进
+        /// detail 链：求值面钉此线，失败即整面不可用，无降级链兜底，
+        /// 诊断必须能指认卡在哪一步。
         [[nodiscard]]
         auto init_clr51(EngineState& state) -> bool
         {
-            const auto note = [&state](const std::string& text)
-            {
-                if (!state.detail.empty())
-                {
-                    state.detail += "; ";
-                }
-                state.detail += text;
-            };
             const auto shim = bundled_shim(L"ccg-cshost51");
             if (!shim.has_value())
             {
@@ -1553,10 +1542,12 @@ namespace cg::util::cshost
             if (mscoree == nullptr)
             {
                 const DWORD gle = GetLastError();
-                note(std::format(
-                    "clr51: LoadLibraryW(mscoree.dll) failed "
-                    "(GetLastError={})",
-                    static_cast<unsigned>(gle)));
+                append_detail(
+                    state,
+                    std::format(
+                        "clr51: LoadLibraryW(mscoree.dll) failed "
+                        "(GetLastError={})",
+                        static_cast<unsigned>(gle)));
                 return false;
             }
             using CreateInstanceFn =
@@ -1566,55 +1557,65 @@ namespace cg::util::cshost
             if (create_instance == nullptr)
             {
                 const DWORD gle = GetLastError();
-                note(std::format(
-                    "clr51: CLRCreateInstance export missing "
-                    "(GetLastError={})",
-                    static_cast<unsigned>(gle)));
+                append_detail(
+                    state,
+                    std::format(
+                        "clr51: CLRCreateInstance export missing "
+                        "(GetLastError={})",
+                        static_cast<unsigned>(gle)));
                 return false;
             }
             IMyICLRMetaHost* meta = nullptr;
-            const HRESULT hr_meta = create_instance(
+            const HRESULT    hr_meta = create_instance(
                 CLSID_CLR_META_HOST,
                 IID_CLR_META_HOST,
                 reinterpret_cast<LPVOID*>(&meta));
             if (FAILED(hr_meta))
             {
-                note(std::format(
-                    "clr51: CLRCreateInstance failed (hr=0x{:08x})",
-                    static_cast<unsigned>(hr_meta)));
+                append_detail(
+                    state,
+                    std::format(
+                        "clr51: CLRCreateInstance failed (hr=0x{:08x})",
+                        static_cast<unsigned>(hr_meta)));
                 return false;
             }
             IMyICLRRuntimeInfo* info = nullptr;
-            const HRESULT hr_runtime = meta->GetRuntime(
+            const HRESULT       hr_runtime = meta->GetRuntime(
                 L"v4.0.30319",
                 IID_CLR_RUNTIME_INFO,
                 reinterpret_cast<LPVOID*>(&info));
             if (FAILED(hr_runtime))
             {
-                note(std::format(
-                    "clr51: GetRuntime(v4.0.30319) failed (hr=0x{:08x})",
-                    static_cast<unsigned>(hr_runtime)));
+                append_detail(
+                    state,
+                    std::format(
+                        "clr51: GetRuntime(v4.0.30319) failed (hr=0x{:08x})",
+                        static_cast<unsigned>(hr_runtime)));
                 return false;
             }
             IMyICLRRuntimeHost* host = nullptr;
-            const HRESULT hr_host = info->GetInterface(
+            const HRESULT       hr_host = info->GetInterface(
                 CLSID_CLR_RUNTIME_HOST,
                 IID_CLR_RUNTIME_HOST,
                 reinterpret_cast<LPVOID*>(&host));
             if (FAILED(hr_host))
             {
-                note(std::format(
-                    "clr51: GetInterface(runtime host) failed "
-                    "(hr=0x{:08x})",
-                    static_cast<unsigned>(hr_host)));
+                append_detail(
+                    state,
+                    std::format(
+                        "clr51: GetInterface(runtime host) failed "
+                        "(hr=0x{:08x})",
+                        static_cast<unsigned>(hr_host)));
                 return false;
             }
             const HRESULT hr_start = host->Start();
             if (FAILED(hr_start))
             {
-                note(std::format(
-                    "clr51: ICLRRuntimeHost::Start failed (hr=0x{:08x})",
-                    static_cast<unsigned>(hr_start)));
+                append_detail(
+                    state,
+                    std::format(
+                        "clr51: ICLRRuntimeHost::Start failed (hr=0x{:08x})",
+                        static_cast<unsigned>(hr_start)));
                 return false;
             }
             state.clr = host;
@@ -1672,14 +1673,6 @@ namespace cg::util::cshost
             state.resolved = true;
             state.route = Route::None;
             state.detail.clear();
-            const auto note = [&state](const std::string& text)
-            {
-                if (!state.detail.empty())
-                {
-                    state.detail += "; ";
-                }
-                state.detail += text;
-            };
             const bool hostfxr_all = route_forbidden("hostfxr");
             if (!hostfxr_all && !route_forbidden("hostfxr-install"))
             {
@@ -1689,10 +1682,10 @@ namespace cg::util::cshost
                     plan.has_value()
                     && init_hostfxr(state, *plan, Route::HostfxrInstall))
                 {
-                    note("install:ok");
+                    append_detail(state, "install:ok");
                     return;
                 }
-                note("install:miss");
+                append_detail(state, "install:miss");
             }
             if (!hostfxr_all && !route_forbidden("hostfxr-standalone"))
             {
@@ -1710,11 +1703,11 @@ namespace cg::util::cshost
                         plan.has_value()
                         && init_hostfxr(state, *plan, Route::HostfxrStandalone))
                     {
-                        note("standalone:ok");
+                        append_detail(state, "standalone:ok");
                         return;
                     }
                 }
-                note("standalone:miss");
+                append_detail(state, "standalone:miss");
             }
             if (!hostfxr_all && !route_forbidden("hostfxr-store"))
             {
@@ -1722,21 +1715,21 @@ namespace cg::util::cshost
                     plan.has_value()
                     && init_hostfxr(state, *plan, Route::HostfxrStoreCopy))
                 {
-                    note("store:ok");
+                    append_detail(state, "store:ok");
                     return;
                 }
-                note("store:miss");
+                append_detail(state, "store:miss");
             }
             if (!route_forbidden("clr51"))
             {
                 if (init_clr51(state))
                 {
-                    note("clr51:ok");
+                    append_detail(state, "clr51:ok");
                     return;
                 }
-                note("clr51:miss");
+                append_detail(state, "clr51:miss");
             }
-            note("none");
+            append_detail(state, "none");
         }
 
         // ---------------------------------------------------------------------------
@@ -1751,10 +1744,10 @@ namespace cg::util::cshost
          * 时正数 token 也经 rc 回传）、负数为垫片协议码或宿主侧通道码。
          */
         auto invoke_51(
-            EngineState&           state,
-            const ChannelLayout&   layout,
-            const wchar_t*         method,
-            std::wstring_view      command_wide) -> ObjOutcome
+            EngineState&         state,
+            const ChannelLayout& layout,
+            const wchar_t*       method,
+            std::wstring_view    command_wide) -> ObjOutcome
         {
             if (command_wide.size() > layout.cmd_cap)
             {
@@ -1762,10 +1755,8 @@ namespace cg::util::cshost
                     .rc = static_cast<std::int32_t>(ObjErr::CmdTooLarge)};
             }
             const std::uint64_t seq = state.map_seq.fetch_add(1);
-            const std::wstring  map_name = std::format(
-                L"Local\\ccgcs_{}_{}",
-                GetCurrentProcessId(),
-                seq);
+            const std::wstring  map_name =
+                std::format(L"Local\\ccgcs_{}_{}", GetCurrentProcessId(), seq);
             HANDLE map = CreateFileMappingW(
                 INVALID_HANDLE_VALUE,
                 nullptr,
@@ -1809,12 +1800,13 @@ namespace cg::util::cshost
                 // 溢出路径垫片不写头部、len 保持 0）。
                 const std::int32_t len =
                     *(reinterpret_cast<const std::int32_t*>(view) + 1);
-                if (len >= 0
-                    && static_cast<std::size_t>(len) <= layout.res_cap)
+                if (len >= 0 && static_cast<std::size_t>(len) <= layout.res_cap)
                 {
                     const char* begin =
                         static_cast<const char*>(view) + layout.res_off;
-                    outcome.payload.assign(begin, static_cast<std::size_t>(len));
+                    outcome.payload.assign(
+                        begin,
+                        static_cast<std::size_t>(len));
                 }
                 else if (len > 0)
                 {
@@ -1867,8 +1859,7 @@ namespace cg::util::cshost
             outcome.rc = fn(&call, static_cast<int>(sizeof(NativeCallV1)));
             if (call.out_slot != nullptr)
             {
-                outcome.payload.assign(
-                    static_cast<const char*>(call.out_slot));
+                outcome.payload.assign(static_cast<const char*>(call.out_slot));
                 CoTaskMemFree(call.out_slot);
             }
             return outcome;
@@ -1905,21 +1896,13 @@ namespace cg::util::cshost
                     // note_shim_missing 已把缺席指引写进 detail 链，
                     // 覆盖会让用户只剩一句无行动信息的短码（记法与
                     // resolve_chain 的 note 对齐）。
-                    const auto note = [&state](const std::string& text)
-                    {
-                        if (!state.detail.empty())
-                        {
-                            state.detail += "; ";
-                        }
-                        state.detail += text;
-                    };
                     if (!route_forbidden("clr51") && init_clr51(state))
                     {
-                        note("clr51:ok");
+                        append_detail(state, "clr51:ok");
                     }
                     else
                     {
-                        note("clr51:miss");
+                        append_detail(state, "clr51:miss");
                     }
                 }
                 else
@@ -1958,9 +1941,9 @@ namespace cg::util::cshost
         /// ObjCall 命令 JSON（句柄 + 方法名 + 命名实参表）。
         [[nodiscard]]
         auto build_call_payload(
-            std::int32_t             token,
-            std::string_view         method,
-            std::span<const ObjArg>  args) -> std::string
+            std::int32_t            token,
+            std::string_view        method,
+            std::span<const ObjArg> args) -> std::string
         {
             cg::util::json::Object argv;
             for (const ObjArg& arg : args)
@@ -1983,10 +1966,8 @@ namespace cg::util::cshost
 
     } // namespace
 
-    auto obj_create(
-        Face              face,
-        ObjClass          cls,
-        std::wstring_view assembly_dir) -> std::int32_t
+    auto obj_create(Face face, ObjClass cls, std::wstring_view assembly_dir)
+        -> std::int32_t
     {
         EngineState* state = ensure_face(face);
         if (state == nullptr)
@@ -2011,17 +1992,16 @@ namespace cg::util::cshost
         {
             return outcome.rc; // 正数即句柄 token
         }
-        return outcome.rc == 0
-                   ? static_cast<std::int32_t>(ObjErr::Channel)
-                   : outcome.rc;
+        return outcome.rc == 0 ? static_cast<std::int32_t>(ObjErr::Channel)
+                               : outcome.rc;
     }
 
     auto obj_call(
-        Face                     face,
-        ObjClass                 cls,
-        std::int32_t             token,
-        std::string_view         method,
-        std::span<const ObjArg>  args) -> ObjOutcome
+        Face                    face,
+        ObjClass                cls,
+        std::int32_t            token,
+        std::string_view        method,
+        std::span<const ObjArg> args) -> ObjOutcome
     {
         EngineState* state = ensure_face(face);
         if (state == nullptr)
@@ -2074,10 +2054,8 @@ namespace cg::util::cshost
     auto open_msbuild_eval(std::wstring_view assembly_dir)
         -> std::optional<CsRef>
     {
-        const std::int32_t token = obj_create(
-            Face::Evaluation,
-            ObjClass::MsbuildEval,
-            assembly_dir);
+        const std::int32_t token =
+            obj_create(Face::Evaluation, ObjClass::MsbuildEval, assembly_dir);
         if (token <= 0)
         {
             return std::nullopt;
@@ -2177,10 +2155,7 @@ namespace cg::util::cshost
 
     void reset_for_tests() {}
 
-    auto open_select_string() -> std::optional<CsRef>
-    {
-        return std::nullopt;
-    }
+    auto open_select_string() -> std::optional<CsRef> { return std::nullopt; }
 
     auto open_msbuild_eval(std::wstring_view /*assembly_dir*/)
         -> std::optional<CsRef>

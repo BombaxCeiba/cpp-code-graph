@@ -80,6 +80,15 @@ export namespace cg::clang
     {
         std::vector<ScanProvide> provides;
         std::vector<ScanRequire> requires_names;
+        /**
+         * @brief 归属翻译单元（规范路径）。
+         *
+         * @internal 批量扫描的调用方按它把规则映射回条目；无 provides
+         * 的纯消费者规则没有 source-path 可作间接归属，这个字段是唯
+         * 一可靠的映射键。填充来源见 parse_p1689（file 键优先，
+         * primary-output 回显兜底）。
+         */
+        std::string file;
     };
 
     /**
@@ -418,6 +427,19 @@ export namespace cg::clang
             std::string              compat_path;
             std::vector<std::string> wiring;
         };
+
+        /** @brief 模块源相对路径按基目录解析为规范绝对路径。 */
+        [[nodiscard]]
+        inline auto resolve_under(
+            const std::string& base_dir,
+            std::string_view   rel) -> std::string
+        {
+            namespace fs = std::filesystem;
+            const fs::path p{std::string{rel}};
+            const fs::path abs = p.is_absolute() ? p : fs::path{base_dir} / p;
+            return cg::util::norm_path(abs.lexically_normal().generic_string());
+        }
+
         [[nodiscard]]
         auto parse_modules_json(
             const std::string& text,
@@ -439,14 +461,6 @@ export namespace cg::clang
                 {
                     return out;
                 }
-                const auto resolve = [&](std::string_view rel)
-                {
-                    const fs::path p{std::string{rel}};
-                    const fs::path abs =
-                        p.is_absolute() ? p : fs::path{base_dir} / p;
-                    return cg::util::norm_path(
-                        abs.lexically_normal().generic_string());
-                };
                 for (std::size_t i = 0; i < modules->size(); ++i)
                 {
                     const auto entry = modules->at(i);
@@ -493,8 +507,9 @@ export namespace cg::clang
                                 if (const auto dv = dirs->at(d);
                                     dv && dv->is_string())
                                 {
-                                    const std::string dir =
-                                        resolve(*dv->as_string());
+                                    const std::string dir = resolve_under(
+                                        base_dir,
+                                        *dv->as_string());
                                     cg::util::push_unique(out.wiring, dir);
                                 }
                             }
@@ -502,11 +517,11 @@ export namespace cg::clang
                     }
                     if (name == "std")
                     {
-                        out.std_path = resolve(source);
+                        out.std_path = resolve_under(base_dir, source);
                     }
                     else if (name == "std.compat")
                     {
-                        out.compat_path = resolve(source);
+                        out.compat_path = resolve_under(base_dir, source);
                     }
                 }
             }
@@ -515,6 +530,93 @@ export namespace cg::clang
                 return ModulesJson{};
             }
             return out;
+        }
+
+        /**
+         * @brief P1689 输出的单个规则对象解码为扫描规则。
+         *
+         * @internal -format=p1689 的规则对象不携带翻译单元的 file 键（只带
+         * primary-output/provides/requires），归属经 primary-output 回显：
+         * 发射体给每条编译命令注入 -o <输入路径>，扫描器把它原样回显为
+         * primary-output。
+         */
+        [[nodiscard]]
+        auto scan_rule_from_unit(const cg::util::json::ValueView& unit)
+            -> ScanRule
+        {
+            ScanRule rule;
+            if (const auto f = unit.get("file"); f && f->is_string())
+            {
+                rule.file = cg::util::norm_path(*f->as_string());
+            }
+            if (rule.file.empty())
+            {
+                if (const auto po = unit.get("primary-output");
+                    po && po->is_string())
+                {
+                    rule.file = cg::util::norm_path(*po->as_string());
+                }
+            }
+            if (const auto provides = unit.get("provides");
+                provides && provides->is_array())
+            {
+                for (std::size_t i = 0; i < provides->size(); ++i)
+                {
+                    const auto p = provides->at(i);
+                    if (!p || !p->is_object())
+                    {
+                        continue;
+                    }
+                    ScanProvide provide;
+                    if (const auto v = p->get("logical-name");
+                        v && v->is_string())
+                    {
+                        provide.name = std::string{*v->as_string()};
+                    }
+                    if (const auto v = p->get("source-path");
+                        v && v->is_string())
+                    {
+                        provide.source = cg::util::norm_path(*v->as_string());
+                    }
+                    if (const auto v = p->get("is-interface");
+                        v && v->is_bool())
+                    {
+                        provide.is_interface = *v->as_bool();
+                    }
+                    if (!provide.name.empty())
+                    {
+                        rule.provides.push_back(std::move(provide));
+                    }
+                }
+            }
+            if (const auto requires_list = unit.get("requires");
+                requires_list && requires_list->is_array())
+            {
+                for (std::size_t i = 0; i < requires_list->size(); ++i)
+                {
+                    const auto rq = requires_list->at(i);
+                    if (!rq || !rq->is_object())
+                    {
+                        continue;
+                    }
+                    ScanRequire require;
+                    if (const auto v = rq->get("logical-name");
+                        v && v->is_string())
+                    {
+                        require.name = std::string{*v->as_string()};
+                    }
+                    if (const auto v = rq->get("source-path");
+                        v && v->is_string())
+                    {
+                        require.source = cg::util::norm_path(*v->as_string());
+                    }
+                    if (!require.name.empty())
+                    {
+                        rule.requires_names.push_back(std::move(require));
+                    }
+                }
+            }
+            return rule;
         }
 
         /**
@@ -537,73 +639,6 @@ export namespace cg::clang
                 {
                     return out;
                 }
-                const auto read_unit = [&](const json::ValueView& unit)
-                {
-                    ScanRule rule;
-                    if (const auto provides = unit.get("provides");
-                        provides && provides->is_array())
-                    {
-                        for (std::size_t i = 0; i < provides->size(); ++i)
-                        {
-                            const auto p = provides->at(i);
-                            if (!p || !p->is_object())
-                            {
-                                continue;
-                            }
-                            ScanProvide provide;
-                            if (const auto v = p->get("logical-name");
-                                v && v->is_string())
-                            {
-                                provide.name = std::string{*v->as_string()};
-                            }
-                            if (const auto v = p->get("source-path");
-                                v && v->is_string())
-                            {
-                                provide.source =
-                                    cg::util::norm_path(*v->as_string());
-                            }
-                            if (const auto v = p->get("is-interface");
-                                v && v->is_bool())
-                            {
-                                provide.is_interface = *v->as_bool();
-                            }
-                            if (!provide.name.empty())
-                            {
-                                rule.provides.push_back(std::move(provide));
-                            }
-                        }
-                    }
-                    if (const auto requires_list = unit.get("requires");
-                        requires_list && requires_list->is_array())
-                    {
-                        for (std::size_t i = 0; i < requires_list->size(); ++i)
-                        {
-                            const auto rq = requires_list->at(i);
-                            if (!rq || !rq->is_object())
-                            {
-                                continue;
-                            }
-                            ScanRequire require;
-                            if (const auto v = rq->get("logical-name");
-                                v && v->is_string())
-                            {
-                                require.name = std::string{*v->as_string()};
-                            }
-                            if (const auto v = rq->get("source-path");
-                                v && v->is_string())
-                            {
-                                require.source =
-                                    cg::util::norm_path(*v->as_string());
-                            }
-                            if (!require.name.empty())
-                            {
-                                rule.requires_names.push_back(
-                                    std::move(require));
-                            }
-                        }
-                    }
-                    out.push_back(std::move(rule));
-                };
                 if (const auto rules = root.get("rules");
                     rules && rules->is_array())
                 {
@@ -611,7 +646,7 @@ export namespace cg::clang
                     {
                         if (const auto r = rules->at(i); r && r->is_object())
                         {
-                            read_unit(*r);
+                            out.push_back(scan_rule_from_unit(*r));
                         }
                     }
                 }
@@ -623,7 +658,7 @@ export namespace cg::clang
                     {
                         if (const auto t = tus->at(i); t && t->is_object())
                         {
-                            read_unit(*t);
+                            out.push_back(scan_rule_from_unit(*t));
                         }
                     }
                 }
@@ -670,6 +705,17 @@ export namespace cg::clang
             return json::stringify(std::move(root));
         }
 
+        /** @brief JSON 对象成员若为字符串则读出，否则空串。 */
+        [[nodiscard]]
+        inline auto json_string_of(
+            const cg::util::json::ValueView& entry,
+            std::string_view                 key) -> std::string
+        {
+            const auto v = entry.get(key);
+            return v && v->is_string() ? std::string{*v->as_string()}
+                                       : std::string{};
+        }
+
         [[nodiscard]]
         auto manifest_from_json(const std::string& text)
             -> std::optional<BmiManifest>
@@ -684,16 +730,10 @@ export namespace cg::clang
                 {
                     return std::nullopt;
                 }
-                const auto str = [&root](std::string_view key)
-                {
-                    const auto v = root.get(key);
-                    return v && v->is_string() ? std::string{*v->as_string()}
-                                               : std::string{};
-                };
-                out.engine = str("engine");
-                out.engine_key = str("engine_key");
-                out.config_key = str("config_key");
-                out.toolset_id = str("toolset");
+                out.engine = json_string_of(root, "engine");
+                out.engine_key = json_string_of(root, "engine_key");
+                out.config_key = json_string_of(root, "config_key");
+                out.toolset_id = json_string_of(root, "toolset");
                 const auto entries = root.get("entries");
                 if (!entries || !entries->is_array())
                 {
@@ -706,19 +746,12 @@ export namespace cg::clang
                     {
                         continue;
                     }
-                    BmiEntry   entry;
-                    const auto estr = [&e](std::string_view key)
-                    {
-                        const auto v = e->get(key);
-                        return v && v->is_string()
-                                   ? std::string{*v->as_string()}
-                                   : std::string{};
-                    };
-                    entry.name = estr("name");
-                    entry.source = estr("source");
-                    entry.hash = estr("hash");
-                    entry.command = estr("command");
-                    entry.pcm = estr("pcm");
+                    BmiEntry entry;
+                    entry.name = json_string_of(*e, "name");
+                    entry.source = json_string_of(*e, "source");
+                    entry.hash = json_string_of(*e, "hash");
+                    entry.command = json_string_of(*e, "command");
+                    entry.pcm = json_string_of(*e, "pcm");
                     if (const auto v = e->get("mtime"); v && v->is_number())
                     {
                         entry.mtime = *v->as_int();
@@ -735,7 +768,7 @@ export namespace cg::clang
                     {
                         entry.std_module = *v->as_bool();
                     }
-                    entry.config = estr("config");
+                    entry.config = json_string_of(*e, "config");
                     if (const auto reqs = e->get("requires");
                         reqs && reqs->is_array())
                     {
@@ -1282,25 +1315,30 @@ export namespace cg::clang
          *
          * @return 新者优先、携带 modules/std.ixx 的工具集目录。
          */
+        /** @brief 环境变量指向的 "Microsoft Visual Studio" 根（未设置为空）。
+         */
+        [[nodiscard]]
+        inline auto vs_root_from_env(const char* name) -> std::string
+        {
+            const auto value = cg::util::cstd::get_env(name);
+            if (!value.has_value())
+            {
+                return std::string{};
+            }
+            return std::format(
+                "{}/Microsoft Visual Studio",
+                cg::util::to_forward_slashes(*value));
+        }
+
         [[nodiscard]]
         auto discover_msvc_toolsets() -> std::vector<std::string>
         {
             namespace fs = std::filesystem;
-            std::error_code ec;
-            const auto      env_root = [](const char* name)
-            {
-                const auto value = cg::util::cstd::get_env(name);
-                if (!value.has_value())
-                {
-                    return std::string{};
-                }
-                return std::format(
-                    "{}/Microsoft Visual Studio",
-                    cg::util::to_forward_slashes(*value));
-            };
+            std::error_code          ec;
             std::vector<std::string> roots;
             for (const std::string& root :
-                 {env_root("ProgramFiles"), env_root("ProgramFiles(x86)")})
+                 {vs_root_from_env("ProgramFiles"),
+                  vs_root_from_env("ProgramFiles(x86)")})
             {
                 if (!root.empty())
                 {
@@ -1766,13 +1804,11 @@ export namespace cg::clang
             }
             // 名字 ASCII 大小写不敏感比对（cl 选项本身大小写不敏感；清单按
             // MSBuild 规范拼写，这里放宽是为手写 cdb 的健壮性）。
-            const auto ieq = [&](std::string_view flag)
-            { return cg::util::ascii_iequals(spelling, flag); };
             if (!m.joined)
             {
                 for (const std::string_view f : msvc_module_single_switches)
                 {
-                    if (ieq(f))
+                    if (cg::util::ascii_iequals(spelling, f))
                     {
                         m.kind = MsvcModuleSwitchKind::single;
                         m.canonical = f;
@@ -1782,7 +1818,7 @@ export namespace cg::clang
             }
             for (const std::string_view f : msvc_module_valued_switches)
             {
-                if (ieq(f))
+                if (cg::util::ascii_iequals(spelling, f))
                 {
                     m.kind = MsvcModuleSwitchKind::valued;
                     m.canonical = f;
@@ -1981,31 +2017,37 @@ export namespace cg::clang
          * 不敏感，与模块开关剥离同口径）。"-Xclang -include-pch" 是序列化
          * PCH 通道，不属于本剥离面——它由 PCH 规划注入或回退剥离。
          */
+        /**
+         * @brief token 是否为 '/' 或 '-' 前缀的 cl 旗标（名字大小写从宽）。
+         *
+         * @return 命中时携带连写值段（无尾值为空串）；不命中时无值。
+         */
+        [[nodiscard]]
+        inline auto cl_joined_flag_value(
+            const std::string& t,
+            std::string_view   name) -> std::optional<std::string>
+        {
+            if (t.size() < name.size() + 1 || (t[0] != '/' && t[0] != '-'))
+            {
+                return std::nullopt;
+            }
+            if (!cg::util::ascii_iequals(
+                    std::string_view{t}.substr(1, name.size()),
+                    name))
+            {
+                return std::nullopt;
+            }
+            if (t.size() > name.size() + 1)
+            {
+                return t.substr(name.size() + 1);
+            }
+            return std::string{};
+        }
+
         [[nodiscard]]
         auto strip_module_text_forced_includes(
             const std::vector<std::string>& argv) -> ForcedIncludeStrip
         {
-            const auto cl_flag_prefix = [](const std::string& t,
-                                           std::string_view   name,
-                                           std::string&       joined)
-            {
-                joined.clear();
-                if (t.size() < name.size() + 1 || (t[0] != '/' && t[0] != '-'))
-                {
-                    return false;
-                }
-                if (!cg::util::ascii_iequals(
-                        std::string_view{t}.substr(1, name.size()),
-                        name))
-                {
-                    return false;
-                }
-                if (t.size() > name.size() + 1)
-                {
-                    joined = t.substr(name.size() + 1);
-                }
-                return true;
-            };
             ForcedIncludeStrip out;
             out.argv.reserve(argv.size());
             for (std::size_t i = 0; i < argv.size();)
@@ -2060,14 +2102,14 @@ export namespace cg::clang
                 // "-FI nput-charset=GBK" 吞掉，模块单元从此按 UTF-8 解析
                 // GBK 源码）；两段式为整 token 精确比对、无撞名面，'/' 与
                 // '-' 双前缀保留。
-                std::string joined;
-                if (cl_flag_prefix(t, "FI", joined)
-                    && (joined.empty() || t[0] == '/'
+                std::optional<std::string> fi = cl_joined_flag_value(t, "FI");
+                if (fi.has_value()
+                    && (fi->empty() || t[0] == '/'
                         || t.compare(1, 2, "FI") == 0))
                 {
-                    if (!joined.empty())
+                    if (!fi->empty())
                     {
-                        out.removed.push_back(std::move(joined));
+                        out.removed.push_back(std::move(*fi));
                         ++i;
                     }
                     else if (cg::clang::detail::cl_value_follows(argv, i))
@@ -2140,7 +2182,12 @@ export namespace cg::clang
          * @internal self_build_modules 的 scan_batch 与纯头单元语料的
          *           classic 降级通道共用同一发射形状（argv0 + 逐文件
          *           旗标 + 文件清单），差异只在调用方组装的旗标向量；
-         *           抽出共享体使两处发射逐字节同源。
+         *           抽出共享体使两处发射逐字节同源。每条命令追加
+         *           -o <输入路径>：P1689 输出不携带翻译单元的 file 键，
+         *           扫描器把命令的输出名原样回显为 primary-output，
+         *           注入输入路径即让回显携带归属，解析层据此填
+         *           ScanRule.file，批量发射的调用方按它把规则映射回
+         *           条目。输出名在 P1689 伪预处理中不落盘，仅作回显。
          *
          * @param root           编译数据库的 directory 字段（工作目录）。
          * @param argv0          扫描命令首 token（驱动器或垫片）。
@@ -2148,8 +2195,14 @@ export namespace cg::clang
          * @param files          待扫描文件（绝对路径）。
          * @param module_units_batch  true 时追加 -x c++-module（模块单元批）。
          * @param flags_per_file 与 files 对齐的扫描旗标（每文件一份）。
-         * @param scan_err       可空；带回扫描器输出的首行（失败归因）。
+         * @return 规则集与扫描器 stderr 首行（spawn 失败时为固定文案）。
          */
+        struct P1689Scan
+        {
+            std::vector<ScanRule> rules; ///< 解析出的规则（失败时为空）
+            std::string err; ///< 扫描器输出首行（拼接先例：err 优先，out 兜底）
+        };
+
         [[nodiscard]]
         auto run_p1689_scan(
             const std::string&                           root,
@@ -2157,8 +2210,8 @@ export namespace cg::clang
             const std::string&                           scan_deps,
             const std::vector<std::string>&              files,
             bool                                         module_units_batch,
-            const std::vector<std::vector<std::string>>& flags_per_file,
-            std::string* scan_err) -> std::vector<ScanRule>
+            const std::vector<std::vector<std::string>>& flags_per_file)
+            -> P1689Scan
         {
             namespace fs = std::filesystem;
             namespace json = cg::util::json;
@@ -2178,6 +2231,8 @@ export namespace cg::clang
                     argv_json.add("-x");
                     argv_json.add("c++-module");
                 }
+                argv_json.add("-o");
+                argv_json.add(files[i]);
                 argv_json.add(files[i]);
                 entry.set("arguments", std::move(argv_json));
                 entry.set("file", files[i]);
@@ -2199,20 +2254,52 @@ export namespace cg::clang
                 {"-compilation-database=" + db_path, "-format=p1689"});
             std::error_code ec;
             fs::remove(fs::path{db_path}, ec);
-            if (scan_err != nullptr)
-            {
-                // 扫描器 stderr 首行不再被整体吞噬（拼接先例同 std 失败路
-                // 径：err 优先，out 兜底）——降级文案用它归因。
-                *scan_err =
-                    r.started
-                        ? detail::first_line_of(r.err.empty() ? r.out : r.err)
-                        : std::string{"spawn failed"};
-            }
+            P1689Scan out;
+            out.err = r.started
+                          ? detail::first_line_of(r.err.empty() ? r.out : r.err)
+                          : std::string{"spawn failed"};
             if (!r.started)
             {
-                return {};
+                return out;
             }
-            return detail::parse_p1689(r.out);
+            out.rules = detail::parse_p1689(r.out);
+            return out;
+        }
+
+        /**
+         * @brief 头单元降级面：P1689 requires 中的头单元名剥去定界符进
+         *        overlay，文本书写的头单元导入并集进 overlay。
+         *
+         * @internal classic 降级通道与 apply_degrade_rules 的头单元半边
+         *           是同一策略：P1689 规则的 requires 不报告头单元，头
+         *           单元名单一律走文本扫描并与规则面并集。requires 名
+         *           的定界符（引号/尖括号）是 P1689 逻辑名拼写，overlay
+         *           面要的是去定界符的包含路径。
+         */
+        auto attach_header_unit_overlay(
+            CompileCommand&                 cc,
+            const std::vector<ScanRequire>& reqs) -> void
+        {
+            for (const ScanRequire& rq : reqs)
+            {
+                if (looks_like_header_unit(rq.name))
+                {
+                    cc.overlay.header_unit_includes = true;
+                    std::string name = rq.name;
+                    if (name.size() >= 2
+                        && ((name.front() == '"' && name.back() == '"')
+                            || (name.front() == '<' && name.back() == '>')))
+                    {
+                        name = name.substr(1, name.size() - 2);
+                    }
+                    cc.overlay_imports.push_back(std::move(name));
+                }
+            }
+            for (const std::string& name : text_header_unit_imports(cc.file))
+            {
+                cc.overlay.header_unit_includes = true;
+                cg::util::push_unique(cc.overlay_imports, name);
+            }
         }
 
         /**
@@ -2228,33 +2315,39 @@ export namespace cg::clang
          *           文本扫描）；std 伞头半边依赖模块 DAG（nodes），本通道
          *           恒无节点、整段不适用。requires 逐名入 scan_imports
          *           （失败 TU 的 imports 行兜底），头单元拼写去引号后与
-         *           文本扫描结果并集进 overlay_imports。
+         *           文本扫描结果并集进 overlay_imports。待扫清单一次批发
+         *           射（每文件单发子进程是 N 次启动加 N 次临时 json 落
+         *           盘的固定开销），规则按归属映射回条目。
          *
-         * @param opt      自建选项（root/std 值/db 路线标记）。
-         * @param argv0    扫描命令首 token（驱动器）。
-         * @param scan_deps clang-scan-deps 可执行路径。
-         * @param classic  经典编译命令（就地增强：overlay 与 imports 面）。
+         * @param opt        自建选项（root/std 值/db 路线标记）。
+         * @param argv0      扫描命令首 token（驱动器）。
+         * @param scan_deps  clang-scan-deps 可执行路径。
+         * @param classic    经典编译命令（就地增强：overlay 与 imports 面）。
+         * @param import_face classic 中文本携带 import 的条目（预判收
+         *                    集，降级只扫它们；指针指向 classic 的元素，
+         *                   classic 在本函数内不被增删）。
          * @return 被（至少）附着了头单元降级的条目数。
          */
         auto degrade_classic_header_unit_imports(
-            const SelfBuildOptions&      opt,
-            const std::string&           argv0,
-            const std::string&           scan_deps,
-            std::vector<CompileCommand>& classic) -> std::size_t
+            const SelfBuildOptions&                   opt,
+            const std::string&                        argv0,
+            const std::string&                        scan_deps,
+            std::vector<CompileCommand>&              classic,
+            const std::vector<const CompileCommand*>& import_face)
+            -> std::size_t
         {
-            std::unordered_map<std::string, ScanRule> classic_rules;
-            for (const CompileCommand& cc : classic)
+            std::vector<std::string>              files;
+            std::vector<std::vector<std::string>> flags_per_file;
+            files.reserve(import_face.size());
+            flags_per_file.reserve(import_face.size());
+            for (const CompileCommand* cc : import_face)
             {
-                if (!text_has_import(cc.file))
-                {
-                    continue;
-                }
                 std::vector<std::string> flags;
                 if (opt.db_mode)
                 {
                     // P1689 伪预处理只关心模块语法；记录 argv 剥掉 MSVC
                     // 模块开关后作扫描旗标（gnu 方言下为恒等操作）。
-                    flags = detail::strip_msvc_module_switches(cc.argv).argv;
+                    flags = detail::strip_msvc_module_switches(cc->argv).argv;
                 }
                 else
                 {
@@ -2265,18 +2358,36 @@ export namespace cg::clang
                         flags.push_back(opt.root);
                     }
                 }
-                const std::string           norm = cg::util::norm_path(cc.file);
-                const std::vector<ScanRule> rules = detail::run_p1689_scan(
-                    opt.root,
-                    argv0,
-                    scan_deps,
-                    {norm},
-                    false,
-                    {flags},
-                    nullptr);
-                if (rules.size() == 1)
+                files.push_back(cg::util::norm_path(cc->file));
+                flags_per_file.push_back(std::move(flags));
+            }
+            std::unordered_map<std::string, ScanRule> classic_rules;
+            {
+                // 纯头单元条目的 primary-output 回显为空（TU 无模块产
+                // 出，扫描器不回显注入的 -o 名）：条数与待扫清单相符时
+                // 按输入序对齐规则，恢复逐条发射时代"单发即归属"的语
+                // 义；条数不符（输出被截断/解析丢行）时仅收回显非空
+                // 的规则，宁缺勿错归。
+                std::vector<ScanRule> rules = detail::run_p1689_scan(
+                                                  opt.root,
+                                                  argv0,
+                                                  scan_deps,
+                                                  files,
+                                                  false,
+                                                  flags_per_file)
+                                                  .rules;
+                const bool            positional = rules.size() == files.size();
+                for (std::size_t i = 0; i < rules.size(); ++i)
                 {
-                    classic_rules.emplace(norm, rules.front());
+                    if (rules[i].file.empty())
+                    {
+                        if (!positional)
+                        {
+                            continue;
+                        }
+                        rules[i].file = files[i];
+                    }
+                    classic_rules.emplace(rules[i].file, std::move(rules[i]));
                 }
             }
             std::size_t touched = 0;
@@ -2292,31 +2403,34 @@ export namespace cg::clang
                 for (const ScanRequire& rq : rit->second.requires_names)
                 {
                     cc.scan_imports.push_back(rq.name);
-                    if (looks_like_header_unit(rq.name))
-                    {
-                        cc.overlay.header_unit_includes = true;
-                        std::string name = rq.name;
-                        if (name.size() >= 2
-                            && ((name.front() == '"' && name.back() == '"')
-                                || (name.front() == '<' && name.back() == '>')))
-                        {
-                            name = name.substr(1, name.size() - 2);
-                        }
-                        cc.overlay_imports.push_back(std::move(name));
-                    }
                 }
-                for (const std::string& name :
-                     text_header_unit_imports(cc.file))
-                {
-                    cc.overlay.header_unit_includes = true;
-                    cg::util::push_unique(cc.overlay_imports, name);
-                }
+                attach_header_unit_overlay(cc, rit->second.requires_names);
                 if (!before && cc.overlay.header_unit_includes)
                 {
                     ++touched;
                 }
             }
             return touched;
+        }
+
+        /** @brief CMake 布局 ".dir/" 后的首个路径段（配置名）；无此段时无值。
+         */
+        [[nodiscard]]
+        inline auto segment_after_dir_marker(std::string_view path)
+            -> std::optional<std::string>
+        {
+            const std::size_t at = path.find(".dir/");
+            if (at == std::string_view::npos)
+            {
+                return std::nullopt;
+            }
+            const std::size_t begin = at + 5;
+            const std::size_t slash = path.find('/', begin);
+            if (slash == std::string_view::npos || slash == begin)
+            {
+                return std::nullopt;
+            }
+            return std::string{path.substr(begin, slash - begin)};
         }
 
     } // namespace detail
@@ -2336,38 +2450,78 @@ export namespace cg::clang
     [[nodiscard]]
     auto db_config_signature(const CompileCommand& cc) -> std::string
     {
-        const auto segment_after_dir =
-            [](std::string_view path) -> std::optional<std::string>
-        {
-            const std::size_t at = path.find(".dir/");
-            if (at == std::string_view::npos)
-            {
-                return std::nullopt;
-            }
-            const std::size_t begin = at + 5;
-            const std::size_t slash = path.find('/', begin);
-            if (slash == std::string_view::npos || slash == begin)
-            {
-                return std::nullopt;
-            }
-            return std::string{path.substr(begin, slash - begin)};
-        };
         if (!cc.module_map.empty())
         {
-            return segment_after_dir(cc.module_map).value_or(std::string{});
+            return detail::segment_after_dir_marker(cc.module_map)
+                .value_or(std::string{});
         }
         // 经典条目（无 modmap）：同一 ".dir/`<段>`/" 判别式施于全部 argv 记号
         // （CMake 的 -o 目标路径同按 .dir/`<配置>`/ 布局）。单配置生成器
-        // ".dir/" 后是源子路径的噪声，由调用方（拆分裁决）以"同文件跨签名
+        // ".dir/" 后是源子路径的噪声，由调用方（拆分判定）以"同文件跨签名
         // 重复出现"的判别式滤除。
         for (const std::string& token : cc.argv)
         {
-            if (const auto seg = segment_after_dir(token))
+            if (const auto seg = detail::segment_after_dir_marker(token))
             {
                 return *seg;
             }
         }
         return {};
+    }
+
+    /**
+     * @brief 从某个驱动器的 libstdc++.modules.json 发现 std 源。
+     *
+     * @param json libstdc++.modules.json 路径（空则无源）。
+     * @param origin toolset_id 的来源标注（"driver"/"g++"）。
+     * @param cxx_include_dirs 驱动器报告的 C++ include 根（守卫：报告
+     *        列表确实含该 GCC 头根才采信，默认 libc++ 或 MSVC 的驱动
+     *        器绝不可被喂异风味的 std pcm）。
+     */
+    [[nodiscard]]
+    auto libstdcxx_modules_source(
+        const std::string&              json,
+        const std::string&              origin,
+        const std::vector<std::string>& cxx_include_dirs)
+        -> std::optional<StdModuleSource>
+    {
+        namespace fs = std::filesystem;
+        if (json.empty())
+        {
+            return std::nullopt;
+        }
+        const auto json_text = cg::util::read_text_file(json);
+        if (!json_text.has_value())
+        {
+            return std::nullopt;
+        }
+        const detail::ModulesJson parsed = detail::parse_modules_json(
+            *json_text,
+            fs::path{json}.parent_path().generic_string());
+        if (parsed.std_path.empty())
+        {
+            return std::nullopt;
+        }
+        const std::string cxx_root = cg::util::norm_path(
+            fs::path{parsed.std_path}
+                .parent_path()
+                .parent_path()
+                .generic_string());
+        for (const std::string& dir : cxx_include_dirs)
+        {
+            if (dir == cxx_root)
+            {
+                StdModuleSource src;
+                src.stdlib_impl = "libstdc++";
+                src.std_path = parsed.std_path;
+                src.compat_path = parsed.compat_path;
+                src.toolset_id = origin;
+                src.toolset_id += ':';
+                src.toolset_id += cxx_root;
+                return src;
+            }
+        }
+        return std::nullopt;
     }
 
     /**
@@ -2455,50 +2609,10 @@ export namespace cg::clang
             }
         }
 
-        const auto try_libstdcxx =
-            [&](const std::string& json,
-                const std::string& origin) -> std::optional<StdModuleSource>
-        {
-            if (json.empty())
-            {
-                return std::nullopt;
-            }
-            const auto json_text = cg::util::read_text_file(json);
-            if (!json_text.has_value())
-            {
-                return std::nullopt;
-            }
-            const detail::ModulesJson parsed = detail::parse_modules_json(
-                *json_text,
-                fs::path{json}.parent_path().generic_string());
-            if (parsed.std_path.empty())
-            {
-                return std::nullopt;
-            }
-            const std::string cxx_root = cg::util::norm_path(
-                fs::path{parsed.std_path}
-                    .parent_path()
-                    .parent_path()
-                    .generic_string());
-            for (const std::string& dir : info.cxx_include_dirs)
-            {
-                if (dir == cxx_root)
-                {
-                    StdModuleSource src;
-                    src.stdlib_impl = "libstdc++";
-                    src.std_path = parsed.std_path;
-                    src.compat_path = parsed.compat_path;
-                    src.toolset_id = origin;
-                    src.toolset_id += ':';
-                    src.toolset_id += cxx_root;
-                    return src;
-                }
-            }
-            return std::nullopt;
-        };
-        if (auto src = try_libstdcxx(
+        if (auto src = libstdcxx_modules_source(
                 detail::print_file_name(info.driver, "libstdc++.modules.json"),
-                "driver"))
+                "driver",
+                info.cxx_include_dirs))
         {
             return *src;
         }
@@ -2521,9 +2635,10 @@ export namespace cg::clang
         }
         if (!gxx.empty())
         {
-            if (auto src = try_libstdcxx(
+            if (auto src = libstdcxx_modules_source(
                     detail::print_file_name(gxx, "libstdc++.modules.json"),
-                    "g++"))
+                    "g++",
+                    info.cxx_include_dirs))
             {
                 return *src;
             }
@@ -2946,6 +3061,1212 @@ export namespace cg::clang
         return hits;
     }
 
+    namespace detail
+    {
+
+        /**
+         * @brief std 系模块的 pcm 落点：配置目录下以模块名命名的 .pcm。
+         */
+        [[nodiscard]]
+        auto std_pcm_path(
+            const std::string& config_dir,
+            std::string_view   module) -> std::string
+        {
+            namespace fs = std::filesystem;
+            return cg::util::norm_path(
+                (fs::path{config_dir} / std::format("{}.pcm", module))
+                    .lexically_normal()
+                    .generic_string());
+        }
+
+        /** @brief 跨配置捐赠命中：donor 的绝对 pcm 路径与清单记录尺寸。 */
+        struct DonorPcm
+        {
+            std::string  path;
+            std::int64_t size = 0;
+        };
+
+        /**
+         * @brief 从兄弟配置目录寻找同生产者的 std pcm 捐赠。
+         *
+         * @internal 跨配置 std 捐赠：布局改版后每个配置目录各有自己的引
+         * 擎目录与台账，本清单 miss 的 std pcm 从兄弟配置目录扫描同一生产
+         * 者产出（同源路径 + 同内容哈希 + 同命令摘要 = 同 pcm 字节）拷贝
+         * 重定位，绝不共享句柄——33MB 级 std 不因布局改版退化为每配置重
+         * 编。命中条件与清单内捐赠同等保守。
+         *
+         * @return 命中返回路径与尺寸；未命中返回空路径。
+         */
+        [[nodiscard]]
+        auto cross_config_donor(
+            const std::string& ccg_config_dir,
+            const std::string& shared_ccg_root,
+            const std::string& engine_key,
+            const std::string& engine_version,
+            std::string_view   module,
+            const std::string& command,
+            const std::string& source,
+            const std::string& source_hash) -> DonorPcm
+        {
+            namespace fs = std::filesystem;
+            if (ccg_config_dir.empty())
+            {
+                return {};
+            }
+            std::error_code lec;
+            for (const fs::directory_entry& sibling :
+                 fs::directory_iterator(fs::path{shared_ccg_root}, lec))
+            {
+                std::error_code sec;
+                if (!sibling.is_directory(sec))
+                {
+                    continue;
+                }
+                std::error_code bec;
+                for (const fs::directory_entry& bmi_dir :
+                     fs::directory_iterator(sibling.path(), bec))
+                {
+                    std::error_code dec;
+                    if (!bmi_dir.is_directory(dec))
+                    {
+                        continue;
+                    }
+                    if (!bmi_dir.path().filename().generic_string().starts_with(
+                            "bmi-self-"))
+                    {
+                        continue;
+                    }
+                    const fs::path donor_engine = bmi_dir.path() / engine_key;
+                    const fs::path donor_manifest =
+                        donor_engine / "manifest.json";
+                    std::error_code mec;
+                    if (!fs::is_regular_file(donor_manifest, mec))
+                    {
+                        continue;
+                    }
+                    const auto donor_text =
+                        cg::util::read_text_file(donor_manifest.string());
+                    if (!donor_text.has_value())
+                    {
+                        continue;
+                    }
+                    const auto other = manifest_from_json(*donor_text);
+                    if (!other.has_value() || other->engine != engine_version)
+                    {
+                        continue;
+                    }
+                    for (const BmiEntry& e : other->entries)
+                    {
+                        if (e.name != module || !e.std_module
+                            || e.command != command || e.source != source
+                            || e.hash != source_hash || e.pcm.empty()
+                            || e.pcm_size <= 0)
+                        {
+                            continue;
+                        }
+                        const fs::path  donor = donor_engine / fs::path{e.pcm};
+                        std::error_code cec;
+                        if (fs::is_regular_file(donor, cec)
+                            && artifact_size(
+                                   donor.lexically_normal().generic_string())
+                                   == e.pcm_size)
+                        {
+                            return DonorPcm{
+                                donor.lexically_normal().generic_string(),
+                                e.pcm_size};
+                        }
+                    }
+                }
+            }
+            return {};
+        }
+
+        /**
+         * @brief std 系模块构建的只读输入面。
+         *
+         * @internal opt 供 force 门、std 值与配置标签；driver 是引擎 clang
+         * 可执行；std_source 是标准库实现的 std 源发现结果；config_dir 是
+         * pcm 落点目录；shared_ccg_root/engine_key/engine_version 供跨配
+         * 置捐赠定位兄弟配置目录；cl_std/dialect_cl/langopt_axes 决定
+         * argv 的方言形态；prior 是上一轮清单条目表（复用判定的命中面）。
+         */
+        struct StdBuildCtx
+        {
+            const SelfBuildOptions&                          opt;
+            const StdModuleSource&                           std_source;
+            const std::string&                               driver;
+            const std::string&                               config_dir;
+            const std::string&                               engine_dir;
+            const std::string&                               shared_ccg_root;
+            const std::string&                               engine_key;
+            const std::string&                               engine_version;
+            const std::string&                               cl_std;
+            const std::vector<std::string>&                  langopt_axes;
+            const std::unordered_map<std::string, BmiEntry>& prior;
+            bool                                             dialect_cl = false;
+        };
+
+        /**
+         * @brief std 系模块构建的可变输出面。
+         *
+         * @internal manifest 登记成功条目（复用、捐赠、编译三个出口各一
+         * 条）；out 累加 reused/built 计数；std_error 只在编译失败路径整
+         * 体赋值——后一次构建的失败会覆盖前一次的细节。
+         */
+        struct StdBuildIo
+        {
+            BmiManifest&     manifest;
+            SelfBuildResult& out;
+            std::string      std_error; // 失败构建的细节
+        };
+
+        /**
+         * @brief 合成 std 系模块的生产 argv（方言形态由 ctx 决定）。
+         *
+         * @internal 参数向量不含引擎可执行路径：run_tool 的首参（进程可执
+         * 行栏）已携带它，run_process 又把它拼成命令行首 token
+         * （"exe" + 参数）——参数向量里再带一份，引擎 .exe 路径就会
+         * 在命令行出现两遍，第二份是真实存在的文件，被 clang 当作额外
+         * 输入。std 路径的合成 argv 无 /TP，clang-cl 把 .exe 归为 linker
+         * input 只出警告，此前侥幸成功；这与接口路径（/TP 把它强制成
+         * C++ 输入，双输入 + -clang:-o 即 cannot specify -o when
+         * generating multiple output files，参数逃逸真凶）是同源的结构
+         * 问题，一并根除。
+         */
+        [[nodiscard]]
+        auto synthesize_argv(
+            const StdBuildCtx& ctx,
+            const std::string& source,
+            const std::string& feed_std_pcm) -> std::vector<std::string>
+        {
+            std::vector<std::string> argv;
+            if (ctx.dialect_cl)
+            {
+                argv.emplace_back("--driver-mode=cl");
+                argv.emplace_back("/EHsc");
+                argv.emplace_back(ctx.cl_std);
+                argv.emplace_back("-Wno-include-angled-in-module-purview");
+            }
+            else
+            {
+                argv.emplace_back(std::format("-std={}", ctx.opt.std_value));
+                for (const std::string& axis : ctx.langopt_axes)
+                {
+                    argv.push_back(axis);
+                }
+            }
+            argv.emplace_back("-Wno-reserved-module-identifier");
+            if (!feed_std_pcm.empty())
+            {
+                argv.emplace_back(
+                    std::format("-fmodule-file=std={}", feed_std_pcm));
+            }
+            argv.emplace_back("-x");
+            argv.emplace_back("c++-module");
+            argv.emplace_back("--precompile-reduced-bmi");
+            if (ctx.dialect_cl)
+            {
+                for (const std::string& dir : ctx.std_source.wiring)
+                {
+                    argv.emplace_back("-imsvc");
+                    argv.push_back(dir);
+                }
+            }
+            else
+            {
+                for (const std::string& w : ctx.std_source.wiring)
+                {
+                    argv.push_back(w);
+                }
+            }
+            argv.push_back(source);
+            return argv;
+        }
+
+        /**
+         * @brief 上一轮清单命中时的复用：盘上 pcm 完好则直接复用；半截
+         *        则从本清单记录的旧位置拷回恢复。
+         *
+         * @internal 0 字节/半截/尺寸不符：同轮失效（丢缓存），先试同
+         * 清单的 donor，仍不可用则落回本地重建。
+         *
+         * @return 成功返回 pcm 路径；未命中或不可复用返回空串。
+         */
+        [[nodiscard]]
+        auto try_reuse_prior(
+            const StdBuildCtx& ctx,
+            StdBuildIo&        io,
+            const std::string& pcm,
+            const std::string& command,
+            const BmiEntry*    entry_prior,
+            const SourceCheck& check) -> std::string
+        {
+            namespace fs = std::filesystem;
+            if (!ctx.opt.force && check.matches_prior && entry_prior != nullptr
+                && entry_prior->command == command)
+            {
+                const std::int64_t cached =
+                    cached_pcm_size(pcm, entry_prior->pcm_size);
+                if (cached > 0)
+                {
+                    BmiEntry entry = *entry_prior;
+                    entry.mtime = check.stat.mtime;
+                    entry.size = check.stat.size;
+                    entry.pcm = pcm_rel(ctx.engine_dir, pcm);
+                    entry.pcm_size = cached;
+                    entry.config = ctx.opt.db_config_label;
+                    io.manifest.entries.push_back(std::move(entry));
+                    ++io.out.reused;
+                    return pcm;
+                }
+                if (entry_prior != nullptr && !entry_prior->pcm.empty())
+                {
+                    const fs::path donor =
+                        fs::path{ctx.engine_dir} / fs::path{entry_prior->pcm};
+                    if (copy_donor_verified(
+                            donor.lexically_normal().generic_string(),
+                            pcm,
+                            entry_prior->pcm_size))
+                    {
+                        BmiEntry entry = *entry_prior;
+                        entry.mtime = check.stat.mtime;
+                        entry.size = check.stat.size;
+                        entry.pcm = pcm_rel(ctx.engine_dir, pcm);
+                        entry.pcm_size = entry_prior->pcm_size;
+                        entry.config = ctx.opt.db_config_label;
+                        io.manifest.entries.push_back(std::move(entry));
+                        ++io.out.reused;
+                        return pcm;
+                    }
+                }
+            }
+            return std::string{};
+        }
+
+        /**
+         * @brief 登记一条 std 系模块的清单条目并计数（成功出口的公共步）。
+         *
+         * @internal 捐赠与本地编译两个出口的条目字段面同构（std 条目的
+         *           requires_names 恒空），仅 pcm 尺寸来源与计数器不同。
+         */
+        void register_std_entry(
+            const StdBuildCtx& ctx,
+            StdBuildIo&        io,
+            std::string_view   module,
+            const std::string& source,
+            const std::string& pcm,
+            const std::string& command,
+            const SourceCheck& check,
+            std::int64_t       pcm_size,
+            bool               reused)
+        {
+            BmiEntry entry;
+            entry.name = std::string{module};
+            entry.source = source;
+            entry.hash = check.hash;
+            entry.mtime = check.stat.mtime;
+            entry.size = check.stat.size;
+            entry.command = command;
+            entry.pcm = pcm_rel(ctx.engine_dir, pcm);
+            entry.pcm_size = pcm_size;
+            entry.std_module = true;
+            entry.config = ctx.opt.db_config_label;
+            io.manifest.entries.push_back(std::move(entry));
+            if (reused)
+            {
+                ++io.out.reused;
+            }
+            else
+            {
+                ++io.out.built;
+            }
+        }
+
+        /**
+         * @brief 跨配置捐赠：本配置清单 miss（首跑）时从兄弟配置目录拷贝
+         *        同一生产者产出，30+ MB 的 std 接口不重编。
+         *
+         * @internal donor 记录尺寸必须 >0，复制后目标尺寸必须与之一致。
+         *
+         * @return 捐赠成功返回 pcm 路径；无可捐赠返回空串。
+         */
+        [[nodiscard]]
+        auto try_donor_copy(
+            const StdBuildCtx& ctx,
+            StdBuildIo&        io,
+            std::string_view   module,
+            const std::string& source,
+            const std::string& pcm,
+            const std::string& command,
+            const SourceCheck& check) -> std::string
+        {
+            if (!ctx.opt.force)
+            {
+                const DonorPcm donor = cross_config_donor(
+                    ctx.opt.ccg_config_dir,
+                    ctx.shared_ccg_root,
+                    ctx.engine_key,
+                    ctx.engine_version,
+                    module,
+                    command,
+                    source,
+                    check.hash);
+                if (!donor.path.empty()
+                    && copy_donor_verified(donor.path, pcm, donor.size))
+                {
+                    register_std_entry(
+                        ctx,
+                        io,
+                        module,
+                        source,
+                        pcm,
+                        command,
+                        check,
+                        donor.size,
+                        /*reused=*/true);
+                    return pcm;
+                }
+            }
+            return std::string{};
+        }
+
+        /**
+         * @brief 本地编译产出 std pcm：产出先落唯一 tmp，exit 0 且
+         *        size>0 才原子替换正式名。
+         *
+         * @internal 失败删 tmp、旧 pcm 原样保留；失败细节（exit 码与输出
+         * 首行）整体赋给 io.std_error。
+         *
+         * @return 成功返回 pcm 路径；失败返回空串。
+         */
+        [[nodiscard]]
+        auto compile_and_swap(
+            const StdBuildCtx&       ctx,
+            StdBuildIo&              io,
+            std::string_view         module,
+            const std::string&       source,
+            const std::string&       pcm,
+            std::vector<std::string> argv,
+            const std::string&       command,
+            const SourceCheck&       check) -> std::string
+        {
+            namespace fs = std::filesystem;
+            const fs::path pcm_tmp_path =
+                cg::util::platform::unique_temp_path(fs::path{pcm});
+            const std::string pcm_tmp = pcm_tmp_path.generic_string();
+            if (ctx.dialect_cl)
+            {
+                argv.emplace_back("-clang:-o");
+                argv.push_back(std::format("-clang:{}", pcm_tmp));
+            }
+            else
+            {
+                argv.emplace_back("-o");
+                argv.push_back(pcm_tmp);
+            }
+            const ProcResult   r = run_tool(ctx.driver, argv);
+            const std::int64_t produced =
+                r.started && r.exit_code == 0 ? artifact_size(pcm_tmp) : 0;
+            if (produced > 0
+                && cg::util::platform::atomic_replace(
+                    pcm_tmp_path,
+                    fs::path{pcm}))
+            {
+                register_std_entry(
+                    ctx,
+                    io,
+                    module,
+                    source,
+                    pcm,
+                    command,
+                    check,
+                    produced,
+                    /*reused=*/false);
+                return pcm;
+            }
+            cg::util::platform::remove_file(pcm_tmp_path);
+            io.std_error =
+                produced == 0 && r.started && r.exit_code == 0
+                    ? std::string{"output missing or empty"}
+                    : std::format(
+                          "exit {}",
+                          r.exit_code == -1 && !r.started ? -1 : r.exit_code);
+            if (!r.err.empty())
+            {
+                io.std_error += "; " + first_line_of(r.err);
+            }
+            else if (!r.out.empty())
+            {
+                io.std_error += "; " + first_line_of(r.out);
+            }
+            return std::string{};
+        }
+
+        /**
+         * @brief 构建或复用一个 std 系模块（std/std.compat）的 BMI。
+         *
+         * 尝试次序：上一轮清单命中复用（半截产物先经同清单 donor 恢复）
+         * → 跨配置捐赠 → 本地编译。命令摘要是 canonical 串（argv 逐项 +
+         * 换行连接）的哈希、即缓存身份——argv 的拼装顺序就是其语义。三
+         * 个成功出口各登记一条清单条目并计数；失败细节写入 io.std_error
+         * 并返回空串（std.compat 的返回值可弃——其可用性由盘上产物判
+         * 定）。
+         */
+        auto build_std_module(
+            const StdBuildCtx& ctx,
+            StdBuildIo&        io,
+            std::string_view   module,
+            const std::string& source,
+            const std::string& feed_std_pcm) -> std::string
+        {
+            const std::string pcm = std_pcm_path(ctx.config_dir, module);
+            const std::vector<std::string> argv =
+                synthesize_argv(ctx, source, feed_std_pcm);
+            std::string canonical;
+            for (const std::string& a : argv)
+            {
+                canonical += a + "\n";
+            }
+            const std::string command = hash_text(canonical);
+            const auto        it = ctx.prior.find(
+                bmi_entry_key(module, std::string_view{command}));
+            const BmiEntry* entry_prior =
+                it == ctx.prior.end() ? nullptr : &it->second;
+            const SourceCheck check = check_source(source, entry_prior);
+            const std::string reused =
+                try_reuse_prior(ctx, io, pcm, command, entry_prior, check);
+            if (!reused.empty())
+            {
+                return reused;
+            }
+            const std::string donated =
+                try_donor_copy(ctx, io, module, source, pcm, command, check);
+            if (!donated.empty())
+            {
+                return donated;
+            }
+            return compile_and_swap(
+                ctx,
+                io,
+                module,
+                source,
+                pcm,
+                argv,
+                command,
+                check);
+        }
+
+        /**
+         * @brief 自建扫描的方言与旗标基座（规划期决策面的只读快照）。
+         */
+        struct ScanFlagsBase
+        {
+            bool        db = false; ///< 编译数据库路线（记录 argv 是旗标权威）
+            bool        cl = false; ///< cl 方言
+            std::string root;       ///< 工程根（扫描发射的 directory）
+            std::string std_value;  ///< gnu 方言 -std 拼写
+            std::vector<std::string> langopt_axes; ///< 附加语言选项轴
+            std::vector<std::string> gnu_base; ///< gnu 基座 argv（含 -I root）
+            std::vector<std::string> cl_base;  ///< cl 基座 argv（含 -imsvc /D）
+        };
+
+        /** @brief gnu 方言扫描基座：fallback argv + 可选 -I 工程根。 */
+        [[nodiscard]]
+        inline auto gnu_base_argv(const std::string& root)
+            -> std::vector<std::string>
+        {
+            std::vector<std::string> argv = fallback_argv();
+            if (!root.empty())
+            {
+                argv.emplace_back("-I");
+                argv.push_back(root);
+            }
+            return argv;
+        }
+
+        /**
+         * @brief cl 方言扫描基座：driver-mode、/EHsc、/std、pin 目录与 /D。
+         *
+         * @param pin_dirs 钉扎目录（msvc-stl 无布线时为记录 include 切片，
+         *                 其余情形为 std 源布线）。
+         */
+        [[nodiscard]]
+        inline auto cl_base_argv_of(
+            const std::string&              cl_std,
+            const std::vector<std::string>& pin_dirs,
+            const std::vector<std::string>& cl_defines,
+            const std::string&              root) -> std::vector<std::string>
+        {
+            std::vector<std::string> argv{"--driver-mode=cl", "/EHsc", cl_std};
+            for (const std::string& dir : pin_dirs)
+            {
+                argv.emplace_back("-imsvc");
+                argv.push_back(dir);
+            }
+            for (const std::string& define : cl_defines)
+            {
+                argv.emplace_back("/D");
+                argv.push_back(define);
+            }
+            if (!root.empty())
+            {
+                argv.emplace_back("-I");
+                argv.push_back(root);
+            }
+            return argv;
+        }
+
+        /**
+         * @brief 单个翻译单元的扫描旗标。
+         *
+         * db 路线优先记录 argv（剥离 MSVC 模块开关后）；无记录权威的
+         * 单元按方言取基座，gnu 兜底再叠 -std 与语言选项轴。
+         */
+        [[nodiscard]]
+        inline auto unit_scan_flags_of(
+            const ScanFlagsBase&                                    base,
+            const std::unordered_map<std::string, MsvcModuleStrip>& stripped,
+            const std::string& file) -> std::vector<std::string>
+        {
+            if (base.db)
+            {
+                if (const auto it = stripped.find(file); it != stripped.end())
+                {
+                    return it->second.argv;
+                }
+                if (base.cl)
+                {
+                    return base.cl_base; // 无记录权威的 cl 单元：合成兜底
+                }
+                std::vector<std::string> flags;
+                flags.emplace_back(std::format("-std={}", base.std_value));
+                for (const std::string& axis : base.langopt_axes)
+                {
+                    flags.push_back(axis);
+                }
+                for (const std::string& a : base.gnu_base)
+                {
+                    if (!a.starts_with("-std="))
+                    {
+                        flags.push_back(a);
+                    }
+                }
+                return flags;
+            }
+            if (base.cl)
+            {
+                return base.cl_base;
+            }
+            return base.gnu_base;
+        }
+
+        /**
+         * @brief 一批翻译单元的 P1689 扫描（逐文件旗标展开后共享发射体）。
+         *
+         * @param unified_flags 非空时全部文件共用该旗标（db 记录 argv）；
+         *                      空时逐文件走 unit_scan_flags_of 组装。
+         */
+        [[nodiscard]]
+        inline auto scan_unit_batch(
+            const ScanFlagsBase&                                    base,
+            const std::unordered_map<std::string, MsvcModuleStrip>& stripped,
+            const std::string&                                      argv0,
+            const std::string&                                      scan_deps,
+            const std::vector<std::string>&                         files,
+            bool                            module_units_batch,
+            const std::vector<std::string>* unified_flags = nullptr)
+            -> P1689Scan
+        {
+            std::vector<std::vector<std::string>> per_file;
+            per_file.reserve(files.size());
+            for (const std::string& file : files)
+            {
+                per_file.push_back(
+                    unified_flags != nullptr
+                        ? *unified_flags
+                        : unit_scan_flags_of(base, stripped, file));
+            }
+            return run_p1689_scan(
+                base.root,
+                argv0,
+                scan_deps,
+                files,
+                module_units_batch,
+                per_file);
+        }
+
+        /** @brief 层前预备（主线程纯读组装，构建任务的输入）。 */
+        struct LayerPrep
+        {
+            std::string              name;
+            std::vector<std::string> argv;    // 组装产物（未含源与输出参数）
+            std::string              command; // 规范生产命令哈希
+            const BmiEntry*          prior_entry = nullptr; // 清单命中（可空）
+            std::string              pcm;                   // 绝对产物路径
+        };
+
+        /** @brief 层内一个构建任务的结果槽（任务按下标独占写）。 */
+        struct LayerOutcome
+        {
+            std::optional<BmiEntry> entry;   // 构建成功（产物已原子替换落盘）
+            std::string             failure; // 失败文本（含异常收编形态）
+        };
+
+        /**
+         * @brief 层内单个 BMI 构建任务（每任务一个 clang 子进程）。
+         *
+         * @internal 源身份在任务体内、构建动作前一刻取——排队与调度延迟
+         * 不拉长 stat 与编译器读源之间的观测窗口。异常收编为该节点的失败
+         * 记名（工人线程里未捕获的 C++ 异常会终止整个进程）。
+         */
+        inline void run_layer_build_task(
+            const std::vector<LayerPrep>&                   preps,
+            std::vector<LayerOutcome>&                      outcomes,
+            const std::unordered_map<std::string, BmiNode>& nodes,
+            const std::string&                              driver,
+            const std::string&                              engine_dir,
+            const std::string&                              db_config_label,
+            bool                                            dialect_cl,
+            std::size_t                                     idx)
+        {
+            namespace fs = std::filesystem;
+            const LayerPrep& prep = preps[idx];
+            LayerOutcome&    slot = outcomes[idx];
+            try
+            {
+                const BmiNode&    node = nodes.at(prep.name);
+                const SourceCheck check =
+                    check_source(node.source, prep.prior_entry);
+                std::vector<std::string> argv = prep.argv;
+                argv.push_back(node.source);
+                // 唯一 tmp → 校验 size>0 → 原子替换；失败保留旧 pcm。
+                const fs::path pcm_tmp_path =
+                    cg::util::platform::unique_temp_path(fs::path{prep.pcm});
+                const std::string pcm_tmp = pcm_tmp_path.generic_string();
+                if (dialect_cl)
+                {
+                    argv.emplace_back("-clang:-o");
+                    argv.push_back(std::format("-clang:{}", pcm_tmp));
+                }
+                else
+                {
+                    argv.emplace_back("-o");
+                    argv.push_back(pcm_tmp);
+                }
+                const ProcResult   r = run_tool(driver, argv);
+                const std::int64_t produced =
+                    r.started && r.exit_code == 0 ? artifact_size(pcm_tmp) : 0;
+                if (produced > 0
+                    && cg::util::platform::atomic_replace(
+                        pcm_tmp_path,
+                        fs::path{prep.pcm}))
+                {
+                    BmiEntry entry;
+                    entry.name = prep.name;
+                    entry.source = node.source;
+                    entry.hash = check.hash;
+                    entry.mtime = check.stat.mtime;
+                    entry.size = check.stat.size;
+                    entry.command = prep.command;
+                    entry.requires_names = node.direct;
+                    entry.pcm = pcm_rel(engine_dir, prep.pcm);
+                    entry.pcm_size = produced;
+                    entry.config = db_config_label;
+                    slot.entry = std::move(entry);
+                    return;
+                }
+                cg::util::platform::remove_file(pcm_tmp_path);
+                const std::string why =
+                    r.started && r.exit_code == 0
+                        ? (produced == 0
+                               ? std::string{"output missing or empty"}
+                               : std::string{"atomic replace failed"})
+                        : (r.started ? std::format("exit {}", r.exit_code)
+                                     : std::string{"spawn failed"});
+                // 归属冲突（MSVC 宽容、clang 拒绝的生成头两路包含形状）
+                // 升格为专属类并携带工程侧修法；判定在全文 stderr 上做
+                // （该诊断按终端列宽折行，首行未必带齐锚），其余保持
+                // module-build-failed 口径。
+                slot.failure =
+                    cg::clang::is_module_attachment_conflict(r.err)
+                        ? cg::clang::module_attachment_conflict_failure(
+                              first_line_of(r.err),
+                              prep.name)
+                        : std::format(
+                              "module-build-failed: building the interface "
+                              "BMI for '{}' from '{}' failed ({}{}) - the "
+                              "TU and its dependents degrade to tier-1",
+                              prep.name,
+                              node.source,
+                              why,
+                              r.err.empty() ? std::string{}
+                                            : "; " + first_line_of(r.err));
+            }
+            catch (const std::exception& e)
+            {
+                slot.failure = std::format(
+                    "module-build-failed: building the interface BMI for "
+                    "'{}' failed (internal error: {}) - the TU and its "
+                    "dependents degrade to tier-1",
+                    prep.name,
+                    e.what());
+            }
+            catch (...)
+            {
+                slot.failure = std::format(
+                    "module-build-failed: building the interface BMI for "
+                    "'{}' failed (internal error: unknown) - the TU and "
+                    "its dependents degrade to tier-1",
+                    prep.name);
+            }
+        }
+
+        /** @brief 缓存目录不存在则建（尽力请求 NTFS 压缩）。 */
+        inline void ensure_cache_dir(const std::string& dir)
+        {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            if (fs::is_directory(fs::path{dir}, ec))
+            {
+                return;
+            }
+            fs::create_directories(fs::path{dir}, ec);
+            cg::util::platform::enable_dir_compression(dir);
+        }
+
+        /** @brief 目标 mtime 是否早于宽限界（读不到时保守认为未过期）。 */
+        [[nodiscard]]
+        inline auto mtime_older_than_grace(
+            const std::filesystem::path& p,
+            std::chrono::hours           grace) -> bool
+        {
+            std::error_code ec;
+            const auto      mtime = std::filesystem::last_write_time(p, ec);
+            if (ec)
+            {
+                return false;
+            }
+            return std::filesystem::file_time_type::clock::now() - mtime
+                   > grace;
+        }
+
+        /** @brief 台账条目的产物绝对路径（pcm 字段相对引擎目录）。 */
+        [[nodiscard]]
+        inline auto entry_artifact(
+            const std::string& engine_dir,
+            const BmiEntry&    e) -> std::filesystem::path
+        {
+            return std::filesystem::path{engine_dir}
+                   / std::filesystem::path{e.pcm};
+        }
+
+        /** @brief 条目是否属于兄弟配置（pcm 首段不是本趟配置键）。 */
+        [[nodiscard]]
+        inline auto entry_of_other_config(
+            const std::string& config_key,
+            const BmiEntry&    e) -> bool
+        {
+            const std::size_t slash = e.pcm.find('/');
+            return slash != std::string::npos
+                   && e.pcm.substr(0, slash) != config_key;
+        }
+
+        /** @brief 条目产物路径的规范绝对形记进引用集（孤儿清扫豁免面）。 */
+        inline void note_referenced_artifact(
+            std::unordered_set<std::string>& referenced,
+            const std::string&               engine_dir,
+            const BmiEntry&                  e)
+        {
+            namespace fs = std::filesystem;
+            referenced.insert(
+                cg::util::norm_path(entry_artifact(engine_dir, e)
+                                        .lexically_normal()
+                                        .generic_string()));
+        }
+
+        /** @brief 清空引擎缓存目录并把清空事实记进结果与清单。 */
+        inline void wipe_engine_cache_dir(
+            const std::string& engine_dir,
+            SelfBuildResult&   out,
+            BmiManifest&       manifest,
+            const char*        why)
+        {
+            namespace fs = std::filesystem;
+            std::error_code rm;
+            for (const fs::directory_entry& e :
+                 fs::directory_iterator(engine_dir, rm))
+            {
+                fs::remove_all(e.path(), rm);
+            }
+            out.purged += manifest.entries.size();
+            out.notes.push_back(
+                std::format("BMI cache wiped ({}) - full rebuild", why));
+            manifest = BmiManifest{};
+        }
+
+        /**
+         * @brief cl 方言经典解析的合成兜底 argv。
+         *
+         * @param recipe_b true 时改用 gnu 拼写向量（--target 同源）。
+         */
+        [[nodiscard]]
+        inline auto cl_parse_argv_of(
+            bool                            recipe_b,
+            const std::string&              cl_std,
+            const std::string&              gnu_twin_std,
+            const std::string&              cl_target,
+            const std::vector<std::string>& wiring,
+            const std::vector<std::string>& cl_defines,
+            const std::string&              root) -> std::vector<std::string>
+        {
+            std::vector<std::string> argv;
+            if (!recipe_b)
+            {
+                argv = {
+                    "--driver-mode=cl",
+                    "/EHsc",
+                    cl_std,
+                    "-Xclang",
+                    "-fexternc-nounwind",
+                    "-fstack-protector-strong",
+                    "-fms-compatibility",
+                    std::format("--target={}", cl_target)};
+                for (const std::string& dir : wiring)
+                {
+                    argv.emplace_back("-imsvc");
+                    argv.push_back(dir);
+                }
+                for (const std::string& define : cl_defines)
+                {
+                    argv.emplace_back("/D");
+                    argv.push_back(define);
+                }
+            }
+            else
+            {
+                argv = {
+                    std::format("-std={}", gnu_twin_std),
+                    std::format("--target={}", cl_target),
+                    "-fms-compatibility",
+                    "-Xclang",
+                    "-fexternc-nounwind",
+                    "-fstack-protector-strong"};
+                for (const std::string& dir : wiring)
+                {
+                    argv.emplace_back("-isystem");
+                    argv.push_back(dir);
+                }
+                for (const std::string& define : cl_defines)
+                {
+                    argv.emplace_back("-D");
+                    argv.push_back(define);
+                }
+            }
+            if (!root.empty())
+            {
+                argv.emplace_back("-I");
+                argv.push_back(root);
+            }
+            return argv;
+        }
+
+        /**
+         * @brief 降级面：头单元 overlay 与 std 伞头前提门。
+         *
+         * @internal 伞头前提门（requires_std）：P1689 规则确实牵涉 std 才
+         * 允许 overlay；文本 STL 包含（stdafx 形态）单独绝不触发。
+         */
+        inline void apply_degrade_rules_for(
+            CompileCommand&                                 cc,
+            const std::vector<ScanRequire>&                 reqs,
+            std::vector<ModuleFeed>&                        feeds,
+            bool                                            dialect_cl,
+            const std::unordered_map<std::string, BmiNode>& nodes,
+            std::unordered_map<std::string, std::vector<std::string>>&
+                                            closure_memo,
+            const std::vector<std::string>& toolset_roots)
+        {
+            attach_header_unit_overlay(cc, reqs);
+            const bool needs_std = requires_std(reqs, nodes, closure_memo);
+            if (dialect_cl && needs_std
+                && text_has_stl_include(cc.file, toolset_roots))
+            {
+                cc.overlay.std_umbrella = true;
+                for (const ScanRequire& rq : reqs)
+                {
+                    if (rq.name == "std" || rq.name == "std.compat")
+                    {
+                        cg::util::push_unique(cc.overlay_imports, rq.name);
+                    }
+                }
+                std::erase_if(
+                    feeds,
+                    [&](const ModuleFeed& feed)
+                    {
+                        const bool is_std =
+                            feed.name == "std" || feed.name == "std.compat";
+                        const std::vector<std::string> closure =
+                            closure_of(feed.name, nodes, closure_memo);
+                        const bool std_bound =
+                            is_std
+                            || std::ranges::find(closure, "std")
+                                   != closure.end()
+                            || std::ranges::find(closure, "std.compat")
+                                   != closure.end();
+                        if (std_bound && !looks_like_header_unit(feed.name)
+                            && std::ranges::any_of(
+                                reqs,
+                                [&](const ScanRequire& rq)
+                                { return rq.name == feed.name; }))
+                        {
+                            cg::util::push_unique(
+                                cc.overlay.dropped_modules,
+                                feed.name);
+                            cg::util::push_unique(
+                                cc.overlay_imports,
+                                feed.name);
+                        }
+                        return std_bound;
+                    });
+            }
+        }
+
+        /**
+         * @brief 消费者的模块投喂表组装。
+         *
+         * @return 投喂不可满足时的失败文本（调用方逐文件降级）。
+         */
+        [[nodiscard]]
+        inline auto module_feeds_error(
+            const std::vector<std::string>&                 names,
+            std::vector<ModuleFeed>&                        feeds,
+            const std::vector<std::string>*                 reference_names,
+            const std::unordered_map<std::string, BmiNode>& nodes,
+            std::unordered_map<std::string, std::vector<std::string>>&
+                closure_memo,
+            const std::unordered_map<std::string, std::string>&
+                ambiguous_of_name,
+            const std::unordered_map<std::string, std::string>&
+                std_node_failure) -> std::optional<std::string>
+        {
+            std::map<std::string, std::string> resolved; // 有序、去重
+            for (const std::string& direct : names)
+            {
+                if (const auto a = ambiguous_of_name.find(direct);
+                    a != ambiguous_of_name.end())
+                {
+                    return a->second;
+                }
+                std::vector<std::string> closure =
+                    closure_of(direct, nodes, closure_memo);
+                closure.push_back(direct);
+                for (const std::string& dep : closure)
+                {
+                    const auto dit = nodes.find(dep);
+                    if (dit != nodes.end() && dit->second.available
+                        && !dit->second.pcm.empty())
+                    {
+                        resolved.emplace(dep, dit->second.pcm);
+                        continue;
+                    }
+                    if (const auto f = std_node_failure.find(dep);
+                        f != std_node_failure.end())
+                    {
+                        return f->second;
+                    }
+                    if (dit != nodes.end() && !dit->second.failure.empty())
+                    {
+                        return dit->second.failure;
+                    }
+                    return std::format(
+                        "module-not-found: no provider under the roots for "
+                        "module '{}' ({}) - the TU degrades to tier-1",
+                        dep,
+                        reference_names != nullptr
+                                && std::ranges::find(*reference_names, dep)
+                                       != reference_names->end()
+                            ? "the build's /reference names it, but no module "
+                              "source under the roots provides it"
+                            : "self-build scan");
+                }
+            }
+            for (const auto& [dep, pcm] : resolved)
+            {
+                feeds.push_back(ModuleFeed{.name = dep, .pcm = pcm});
+            }
+            return std::nullopt;
+        }
+
+        /**
+         * @brief 诊断面：发往扫描器的完整 argv 单行拼写（打印即取证）。
+         *
+         * @param argv0 扫描命令首 token（驱动器或垫片）。
+         */
+        [[nodiscard]]
+        inline auto describe_scan_argv(
+            const std::string&              argv0,
+            const std::vector<std::string>& flags,
+            bool                            module_units_batch,
+            const std::string&              file) -> std::string
+        {
+            std::string line = argv0;
+            for (const std::string& a : flags)
+            {
+                line += " " + a;
+            }
+            if (module_units_batch)
+            {
+                line += " -x c++-module";
+            }
+            // -o <输入路径> 与发射体的归属回显注入保持一致。
+            line += " -o " + file;
+            line += " " + file;
+            return line;
+        }
+
+        /**
+         * @brief 按源路径归属把扫描规则映射回待扫单元表。
+         */
+        inline void populate_unit_rules(
+            const std::vector<ScanRule>&               rules,
+            const std::vector<std::string>&            scan_units,
+            std::unordered_map<std::string, ScanRule>& rule_of_unit)
+        {
+            rule_of_unit.clear();
+            std::unordered_map<std::string, ScanRule> by_source;
+            for (const ScanRule& rule : rules)
+            {
+                for (const ScanProvide& p : rule.provides)
+                {
+                    if (!p.source.empty())
+                    {
+                        by_source.emplace(p.source, rule);
+                    }
+                }
+            }
+            for (const std::string& unit : scan_units)
+            {
+                if (const auto it = by_source.find(unit); it != by_source.end())
+                {
+                    rule_of_unit.emplace(unit, it->second);
+                }
+            }
+        }
+
+        /**
+         * @brief 自建规划期的 std 源决议。
+         *
+         * @internal cl 方言在此钉扎工具集：显式 hint（须带 modules/std.ixx）
+         * 优先，其次自动发现（版本下限门控）；命中后 include 布线 =
+         * 工具集 include + atlmfc + Windows SDK 的并集再叠记录切片。
+         * gnu 方言的 msvc-stl 源沿用驱动器报告的布线。
+         */
+        [[nodiscard]]
+        inline auto resolve_std_source_for_plan(
+            const SelfBuildOptions&         opt,
+            bool                            cl,
+            const std::vector<std::string>& cl_dirs) -> StdModuleSource
+        {
+            namespace fs = std::filesystem;
+            StdModuleSource discovered = discover_std_source();
+            if (cl)
+            {
+                auto [toolset, version] =
+                    detail::msvc_toolset_from_report(cl_dirs);
+                std::vector<std::string> wiring_dirs = cl_dirs;
+                if (toolset.empty() && !opt.msvc_toolset_hint.empty())
+                {
+                    std::error_code hec;
+                    if (fs::is_regular_file(
+                            fs::path{opt.msvc_toolset_hint} / "modules"
+                                / "std.ixx",
+                            hec))
+                    {
+                        toolset = cg::util::norm_path(opt.msvc_toolset_hint);
+                        version = fs::path{toolset}.filename().generic_string();
+                    }
+                }
+                if (toolset.empty())
+                {
+                    for (const std::string& candidate :
+                         detail::discover_msvc_toolsets())
+                    {
+                        const std::string v =
+                            fs::path{candidate}.filename().generic_string();
+                        if (!detail::toolset_at_floor(v))
+                        {
+                            continue;
+                        }
+                        toolset = candidate;
+                        version = v;
+                        break;
+                    }
+                }
+                if (!toolset.empty())
+                {
+                    std::vector<std::string> pinned;
+                    pinned.push_back(
+                        cg::util::norm_path(
+                            (fs::path{toolset} / "include").generic_string()));
+                    std::error_code aec;
+                    const fs::path  atlmfc =
+                        fs::path{toolset} / "atlmfc" / "include";
+                    if (fs::is_directory(atlmfc, aec))
+                    {
+                        pinned.push_back(
+                            cg::util::norm_path(
+                                atlmfc.lexically_normal().generic_string()));
+                    }
+                    for (const std::string& d :
+                         detail::discover_windows_sdk_dirs())
+                    {
+                        pinned.push_back(d);
+                    }
+                    std::vector<std::string> merged;
+                    for (const std::string& d : pinned)
+                    {
+                        cg::util::push_unique(merged, d);
+                    }
+                    for (const std::string& d : wiring_dirs)
+                    {
+                        cg::util::push_unique(merged, d);
+                    }
+                    wiring_dirs = std::move(merged);
+                }
+                if (toolset.empty())
+                {
+                    discovered = StdModuleSource{};
+                    discovered.note =
+                        "cl-mode chain found no MSVC toolset in the recorded or "
+                        "auto-detected include roots - std.pcm cannot be produced";
+                }
+                else if (
+                    auto src = detail::msvc_stl_source(
+                        toolset,
+                        version,
+                        wiring_dirs,
+                        wiring_dirs))
+                {
+                    discovered = *src;
+                }
+                else
+                {
+                    discovered = StdModuleSource{};
+                    discovered.note = std::format(
+                        "cl-mode chain: toolset {} carries no modules/std.ixx",
+                        toolset);
+                }
+            }
+            else if (discovered.stdlib_impl == "msvc-stl")
+            {
+                discovered.wiring =
+                    detail::msvc_include_slice(driver_info().cxx_include_dirs);
+            }
+            return discovered;
+        }
+
+    } // namespace detail
+
     /**
      * @brief 自建流水线（见模块级说明）。
      *
@@ -2999,7 +4320,7 @@ export namespace cg::clang
      * （clang-cl.exe 垫片兜底）。flags（设置时）覆盖逐单元权威（经典消
      * 费者扫描传消费者自己的记录 argv）。规则归属经 provides 的
      * source-path；未归属单元（无 provides 的规则或根本无规则——扫描器
-     * 静默丢弃坏 TU 而 rc 保持 0，故规则存在即裁决）回落逐文件扫描。扫
+     * 静默丢弃坏 TU 而 rc 保持 0，故规则存在即判定）回落逐文件扫描。扫
      * 描集是项目模块单元（模块路由与自建管道的输入）。U-A 兜底：忽略命令内模式
      * flag 的扫描器会对每个模块单元返 回零规则——在 .ccg 目录物化 clang-cl
      * 垫片（argv[0] 携带模式）重
@@ -3129,12 +4450,17 @@ export namespace cg::clang
             // 必败（"not known to be a header unit"，TU 基线即
             // parse-failed）。无任何文本 import 的 classic 语料维持既有快
             // 路径原样返回；扫描器不可用（无驱动器/无 clang-scan-deps）
-            // 时 classic_rules 建不起来，同样维持既有行为。
-            const bool classic_import_face = std::ranges::any_of(
-                classic,
-                [](const CompileCommand& cc)
-                { return text_has_import(cc.file); });
-            if (classic_import_face)
+            // 时 classic_rules 建不起来，同样维持既有行为。预判收集的命中
+            // 清单直接作为降级半边的待扫清单——文本探测每条目恰读一遍。
+            std::vector<const CompileCommand*> import_face;
+            for (const CompileCommand& cc : classic)
+            {
+                if (text_has_import(cc.file))
+                {
+                    import_face.push_back(&cc);
+                }
+            }
+            if (!import_face.empty())
             {
                 const DriverInfo& info = driver_info();
                 const std::string scan_deps =
@@ -3146,7 +4472,8 @@ export namespace cg::clang
                             opt,
                             info.driver,
                             scan_deps,
-                            classic);
+                            classic,
+                            import_face);
                     if (touched > 0)
                     {
                         out.notes.push_back(
@@ -3255,104 +4582,8 @@ export namespace cg::clang
                                             : opt.cl_include_dirs);
         }();
         const auto [cl_std, gnu_twin_std] = detail::cl_std_of(opt.std_value);
-        StdModuleSource std_source_resolved = [&]
-        {
-            StdModuleSource discovered = discover_std_source();
-            if (cl)
-            {
-                auto [toolset, version] =
-                    detail::msvc_toolset_from_report(cl_dirs);
-                std::vector<std::string> wiring_dirs = cl_dirs;
-                if (toolset.empty() && !opt.msvc_toolset_hint.empty())
-                {
-                    std::error_code hec;
-                    if (fs::is_regular_file(
-                            fs::path{opt.msvc_toolset_hint} / "modules"
-                                / "std.ixx",
-                            hec))
-                    {
-                        toolset = cg::util::norm_path(opt.msvc_toolset_hint);
-                        version = fs::path{toolset}.filename().generic_string();
-                    }
-                }
-                if (toolset.empty())
-                {
-                    for (const std::string& candidate :
-                         detail::discover_msvc_toolsets())
-                    {
-                        const std::string v =
-                            fs::path{candidate}.filename().generic_string();
-                        if (!detail::toolset_at_floor(v))
-                        {
-                            continue;
-                        }
-                        toolset = candidate;
-                        version = v;
-                        break;
-                    }
-                }
-                if (!toolset.empty())
-                {
-                    std::vector<std::string> pinned;
-                    pinned.push_back(
-                        cg::util::norm_path(
-                            (fs::path{toolset} / "include").generic_string()));
-                    std::error_code aec;
-                    const fs::path  atlmfc =
-                        fs::path{toolset} / "atlmfc" / "include";
-                    if (fs::is_directory(atlmfc, aec))
-                    {
-                        pinned.push_back(
-                            cg::util::norm_path(
-                                atlmfc.lexically_normal().generic_string()));
-                    }
-                    for (const std::string& d :
-                         detail::discover_windows_sdk_dirs())
-                    {
-                        pinned.push_back(d);
-                    }
-                    std::vector<std::string> merged;
-                    for (const std::string& d : pinned)
-                    {
-                        cg::util::push_unique(merged, d);
-                    }
-                    for (const std::string& d : wiring_dirs)
-                    {
-                        cg::util::push_unique(merged, d);
-                    }
-                    wiring_dirs = std::move(merged);
-                }
-                if (toolset.empty())
-                {
-                    discovered = StdModuleSource{};
-                    discovered.note =
-                        "cl-mode chain found no MSVC toolset in the recorded or "
-                        "auto-detected include roots - std.pcm cannot be produced";
-                }
-                else if (
-                    auto src = detail::msvc_stl_source(
-                        toolset,
-                        version,
-                        wiring_dirs,
-                        wiring_dirs))
-                {
-                    discovered = *src;
-                }
-                else
-                {
-                    discovered = StdModuleSource{};
-                    discovered.note = std::format(
-                        "cl-mode chain: toolset {} carries no modules/std.ixx",
-                        toolset);
-                }
-            }
-            else if (discovered.stdlib_impl == "msvc-stl")
-            {
-                discovered.wiring =
-                    detail::msvc_include_slice(driver_info().cxx_include_dirs);
-            }
-            return discovered;
-        }();
+        StdModuleSource std_source_resolved =
+            detail::resolve_std_source_for_plan(opt, cl, cl_dirs);
         const bool                      db = opt.db_mode;
         const std::vector<std::string>& langopt_axes = opt.langopt_axes;
         // gnu 方言 db 路线的记录命令是 gnu 拼写，绝不与 clang-cl 方言的
@@ -3369,42 +4600,6 @@ export namespace cg::clang
         }
         const bool dialect_cl =
             cl || std_source_resolved.stdlib_impl == "msvc-stl";
-
-        const auto base_argv = [&]
-        {
-            std::vector<std::string> argv = fallback_argv();
-            if (!opt.root.empty())
-            {
-                argv.emplace_back("-I");
-                argv.push_back(opt.root);
-            }
-            return argv;
-        };
-        const auto cl_base_argv = [&]
-        {
-            std::vector<std::string> argv{"--driver-mode=cl", "/EHsc", cl_std};
-            const std::vector<std::string>& pin_dirs =
-                std_source_resolved.stdlib_impl == "msvc-stl"
-                        && std_source_resolved.wiring.empty()
-                    ? cl_dirs
-                    : std_source_resolved.wiring;
-            for (const std::string& dir : pin_dirs)
-            {
-                argv.emplace_back("-imsvc");
-                argv.push_back(dir);
-            }
-            for (const std::string& define : opt.cl_defines)
-            {
-                argv.emplace_back("/D");
-                argv.push_back(define);
-            }
-            if (!opt.root.empty())
-            {
-                argv.emplace_back("-I");
-                argv.push_back(opt.root);
-            }
-            return argv;
-        };
 
         // 剥离层 + /reference 名单：记录 argv 的 MSVC 模块开关在每个消费
         // 点（扫描/BMI 生产/重放）剥除——clang 家工具一律不再见到它们；
@@ -3429,69 +4624,27 @@ export namespace cg::clang
             }
         }
 
-        const auto unit_scan_flags =
-            [&](const std::string& file) -> std::vector<std::string>
-        {
-            if (db)
-            {
-                if (const auto it = stripped_recorded.find(file);
-                    it != stripped_recorded.end())
-                {
-                    return it->second.argv;
-                }
-                if (cl)
-                {
-                    return cl_base_argv(); // 无记录权威的 cl 单元：合成兜底
-                }
-                std::vector<std::string> flags;
-                flags.emplace_back(std::format("-std={}", opt.std_value));
-                for (const std::string& axis : langopt_axes)
-                {
-                    flags.push_back(axis);
-                }
-                for (const std::string& a : base_argv())
-                {
-                    if (!a.starts_with("-std="))
-                    {
-                        flags.push_back(a);
-                    }
-                }
-                return flags;
-            }
-            if (cl)
-            {
-                return cl_base_argv();
-            }
-            return base_argv();
-        };
+        // 扫描旗标基座：cl 基座的钉扎目录在 msvc-stl 无布线时取记录切片，
+        // 其余情形取 std 源布线（与 cl 基座口径一致）。
+        const std::vector<std::string>& cl_pin_dirs =
+            std_source_resolved.stdlib_impl == "msvc-stl"
+                    && std_source_resolved.wiring.empty()
+                ? cl_dirs
+                : std_source_resolved.wiring;
+        const detail::ScanFlagsBase scan_base{
+            .db = db,
+            .cl = cl,
+            .root = opt.root,
+            .std_value = opt.std_value,
+            .langopt_axes = opt.langopt_axes,
+            .gnu_base = detail::gnu_base_argv(opt.root),
+            .cl_base = detail::cl_base_argv_of(
+                cl_std,
+                cl_pin_dirs,
+                opt.cl_defines,
+                opt.root)};
 
-        std::string scan_argv0;
-        const auto  scan_batch =
-            [&](const std::vector<std::string>& files,
-                bool                            module_units_batch,
-                const std::vector<std::string>* flags = nullptr,
-                std::string* scan_err = nullptr) -> std::vector<ScanRule>
-        {
-            // 逐文件旗标展开（flags 缺席时走 unit_scan_flags 的兜底组装）
-            // 后共享 detail::run_p1689_scan 的发射体（json 落盘、run_tool、
-            // 解析）——与纯头单元语料的 classic 降级通道逐字节同源。
-            std::vector<std::vector<std::string>> per_file;
-            per_file.reserve(files.size());
-            for (const std::string& file : files)
-            {
-                per_file.push_back(
-                    flags != nullptr ? *flags : unit_scan_flags(file));
-            }
-            return detail::run_p1689_scan(
-                opt.root,
-                scan_argv0.empty() ? std::string{info.driver} : scan_argv0,
-                scan_deps,
-                files,
-                module_units_batch,
-                per_file,
-                scan_err);
-        };
-
+        std::string              scan_argv0;
         std::vector<std::string> scan_units;
         {
             std::unordered_set<std::string> seen;
@@ -3506,30 +4659,17 @@ export namespace cg::clang
         }
         std::unordered_map<std::string, ScanRule> rule_of_unit;
         std::string batch_scan_err; // 初始整批扫描的 stderr 首行（归属模糊）
-        const auto  populate_rules = [&]
         {
-            rule_of_unit.clear();
-            std::unordered_map<std::string, ScanRule> by_source;
-            for (ScanRule& rule :
-                 scan_batch(scan_units, true, nullptr, &batch_scan_err))
-            {
-                for (const ScanProvide& p : rule.provides)
-                {
-                    if (!p.source.empty())
-                    {
-                        by_source.emplace(p.source, rule);
-                    }
-                }
-            }
-            for (const std::string& unit : scan_units)
-            {
-                if (const auto it = by_source.find(unit); it != by_source.end())
-                {
-                    rule_of_unit.emplace(unit, it->second);
-                }
-            }
-        };
-        populate_rules();
+            detail::P1689Scan batch = detail::scan_unit_batch(
+                scan_base,
+                stripped_recorded,
+                scan_argv0.empty() ? std::string{info.driver} : scan_argv0,
+                scan_deps,
+                scan_units,
+                true);
+            batch_scan_err = std::move(batch.err);
+            detail::populate_unit_rules(batch.rules, scan_units, rule_of_unit);
+        }
         // 布局锚（裁量 a/b）：BMI 缓存子树整体挂配置目录；垫片等引擎无关
         // 共享物留配置目录的父（布局文件夹根）。垫片物化在扫描兜底之前
         // 就需要它，故在此先行定锚。
@@ -3549,7 +4689,18 @@ export namespace cg::clang
                 // （从不被执行），无需物化文件即可指向未来路径重扫——干跑
                 // 的规则集与降级计数和真实运行完全一致，不再更悲观。
                 scan_argv0 = shim.lexically_normal().generic_string();
-                populate_rules();
+                detail::P1689Scan rescan = detail::scan_unit_batch(
+                    scan_base,
+                    stripped_recorded,
+                    scan_argv0,
+                    scan_deps,
+                    scan_units,
+                    true);
+                batch_scan_err = std::move(rescan.err);
+                detail::populate_unit_rules(
+                    rescan.rules,
+                    scan_units,
+                    rule_of_unit);
             }
             else
             {
@@ -3572,7 +4723,18 @@ export namespace cg::clang
                 else
                 {
                     scan_argv0 = shim.lexically_normal().generic_string();
-                    populate_rules();
+                    detail::P1689Scan rescan = detail::scan_unit_batch(
+                        scan_base,
+                        stripped_recorded,
+                        scan_argv0,
+                        scan_deps,
+                        scan_units,
+                        true);
+                    batch_scan_err = std::move(rescan.err);
+                    detail::populate_unit_rules(
+                        rescan.rules,
+                        scan_units,
+                        rule_of_unit);
                 }
             }
         }
@@ -3583,16 +4745,20 @@ export namespace cg::clang
             {
                 continue;
             }
-            std::string                 unit_err;
-            const std::vector<ScanRule> rules =
-                scan_batch({unit}, true, nullptr, &unit_err);
-            if (rules.size() == 1)
+            detail::P1689Scan solo = detail::scan_unit_batch(
+                scan_base,
+                stripped_recorded,
+                scan_argv0.empty() ? std::string{info.driver} : scan_argv0,
+                scan_deps,
+                {unit},
+                true);
+            if (solo.rules.size() == 1)
             {
-                rule_of_unit.emplace(unit, rules.front());
+                rule_of_unit.emplace(unit, std::move(solo.rules.front()));
             }
             else
             {
-                scan_err_of_unit.emplace(unit, std::move(unit_err));
+                scan_err_of_unit.emplace(unit, std::move(solo.err));
             }
         }
 
@@ -3633,7 +4799,15 @@ export namespace cg::clang
                 flags = &db_flags;
             }
             const std::vector<ScanRule> rules =
-                scan_batch({cg::util::norm_path(cc.file)}, false, flags);
+                detail::scan_unit_batch(
+                    scan_base,
+                    stripped_recorded,
+                    scan_argv0.empty() ? std::string{info.driver} : scan_argv0,
+                    scan_deps,
+                    {cg::util::norm_path(cc.file)},
+                    false,
+                    flags)
+                    .rules;
             if (rules.size() == 1)
             {
                 classic_rules.emplace(
@@ -3647,24 +4821,8 @@ export namespace cg::clang
         // 打印即取证。
         if (opt.dry_run)
         {
-            const auto describe_flags =
-                [&](const std::vector<std::string>& flags,
-                    bool                            module_units_batch,
-                    const std::string&              file)
-            {
-                std::string line =
-                    scan_argv0.empty() ? std::string{info.driver} : scan_argv0;
-                for (const std::string& a : flags)
-                {
-                    line += " " + a;
-                }
-                if (module_units_batch)
-                {
-                    line += " -x c++-module";
-                }
-                line += " " + file;
-                return line;
-            };
+            const std::string scan_argv0_now =
+                scan_argv0.empty() ? std::string{info.driver} : scan_argv0;
             for (const std::string& unit : scan_units)
             {
                 const auto  rit = rule_of_unit.find(unit);
@@ -3704,7 +4862,14 @@ export namespace cg::clang
                         "scan rule: {}{} | scan argv: {}",
                         unit,
                         rule_text,
-                        describe_flags(unit_scan_flags(unit), true, unit)));
+                        detail::describe_scan_argv(
+                            scan_argv0_now,
+                            detail::unit_scan_flags_of(
+                                scan_base,
+                                stripped_recorded,
+                                unit),
+                            true,
+                            unit)));
             }
             for (const CompileCommand& cc : classic)
             {
@@ -3729,8 +4894,13 @@ export namespace cg::clang
                         "scan rule: {}{} | scan argv: {}",
                         norm,
                         rule_text,
-                        describe_flags(
-                            db ? cc.argv : unit_scan_flags(norm),
+                        detail::describe_scan_argv(
+                            scan_argv0_now,
+                            db ? cc.argv
+                               : detail::unit_scan_flags_of(
+                                     scan_base,
+                                     stripped_recorded,
+                                     norm),
                             false,
                             norm)));
             }
@@ -3838,31 +5008,7 @@ export namespace cg::clang
                                     .generic_string());
         out.cache_dir = engine_dir;
 
-        const auto create_dir = [](const std::string& dir)
-        {
-            std::error_code ec;
-            if (fs::is_directory(fs::path{dir}, ec))
-            {
-                return;
-            }
-            fs::create_directories(fs::path{dir}, ec);
-            cg::util::platform::enable_dir_compression(dir);
-        };
-
         BmiManifest manifest;
-        const auto  wipe_engine_dir = [&](const char* why)
-        {
-            std::error_code rm;
-            for (const fs::directory_entry& e :
-                 fs::directory_iterator(engine_dir, rm))
-            {
-                fs::remove_all(e.path(), rm);
-            }
-            out.purged += manifest.entries.size();
-            out.notes.push_back(
-                std::format("BMI cache wiped ({}) - full rebuild", why));
-            manifest = BmiManifest{};
-        };
         {
             std::optional<BmiManifest> previous;
             std::error_code            ec;
@@ -3880,7 +5026,11 @@ export namespace cg::clang
                 && !opt.dry_run)
             {
                 const std::string was = previous->engine;
-                wipe_engine_dir("was built by a different engine");
+                detail::wipe_engine_cache_dir(
+                    engine_dir,
+                    out,
+                    manifest,
+                    "was built by a different engine");
                 out.notes.back() += std::format(" (was '{}')", was);
                 previous.reset();
             }
@@ -3901,7 +5051,10 @@ export namespace cg::clang
                         if (e.is_regular_file(isc) && name != "manifest.json"
                             && !name.ends_with(".tmp"))
                         {
-                            wipe_engine_dir(
+                            detail::wipe_engine_cache_dir(
+                                engine_dir,
+                                out,
+                                manifest,
                                 "pre-rework flat-pcm cache layout detected");
                             break;
                         }
@@ -3909,109 +5062,18 @@ export namespace cg::clang
                 }
             }
         }
-        const auto entry_key =
-            [](std::string_view name, std::string_view command)
-        { return detail::bmi_entry_key(name, command); };
         std::unordered_map<std::string, BmiEntry> prior;
         for (BmiEntry& e : manifest.entries)
         {
-            prior.emplace(entry_key(e.name, e.command), std::move(e));
+            prior.emplace(
+                detail::bmi_entry_key(e.name, e.command),
+                std::move(e));
         }
         manifest.entries.clear();
         manifest.engine = engine_version;
         manifest.engine_key = engine_key;
         manifest.config_key = config_key;
         manifest.toolset_id = std_source.toolset_id;
-
-        /**
-         * @internal 跨配置 std 捐赠（裁量 a）：布局改版后每个配置目录各有
-         * 自己的引擎目录与台账，本清单 miss 的 std pcm 从兄弟配置目录扫描
-         * 同一生产者产出（同源路径 + 同内容哈希 + 同命令摘要 = 同 pcm 字节）
-         * 拷贝重定位，绝不共享句柄——33MB 级 std 不因布局改版退化为每配置
-         * 重编。命中条件与清单内捐赠同等保守。
-         */
-        struct DonorPcm
-        {
-            std::string  path;
-            std::int64_t size = 0;
-        };
-        const auto cross_config_donor =
-            [&](std::string_view   module,
-                const std::string& command,
-                const std::string& source,
-                const std::string& source_hash) -> DonorPcm
-        {
-            if (opt.ccg_config_dir.empty())
-            {
-                return {};
-            }
-            std::error_code lec;
-            for (const fs::directory_entry& sibling :
-                 fs::directory_iterator(fs::path{shared_ccg_root}, lec))
-            {
-                std::error_code sec;
-                if (!sibling.is_directory(sec))
-                {
-                    continue;
-                }
-                std::error_code bec;
-                for (const fs::directory_entry& bmi_dir :
-                     fs::directory_iterator(sibling.path(), bec))
-                {
-                    std::error_code dec;
-                    if (!bmi_dir.is_directory(dec))
-                    {
-                        continue;
-                    }
-                    if (!bmi_dir.path().filename().generic_string().starts_with(
-                            "bmi-self-"))
-                    {
-                        continue;
-                    }
-                    const fs::path donor_engine = bmi_dir.path() / engine_key;
-                    const fs::path donor_manifest =
-                        donor_engine / "manifest.json";
-                    std::error_code mec;
-                    if (!fs::is_regular_file(donor_manifest, mec))
-                    {
-                        continue;
-                    }
-                    const auto donor_text =
-                        cg::util::read_text_file(donor_manifest.string());
-                    if (!donor_text.has_value())
-                    {
-                        continue;
-                    }
-                    const auto other = detail::manifest_from_json(*donor_text);
-                    if (!other.has_value() || other->engine != engine_version)
-                    {
-                        continue;
-                    }
-                    for (const BmiEntry& e : other->entries)
-                    {
-                        if (e.name != module || !e.std_module
-                            || e.command != command || e.source != source
-                            || e.hash != source_hash || e.pcm.empty()
-                            || e.pcm_size <= 0)
-                        {
-                            continue;
-                        }
-                        const fs::path  donor = donor_engine / fs::path{e.pcm};
-                        std::error_code cec;
-                        if (fs::is_regular_file(donor, cec)
-                            && detail::artifact_size(
-                                   donor.lexically_normal().generic_string())
-                                   == e.pcm_size)
-                        {
-                            return DonorPcm{
-                                donor.lexically_normal().generic_string(),
-                                e.pcm_size};
-                        }
-                    }
-                }
-            }
-            return {};
-        };
 
         std::unordered_map<std::string, detail::BmiNode> nodes;
         std::unordered_map<std::string, std::string>     source_of_name;
@@ -4097,13 +5159,6 @@ export namespace cg::clang
             }
         }
 
-        const auto std_pcm_path = [&](std::string_view module)
-        {
-            return cg::util::norm_path(
-                (fs::path{config_dir} / std::format("{}.pcm", module))
-                    .lexically_normal()
-                    .generic_string());
-        };
         bool        std_available = false;
         std::string std_failure;
         if (std_source.stdlib_impl == "msvc-stl" && !std_source.note.empty())
@@ -4128,9 +5183,9 @@ export namespace cg::clang
         }
         else
         {
-            create_dir(bmi_root);
-            create_dir(engine_dir);
-            create_dir(config_dir);
+            detail::ensure_cache_dir(bmi_root);
+            detail::ensure_cache_dir(engine_dir);
+            detail::ensure_cache_dir(config_dir);
             // 姊妹引擎目录只在显式 --force/--full 且超过宽限期时回收：
             // 增量/update 绝不删除其它引擎（及其下的配置目录）的缓存。
             // 别的引擎的 pcm 本引擎从不读取，留下的代价只是磁盘；而并发
@@ -4158,207 +5213,27 @@ export namespace cg::clang
                     fs::remove_all(e.path(), ec);
                 }
             }
-            std::string std_error; // 首个失败 std 构建的细节
-            const auto  build_std = [&](std::string_view   module,
-                                        const std::string& source,
-                                        const std::string& feed_std_pcm)
-            {
-                std::string pcm = std_pcm_path(module);
-                // 参数向量不含引擎可执行路径：run_tool 的首参（进程可执
-                // 行栏）已携带它，run_process 又把它拼成命令行首 token
-                // （"exe" + 参数）——参数向量里再带一份，引擎 .exe 路径就
-                // 会在命令行出现两遍，第二份是真实存在的文件，被 clang
-                // 当作额外输入。std 路径的合成 argv 无 /TP，clang-cl 把
-                // .exe 归为 linker input 只出警告，此前侥幸成功；这与接
-                // 口路径（/TP 把它强制成 C++ 输入，双输入 + -clang:-o 即
-                // cannot specify -o when generating multiple output
-                // files，参数逃逸真凶）是同源的结构问题，一并根除。
-                std::vector<std::string> argv;
-                if (dialect_cl)
-                {
-                    argv.emplace_back("--driver-mode=cl");
-                    argv.emplace_back("/EHsc");
-                    argv.emplace_back(cl_std);
-                    argv.emplace_back("-Wno-include-angled-in-module-purview");
-                }
-                else
-                {
-                    argv.emplace_back(std::format("-std={}", opt.std_value));
-                    for (const std::string& axis : langopt_axes)
-                    {
-                        argv.push_back(axis);
-                    }
-                }
-                argv.emplace_back("-Wno-reserved-module-identifier");
-                if (!feed_std_pcm.empty())
-                {
-                    argv.emplace_back(
-                        std::format("-fmodule-file=std={}", feed_std_pcm));
-                }
-                argv.emplace_back("-x");
-                argv.emplace_back("c++-module");
-                argv.emplace_back("--precompile-reduced-bmi");
-                if (dialect_cl)
-                {
-                    for (const std::string& dir : std_source.wiring)
-                    {
-                        argv.emplace_back("-imsvc");
-                        argv.push_back(dir);
-                    }
-                }
-                else
-                {
-                    for (const std::string& w : std_source.wiring)
-                    {
-                        argv.push_back(w);
-                    }
-                }
-                argv.push_back(source);
-                std::string canonical;
-                for (const std::string& a : argv)
-                {
-                    canonical += a + "\n";
-                }
-                const std::string command = detail::hash_text(canonical);
-                const BmiEntry*   entry_prior = [&]
-                {
-                    const auto it = prior.find(
-                        entry_key(module, std::string_view{command}));
-                    return it == prior.end() ? nullptr : &it->second;
-                }();
-                const detail::SourceCheck check =
-                    detail::check_source(source, entry_prior);
-                if (!opt.force && check.matches_prior && entry_prior != nullptr
-                    && entry_prior->command == command)
-                {
-                    const std::int64_t cached =
-                        detail::cached_pcm_size(pcm, entry_prior->pcm_size);
-                    if (cached > 0)
-                    {
-                        BmiEntry entry = *entry_prior;
-                        entry.mtime = check.stat.mtime;
-                        entry.size = check.stat.size;
-                        entry.pcm = detail::pcm_rel(engine_dir, pcm);
-                        entry.pcm_size = cached;
-                        entry.config = opt.db_config_label;
-                        manifest.entries.push_back(std::move(entry));
-                        ++out.reused;
-                        return pcm;
-                    }
-                    // 0 字节/半截/尺寸不符：同轮失效（丢缓存），先试同
-                    // 清单的 donor，仍不可用则落回本地重建。
-                    if (entry_prior != nullptr && !entry_prior->pcm.empty())
-                    {
-                        const fs::path donor =
-                            fs::path{engine_dir} / fs::path{entry_prior->pcm};
-                        if (detail::copy_donor_verified(
-                                donor.lexically_normal().generic_string(),
-                                pcm,
-                                entry_prior->pcm_size))
-                        {
-                            BmiEntry entry = *entry_prior;
-                            entry.mtime = check.stat.mtime;
-                            entry.size = check.stat.size;
-                            entry.pcm = detail::pcm_rel(engine_dir, pcm);
-                            entry.pcm_size = entry_prior->pcm_size;
-                            entry.config = opt.db_config_label;
-                            manifest.entries.push_back(std::move(entry));
-                            ++out.reused;
-                            return pcm;
-                        }
-                    }
-                }
-                // 跨配置 std 捐赠：本配置清单 miss（首跑）时从兄弟配置目录
-                // 拷贝同一生产者产出，30+ MB 的 std 接口不重编。donor 记录
-                // 尺寸必须 >0，复制后目标尺寸必须与之一致。
-                if (!opt.force)
-                {
-                    const DonorPcm donor =
-                        cross_config_donor(module, command, source, check.hash);
-                    if (!donor.path.empty()
-                        && detail::copy_donor_verified(
-                            donor.path,
-                            pcm,
-                            donor.size))
-                    {
-                        BmiEntry entry;
-                        entry.name = std::string{module};
-                        entry.source = source;
-                        entry.hash = check.hash;
-                        entry.mtime = check.stat.mtime;
-                        entry.size = check.stat.size;
-                        entry.command = command;
-                        entry.pcm = detail::pcm_rel(engine_dir, pcm);
-                        entry.pcm_size = donor.size;
-                        entry.std_module = true;
-                        entry.config = opt.db_config_label;
-                        manifest.entries.push_back(std::move(entry));
-                        ++out.reused;
-                        return pcm;
-                    }
-                }
-                // 产出先落唯一 tmp：exit 0 且 size>0 才原子替换正式名；
-                // 失败删 tmp、旧 pcm 原样保留。
-                const fs::path pcm_tmp_path =
-                    cg::util::platform::unique_temp_path(fs::path{pcm});
-                const std::string pcm_tmp = pcm_tmp_path.generic_string();
-                if (dialect_cl)
-                {
-                    argv.emplace_back("-clang:-o");
-                    argv.push_back(std::format("-clang:{}", pcm_tmp));
-                }
-                else
-                {
-                    argv.emplace_back("-o");
-                    argv.push_back(pcm_tmp);
-                }
-                const detail::ProcResult r =
-                    detail::run_tool(info.driver, argv);
-                const std::int64_t produced =
-                    r.started && r.exit_code == 0
-                        ? detail::artifact_size(pcm_tmp)
-                        : 0;
-                if (produced > 0
-                    && cg::util::platform::atomic_replace(
-                        pcm_tmp_path,
-                        fs::path{pcm}))
-                {
-                    BmiEntry entry;
-                    entry.name = std::string{module};
-                    entry.source = source;
-                    entry.hash = check.hash;
-                    entry.mtime = check.stat.mtime;
-                    entry.size = check.stat.size;
-                    entry.command = command;
-                    entry.pcm = detail::pcm_rel(engine_dir, pcm);
-                    entry.pcm_size = produced;
-                    entry.std_module = true;
-                    entry.config = opt.db_config_label;
-                    manifest.entries.push_back(std::move(entry));
-                    ++out.built;
-                    return pcm;
-                }
-                cg::util::platform::remove_file(pcm_tmp_path);
-                std_error =
-                    produced == 0 && r.started && r.exit_code == 0
-                        ? std::string{"output missing or empty"}
-                        : std::format(
-                              "exit {}",
-                              r.exit_code == -1 && !r.started ? -1
-                                                              : r.exit_code);
-                if (!r.err.empty())
-                {
-                    std_error += "; " + detail::first_line_of(r.err);
-                }
-                else if (!r.out.empty())
-                {
-                    std_error += "; " + detail::first_line_of(r.out);
-                }
-                return std::string{};
-            };
-            const auto        t0 = std::chrono::steady_clock::now();
-            const std::string std_pcm =
-                build_std("std", std_source.std_path, "");
+            const detail::StdBuildCtx std_ctx{
+                opt,
+                std_source,
+                info.driver,
+                config_dir,
+                engine_dir,
+                shared_ccg_root,
+                engine_key,
+                engine_version,
+                cl_std,
+                langopt_axes,
+                prior,
+                dialect_cl};
+            detail::StdBuildIo std_io{manifest, out, std::string{}};
+            const auto         t0 = std::chrono::steady_clock::now();
+            const std::string  std_pcm = detail::build_std_module(
+                std_ctx,
+                std_io,
+                "std",
+                std_source.std_path,
+                "");
             std_available = !std_pcm.empty();
             if (std_available)
             {
@@ -4377,7 +5252,12 @@ export namespace cg::clang
                         engine_dir));
                 if (!std_source.compat_path.empty())
                 {
-                    build_std("std.compat", std_source.compat_path, std_pcm);
+                    detail::build_std_module(
+                        std_ctx,
+                        std_io,
+                        "std.compat",
+                        std_source.compat_path,
+                        std_pcm);
                 }
             }
             else
@@ -4387,7 +5267,7 @@ export namespace cg::clang
                     "'{}' failed ({}) - TUs importing std degrade to tier-1 "
                     "(imports still recorded from the P1689 scan)",
                     std_source.std_path,
-                    std_error.empty() ? "no output" : std_error);
+                    std_io.std_error.empty() ? "no output" : std_io.std_error);
                 out.notes.push_back(std_failure);
             }
         }
@@ -4398,14 +5278,14 @@ export namespace cg::clang
             detail::BmiNode node;
             node.name = "std";
             node.interface = false;
-            node.pcm = std_pcm_path("std");
+            node.pcm = detail::std_pcm_path(config_dir, "std");
             node.available = true;
             nodes.emplace("std", node);
             detail::BmiNode compat;
             compat.name = "std.compat";
             compat.interface = false;
             compat.direct = {"std"};
-            compat.pcm = std_pcm_path("std.compat");
+            compat.pcm = detail::std_pcm_path(config_dir, "std.compat");
             // 存在还不够：0 字节/半截文件是失败构建的残骸，投喂它只会让
             // 消费者以同样的错误失败。非空才算可用。
             compat.available =
@@ -4430,7 +5310,7 @@ export namespace cg::clang
 
         if (!opt.dry_run)
         {
-            create_dir(config_dir);
+            detail::ensure_cache_dir(config_dir);
         }
         std::unordered_map<std::string, std::vector<std::string>> closure_memo;
         // 闭包预算：closure_of 只读构建期不变的 direct 字段（扫描期冻结），
@@ -4443,19 +5323,6 @@ export namespace cg::clang
         // 层前预备（主线程纯读组装，构建任务的输入）与结果槽（任务按下标
         // 独占写，屏障后主线程按名字序读——节点表与清单条目绝不被工人
         // 线程触碰，无锁协议）。
-        struct LayerPrep
-        {
-            std::string              name;
-            std::vector<std::string> argv;    // 组装产物（未含源与输出参数）
-            std::string              command; // 规范生产命令哈希
-            const BmiEntry*          prior_entry = nullptr; // 清单命中（可空）
-            std::string              pcm;                   // 绝对产物路径
-        };
-        struct LayerOutcome
-        {
-            std::optional<BmiEntry> entry;   // 构建成功（产物已原子替换落盘）
-            std::string             failure; // 失败文本（含异常收编形态）
-        };
         // 串行对照门（测试与排障的逃生门，非产品面）：置 CCG_BMI_SERIAL 时
         // 层内任务改在主线程逐个执行——同一任务体、同一收尾顺序，产物与
         // 并行形态逐字节一致，供逐字节对照与并行无关缺陷的二分。
@@ -4471,7 +5338,7 @@ export namespace cg::clang
         {
             // —— 层前主线程预检（纯读；屏障保证上游 failure/reusable 已定案，
             // 同层节点互不在彼此闭包内，批量预检与逐节点串行判定等价）——
-            std::vector<LayerPrep> preps;
+            std::vector<detail::LayerPrep> preps;
             for (const std::string& name : layer)
             {
                 detail::BmiNode& node = nodes.at(name);
@@ -4545,8 +5412,8 @@ export namespace cg::clang
                     cl_std,
                     opt.std_value,
                     langopt_axes,
-                    cl_base_argv(),
-                    base_argv(),
+                    scan_base.cl_base,
+                    scan_base.gnu_base,
                     dep_feeds);
                 std::string canonical;
                 for (const std::string& a : argv)
@@ -4566,8 +5433,8 @@ export namespace cg::clang
                         .generic_string());
                 const BmiEntry* entry_prior = [&]
                 {
-                    const auto it =
-                        prior.find(entry_key(name, std::string_view{command}));
+                    const auto it = prior.find(
+                        detail::bmi_entry_key(name, std::string_view{command}));
                     return it == prior.end() ? nullptr : &it->second;
                 }();
                 const detail::SourceCheck check =
@@ -4609,7 +5476,7 @@ export namespace cg::clang
                     node.pcm = pcm;
                     continue;
                 }
-                LayerPrep prep;
+                detail::LayerPrep prep;
                 prep.name = name;
                 prep.argv = std::move(argv);
                 prep.command = command;
@@ -4627,112 +5494,20 @@ export namespace cg::clang
             // 刻取——排队与调度延迟不拉长 stat 与编译器读源之间的观测窗口
             // （update 期间 ixx 被改的边缘处理锚点：身份与内容至多在毫秒
             // 级窗口内错位，下一轮 stat/hash 必不匹配而重建自愈）。——
-            std::vector<LayerOutcome> outcomes(preps.size());
-            const auto                run_layer_task = [&](std::size_t idx)
-            {
-                const LayerPrep& prep = preps[idx];
-                LayerOutcome&    slot = outcomes[idx];
-                try
-                {
-                    const detail::BmiNode&    node = nodes.at(prep.name);
-                    const detail::SourceCheck check =
-                        detail::check_source(node.source, prep.prior_entry);
-                    std::vector<std::string> argv = prep.argv;
-                    argv.push_back(node.source);
-                    // 唯一 tmp → 校验 size>0 → 原子替换；失败保留旧 pcm。
-                    const fs::path pcm_tmp_path =
-                        cg::util::platform::unique_temp_path(
-                            fs::path{prep.pcm});
-                    const std::string pcm_tmp = pcm_tmp_path.generic_string();
-                    if (dialect_cl)
-                    {
-                        argv.emplace_back("-clang:-o");
-                        argv.push_back(std::format("-clang:{}", pcm_tmp));
-                    }
-                    else
-                    {
-                        argv.emplace_back("-o");
-                        argv.push_back(pcm_tmp);
-                    }
-                    const detail::ProcResult r =
-                        detail::run_tool(info.driver, argv);
-                    const std::int64_t produced =
-                        r.started && r.exit_code == 0
-                            ? detail::artifact_size(pcm_tmp)
-                            : 0;
-                    if (produced > 0
-                        && cg::util::platform::atomic_replace(
-                            pcm_tmp_path,
-                            fs::path{prep.pcm}))
-                    {
-                        BmiEntry entry;
-                        entry.name = prep.name;
-                        entry.source = node.source;
-                        entry.hash = check.hash;
-                        entry.mtime = check.stat.mtime;
-                        entry.size = check.stat.size;
-                        entry.command = prep.command;
-                        entry.requires_names = node.direct;
-                        entry.pcm = detail::pcm_rel(engine_dir, prep.pcm);
-                        entry.pcm_size = produced;
-                        entry.config = opt.db_config_label;
-                        slot.entry = std::move(entry);
-                        return;
-                    }
-                    cg::util::platform::remove_file(pcm_tmp_path);
-                    const std::string why =
-                        r.started && r.exit_code == 0
-                            ? (produced == 0
-                                   ? std::string{"output missing or empty"}
-                                   : std::string{"atomic replace failed"})
-                            : (r.started ? std::format("exit {}", r.exit_code)
-                                         : std::string{"spawn failed"});
-                    // 归属冲突（MSVC 宽容、clang 拒绝的生成头两路包含形状）
-                    // 升格为专属类并携带工程侧修法；判定在全文 stderr 上做
-                    // （该诊断按终端列宽折行，首行未必带齐锚），其余保持
-                    // module-build-failed 口径。
-                    slot.failure =
-                        is_module_attachment_conflict(r.err)
-                            ? module_attachment_conflict_failure(
-                                  detail::first_line_of(r.err),
-                                  prep.name)
-                            : std::format(
-                                  "module-build-failed: building the interface "
-                                  "BMI for '{}' from '{}' failed ({}{}) - the "
-                                  "TU and its dependents degrade to tier-1",
-                                  prep.name,
-                                  node.source,
-                                  why,
-                                  r.err.empty()
-                                      ? std::string{}
-                                      : "; " + detail::first_line_of(r.err));
-                }
-                catch (const std::exception& e)
-                {
-                    // 工人线程里未捕获的 C++ 异常会终止整个进程：收编为该
-                    // 节点的失败记名（同层其余任务照常完成），与解析池任务
-                    // 体的异常纪律同款。
-                    slot.failure = std::format(
-                        "module-build-failed: building the interface BMI for "
-                        "'{}' failed (internal error: {}) - the TU and its "
-                        "dependents degrade to tier-1",
-                        prep.name,
-                        e.what());
-                }
-                catch (...)
-                {
-                    slot.failure = std::format(
-                        "module-build-failed: building the interface BMI for "
-                        "'{}' failed (internal error: unknown) - the TU and "
-                        "its dependents degrade to tier-1",
-                        prep.name);
-                }
-            };
+            std::vector<detail::LayerOutcome> outcomes(preps.size());
             if (serial_bmi)
             {
                 for (std::size_t i = 0; i < preps.size(); ++i)
                 {
-                    run_layer_task(i);
+                    detail::run_layer_build_task(
+                        preps,
+                        outcomes,
+                        nodes,
+                        info.driver,
+                        engine_dir,
+                        opt.db_config_label,
+                        dialect_cl,
+                        i);
                 }
             }
             else
@@ -4744,15 +5519,25 @@ export namespace cg::clang
                     preps.size());
                 peak_workers = std::max(peak_workers, pool_spec.requested);
                 pool_spec.task = [&](std::size_t i, int /*worker_id*/)
-                { run_layer_task(i); };
+                {
+                    detail::run_layer_build_task(
+                        preps,
+                        outcomes,
+                        nodes,
+                        info.driver,
+                        engine_dir,
+                        opt.db_config_label,
+                        dialect_cl,
+                        i);
+                };
                 cg::util::pool::run(std::move(pool_spec));
             } // 池 join 点即层屏障：本层产物全部落盘、结果槽全部写满
 
             // —— 层收尾（主线程，按层内名字序写回）：下一层此刻才开 ——
             for (std::size_t i = 0; i < preps.size(); ++i)
             {
-                detail::BmiNode& node = nodes.at(preps[i].name);
-                LayerOutcome&    outcome = outcomes[i];
+                detail::BmiNode&      node = nodes.at(preps[i].name);
+                detail::LayerOutcome& outcome = outcomes[i];
                 if (outcome.entry.has_value())
                 {
                     node.available = true;
@@ -4802,187 +5587,17 @@ export namespace cg::clang
                 "falls back to the pinned x86_64-pc-windows-msvc triple");
             return std::string{"x86_64-pc-windows-msvc"};
         }();
-        const auto cl_parse_argv = [&]
-        {
-            std::vector<std::string> argv;
-            if (!recipe_b)
-            {
-                argv = {
-                    "--driver-mode=cl",
-                    "/EHsc",
-                    cl_std,
-                    "-Xclang",
-                    "-fexternc-nounwind",
-                    "-fstack-protector-strong",
-                    "-fms-compatibility",
-                    std::format("--target={}", cl_target)};
-                for (const std::string& dir : std_source.wiring)
-                {
-                    argv.emplace_back("-imsvc");
-                    argv.push_back(dir);
-                }
-                for (const std::string& define : opt.cl_defines)
-                {
-                    argv.emplace_back("/D");
-                    argv.push_back(define);
-                }
-            }
-            else
-            {
-                argv = {
-                    std::format("-std={}", gnu_twin_std),
-                    std::format("--target={}", cl_target),
-                    "-fms-compatibility",
-                    "-Xclang",
-                    "-fexternc-nounwind",
-                    "-fstack-protector-strong"};
-                for (const std::string& dir : std_source.wiring)
-                {
-                    argv.emplace_back("-isystem");
-                    argv.push_back(dir);
-                }
-                for (const std::string& define : opt.cl_defines)
-                {
-                    argv.emplace_back("-D");
-                    argv.push_back(define);
-                }
-            }
-            if (!opt.root.empty())
-            {
-                argv.emplace_back("-I");
-                argv.push_back(opt.root);
-            }
-            return argv;
-        };
+        const std::vector<std::string> cl_parse_base = detail::cl_parse_argv_of(
+            recipe_b,
+            cl_std,
+            gnu_twin_std,
+            cl_target,
+            std_source.wiring,
+            opt.cl_defines,
+            opt.root);
         const std::vector<std::string> toolset_roots =
             dialect_cl ? detail::stl_include_slice(std_source.wiring)
                        : std::vector<std::string>{};
-        const auto apply_degrade_rules =
-            [&](CompileCommand&                 cc,
-                const std::vector<ScanRequire>& reqs,
-                std::vector<ModuleFeed>&        feeds)
-        {
-            const auto add_unique =
-                [](std::vector<std::string>& v, const std::string& s)
-            { cg::util::push_unique(v, s); };
-            for (const ScanRequire& rq : reqs)
-            {
-                if (detail::looks_like_header_unit(rq.name))
-                {
-                    cc.overlay.header_unit_includes = true;
-                    std::string name = rq.name;
-                    if (name.size() >= 2
-                        && ((name.front() == '"' && name.back() == '"')
-                            || (name.front() == '<' && name.back() == '>')))
-                    {
-                        name = name.substr(1, name.size() - 2);
-                    }
-                    cc.overlay_imports.push_back(std::move(name));
-                }
-            }
-            for (const std::string& name :
-                 detail::text_header_unit_imports(cc.file))
-            {
-                cc.overlay.header_unit_includes = true;
-                add_unique(cc.overlay_imports, name);
-            }
-            // 伞头前提门（requires_std）：P1689 规则确实牵涉 std 才允许
-            // overlay；文本 STL 包含（stdafx 形态）单独绝不触发。
-            const bool needs_std =
-                detail::requires_std(reqs, nodes, closure_memo);
-            if (dialect_cl && needs_std
-                && detail::text_has_stl_include(cc.file, toolset_roots))
-            {
-                cc.overlay.std_umbrella = true;
-                for (const ScanRequire& rq : reqs)
-                {
-                    if (rq.name == "std" || rq.name == "std.compat")
-                    {
-                        add_unique(cc.overlay_imports, rq.name);
-                    }
-                }
-                std::erase_if(
-                    feeds,
-                    [&](const ModuleFeed& feed)
-                    {
-                        const bool is_std =
-                            feed.name == "std" || feed.name == "std.compat";
-                        const std::vector<std::string> closure =
-                            detail::closure_of(feed.name, nodes, closure_memo);
-                        const bool std_bound =
-                            is_std
-                            || std::ranges::find(closure, "std")
-                                   != closure.end()
-                            || std::ranges::find(closure, "std.compat")
-                                   != closure.end();
-                        if (std_bound
-                            && !detail::looks_like_header_unit(feed.name)
-                            && std::ranges::any_of(
-                                reqs,
-                                [&](const ScanRequire& rq)
-                                { return rq.name == feed.name; }))
-                        {
-                            add_unique(cc.overlay.dropped_modules, feed.name);
-                            add_unique(cc.overlay_imports, feed.name);
-                        }
-                        return std_bound;
-                    });
-            }
-        };
-
-        const auto feed_flags_for =
-            [&](const std::vector<std::string>& names,
-                std::vector<ModuleFeed>&        feeds,
-                const std::vector<std::string>* reference_names =
-                    nullptr) -> std::optional<std::string>
-        {
-            std::map<std::string, std::string> resolved; // 有序、去重
-            for (const std::string& direct : names)
-            {
-                if (const auto a = ambiguous_of_name.find(direct);
-                    a != ambiguous_of_name.end())
-                {
-                    return a->second;
-                }
-                std::vector<std::string> closure =
-                    detail::closure_of(direct, nodes, closure_memo);
-                closure.push_back(direct);
-                for (const std::string& dep : closure)
-                {
-                    const auto dit = nodes.find(dep);
-                    if (dit != nodes.end() && dit->second.available
-                        && !dit->second.pcm.empty())
-                    {
-                        resolved.emplace(dep, dit->second.pcm);
-                        continue;
-                    }
-                    if (const auto f = std_node_failure.find(dep);
-                        f != std_node_failure.end())
-                    {
-                        return f->second;
-                    }
-                    if (dit != nodes.end() && !dit->second.failure.empty())
-                    {
-                        return dit->second.failure;
-                    }
-                    return std::format(
-                        "module-not-found: no provider under the roots for "
-                        "module '{}' ({}) - the TU degrades to tier-1",
-                        dep,
-                        reference_names != nullptr
-                                && std::ranges::find(*reference_names, dep)
-                                       != reference_names->end()
-                            ? "the build's /reference names it, but no module "
-                              "source under the roots provides it"
-                            : "self-build scan");
-                }
-            }
-            for (const auto& [dep, pcm] : resolved)
-            {
-                feeds.push_back(ModuleFeed{.name = dep, .pcm = pcm});
-            }
-            return std::nullopt;
-        };
 
         for (const std::string& unit : module_units)
         {
@@ -5036,11 +5651,11 @@ export namespace cg::clang
                 }
                 else if (dialect_cl)
                 {
-                    cc.argv = cl_parse_argv(); // 无记录权威的 cl 单元：合成兜底
+                    cc.argv = cl_parse_base; // 无记录权威的 cl 单元：合成兜底
                 }
                 else
                 {
-                    cc.argv = base_argv();
+                    cc.argv = scan_base.gnu_base;
                     for (const std::string& axis : langopt_axes)
                     {
                         cc.argv.push_back(axis);
@@ -5049,7 +5664,7 @@ export namespace cg::clang
             }
             else
             {
-                cc.argv = dialect_cl ? cl_parse_argv() : base_argv();
+                cc.argv = dialect_cl ? cl_parse_base : scan_base.gnu_base;
             }
             const auto rit = rule_of_unit.find(norm);
             if (rit == rule_of_unit.end())
@@ -5137,8 +5752,14 @@ export namespace cg::clang
                 }
             }
             std::vector<ModuleFeed> feeds;
-            if (auto blocked =
-                    feed_flags_for(direct_names, feeds, unit_references))
+            if (auto blocked = detail::module_feeds_error(
+                    direct_names,
+                    feeds,
+                    unit_references,
+                    nodes,
+                    closure_memo,
+                    ambiguous_of_name,
+                    std_node_failure))
             {
                 cc.preordained_failure = *blocked;
                 cc.bmi_failure_deps = std::move(failure_dep_paths);
@@ -5146,7 +5767,14 @@ export namespace cg::clang
                 out.commands.emplace_back(std::move(cc));
                 continue;
             }
-            apply_degrade_rules(cc, rit->second.requires_names, feeds);
+            detail::apply_degrade_rules_for(
+                cc,
+                rit->second.requires_names,
+                feeds,
+                dialect_cl,
+                nodes,
+                closure_memo,
+                toolset_roots);
             const bool interface_unit = std::ranges::any_of(
                 rit->second.provides,
                 [](const ScanProvide& p) { return p.is_interface; });
@@ -5280,14 +5908,27 @@ export namespace cg::clang
                 }
             }
             std::vector<ModuleFeed> feeds;
-            if (auto blocked =
-                    feed_flags_for(direct_names, feeds, classic_references))
+            if (auto blocked = detail::module_feeds_error(
+                    direct_names,
+                    feeds,
+                    classic_references,
+                    nodes,
+                    closure_memo,
+                    ambiguous_of_name,
+                    std_node_failure))
             {
                 cc.preordained_failure = *blocked;
                 ++out.degraded;
                 continue;
             }
-            apply_degrade_rules(cc, requires_names, feeds);
+            detail::apply_degrade_rules_for(
+                cc,
+                requires_names,
+                feeds,
+                dialect_cl,
+                nodes,
+                closure_memo,
+                toolset_roots);
             for (const ModuleFeed& feed : feeds)
             {
                 cc.argv.emplace_back(
@@ -5302,32 +5943,13 @@ export namespace cg::clang
                 fs::path{engine_dir} / "manifest.json"};
             // 宽限期：只有显式 --force/--full 且产物 mtime 超过 1 小时才
             // 允许删除。增量/update 从不删除任何缓存产物。
-            constexpr auto grace = std::chrono::hours{1};
-            const auto     older_than_grace = [&](const fs::path& p)
-            {
-                std::error_code ec;
-                const auto      mtime = fs::last_write_time(p, ec);
-                if (ec)
-                {
-                    return false; // 年龄未知：保守保留
-                }
-                return fs::file_time_type::clock::now() - mtime > grace;
-            };
-            const auto artifact_of = [&](const BmiEntry& e)
-            { return fs::path{engine_dir} / fs::path{e.pcm}; };
+            constexpr std::chrono::hours grace{1};
             // pcm 拼写为 "`<config_key>`/`<module>`.pcm"；首段不是本趟配置键
             // 即兄弟配置的产物——即便 --force/--full 也不回收。
-            const auto other_config = [&](const BmiEntry& e)
-            {
-                const std::size_t slash = e.pcm.find('/');
-                return slash != std::string::npos
-                       && e.pcm.substr(0, slash) != config_key;
-            };
-
             std::unordered_set<std::string> live;
             for (const BmiEntry& e : manifest.entries)
             {
-                live.insert(entry_key(e.name, e.command));
+                live.insert(detail::bmi_entry_key(e.name, e.command));
             }
             std::unordered_set<std::string> dropped;
             for (auto& [key, entry] : prior)
@@ -5339,8 +5961,11 @@ export namespace cg::clang
                 // 默认结转所有未参与本趟的条目（含兄弟配置与历史条目）：
                 // 增量运行绝不删除其它配置目录，且旧条目仍是引用集的一
                 // 部分，不会被清扫当作孤儿。
-                if (opt.force && !other_config(entry)
-                    && older_than_grace(artifact_of(entry)))
+                if (opt.force
+                    && !detail::entry_of_other_config(config_key, entry)
+                    && detail::mtime_older_than_grace(
+                        detail::entry_artifact(engine_dir, entry),
+                        grace))
                 {
                     dropped.insert(key);
                     ++out.purged;
@@ -5410,16 +6035,9 @@ export namespace cg::clang
             std::unordered_set<std::string> referenced;
             bool                            have_disk_manifest = false;
             {
-                const auto reference = [&](const BmiEntry& e)
-                {
-                    referenced.insert(
-                        cg::util::norm_path(artifact_of(e)
-                                                .lexically_normal()
-                                                .generic_string()));
-                };
                 for (const BmiEntry& e : manifest.entries)
                 {
-                    reference(e);
+                    detail::note_referenced_artifact(referenced, engine_dir, e);
                 }
                 // 重新读取落盘的完整清单（并发写者可能刚并入新条目）。
                 std::error_code sec;
@@ -5434,7 +6052,10 @@ export namespace cg::clang
                         {
                             for (const BmiEntry& e : disk->entries)
                             {
-                                reference(e);
+                                detail::note_referenced_artifact(
+                                    referenced,
+                                    engine_dir,
+                                    e);
                             }
                             have_disk_manifest = true;
                         }
@@ -5460,7 +6081,7 @@ export namespace cg::clang
                         const std::string abs = cg::util::norm_path(
                             e.path().lexically_normal().generic_string());
                         if (referenced.contains(abs)
-                            || !older_than_grace(e.path()))
+                            || !detail::mtime_older_than_grace(e.path(), grace))
                         {
                             continue;
                         }
@@ -5480,7 +6101,7 @@ export namespace cg::clang
                 {
                     std::error_code dec;
                     if (!fs::is_empty(dir, dec) || dec
-                        || !older_than_grace(dir))
+                        || !detail::mtime_older_than_grace(dir, grace))
                     {
                         continue;
                     }
