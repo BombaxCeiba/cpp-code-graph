@@ -1,6 +1,3 @@
-module;
-#include "../db/db.tables.h"
-
 /**
  * @module cg.cli.config
  *
@@ -9,8 +6,6 @@ module;
  * @internal
  * 曾为实现单元；模块布局扩展改为接口模块——无 BMI 单元触发 C2801 的规避
  * 手法随之退役（cmake/CcgC2801Workaround.cmake 持有该修复）。
- * db.tables.h 置于全局模块片段：本单元导入 cg.db，MSVC 要求 sqlpp23
- * 表模型定义在此可见，以合并模块记录的模板特化（完整机理见 db.tables.h）。
  */
 export module cg.cli.config;
 

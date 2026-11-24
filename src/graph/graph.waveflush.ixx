@@ -1,15 +1,10 @@
-module;
-#include "../db/db.tables.h"
-
 /**
  * @module cg.graph.waveflush
  *
  * @brief 波式分解域（值语义域对象）：解析期逐波拆解的驻留槽、账本与
  *        intern 表，及提交期回放的判据。
  *
- * @internal db.tables.h 置于全局模块片段：本单元导入 cg.db，MSVC 要求
- *           sqlpp23 表模型定义在此可见（同 cg.graph.build 的纪律）。
- *           cg.graph.build 以值成员嵌入并再导出本单元。构建族共用的
+ * @internal cg.graph.build 以值成员嵌入并再导出本单元。构建族共用的
  *           哈希混合步（mix_hash）唯一定义在此，编排层经导入消费。
  */
 

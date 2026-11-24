@@ -8,14 +8,8 @@
  *           （dispatch_detail::Hierarchy），BFS 不再逐步查库（不导入
  *           cg.graph.traverse，避免反向依赖）。nearest-override 用
  *           extends 图的最短距离：动态类型自身覆盖优先，其次最近
- *           基类覆盖；同距离多候选全部保留。db.tables.h 置于全局
- *           模块片段：本单元调用 cg.db 的查询函数，MSVC 要求
- *           sqlpp23 表模型定义在此可见，以合并模块记录的模板特化
- *           （完整机理见 db.tables.h）。
+ *           基类覆盖；同距离多候选全部保留。
  */
-module;
-#include "../db/db.tables.h"
-
 export module cg.analysis.dispatch.graph;
 
 import std;

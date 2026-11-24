@@ -7,14 +7,8 @@
  * @internal 本单元持入口 resolve()、结果类型与站点终态结算；
  *           dispatch_detail 的其余自由函数族按职责域分居 graph /
  *           context / statics / dynamics 四个子模块，经本单元
- *           re-export 对消费者可见。db.tables.h 置于全局模块片段：
- *           本单元调用 cg.db 的查询函数，MSVC 要求 sqlpp23 表模型
- *           定义在此可见，以合并模块记录的模板特化（完整机理见
- *           db.tables.h）。
+ *           re-export 对消费者可见。
  */
-module;
-#include "../db/db.tables.h"
-
 export module cg.analysis.dispatch;
 
 export import cg.analysis.dispatch.graph;

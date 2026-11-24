@@ -1,6 +1,3 @@
-module;
-#include "../db/db.tables.h"
-
 /**
  * @module cg.graph.traverse
  *
@@ -13,9 +10,7 @@ module;
  * @internal
  * 纯查询：唯一写入方是 cg.graph.build，它导入本模块以复用包含解析器
  * （两侧共用同一套规则，环检测使用其中的严格无歧义子集）。覆盖族 =
- * 被查询方法本身加上经 overrides 边连通的全部方法。db.tables.h 置于
- * 全局模块片段：本单元导入 cg.db，MSVC 要求 sqlpp23 表模型定义在此
- * 可见，以合并模块记录的模板特化（完整机理见 db.tables.h）。
+ * 被查询方法本身加上经 overrides 边连通的全部方法。
  */
 export module cg.graph.traverse;
 

@@ -1,6 +1,3 @@
-module;
-#include "../db/db.tables.h"
-
 /**
  * @module cg.cli.render.context
  *
@@ -16,8 +13,6 @@ import cg.graph;
 import cg.analysis.model;
 import cg.cli.parse;
 import cg.cli.render.base;
-import cg.cli.render.dispatch;
-import cg.cli.render.symbol;
 
 export namespace cg::cli::render
 {
@@ -143,24 +138,6 @@ export namespace cg::cli::render
                 obj.set(cg::db::name_of(type), std::move(array));
             }
             return obj;
-        }
-
-        /** @brief 文件 id 的路径文本；查不到时给 "?"。 */
-        [[nodiscard]]
-        auto cycle_file_path(GraphStore& store, cg::db::FileId id)
-            -> std::string
-        {
-            const auto row = store.file(id);
-            return row ? row->path : std::string{"?"};
-        }
-
-        /** @brief 符号 id 的限定名；查不到时给 "sym<id>" 占位。 */
-        [[nodiscard]]
-        auto closure_symbol_name(GraphStore& store, cg::db::SymId id)
-            -> std::string
-        {
-            const auto row = cg::db::get_symbol(store, id);
-            return row ? row->qualified_name : std::format("sym{}", id);
         }
     } // namespace detail
 
@@ -362,35 +339,6 @@ export namespace cg::cli::render
         }
         dispatch_stale_json(root, view.dispatch_stale_files);
         return json::stringify(std::move(root));
-    }
-
-    /**
-     * @brief "还能更深"注记行：truncated 语义修正后的 BFS 前沿信号承接。
-     *
-     * 定义：truncated 只在结果被截断（找到的条目多于列出的条目）时为
-     *        true；graph 层的同名历史位（--depth 上限处前沿非空）不是
-     *        截断——列出的条目本身是完整的，缺的只是更深的层。
-     *
-     * soundness 边界：走查本身没有条目上限（找到即全部到达）；
-     *        neighbors/impact 的 --top 是展示端截断，截断处 truncated 按
-     *        "列出 < 找到"实算，计数仍覆盖全部找到的条目；changes/
-     *        call_closure 无条目上限仍恒 false；cycles 的 --max 另行渲染
-     *        "N of M groups"。本注记独立表达 --depth 上限处的前沿信号，
-     *        与截断互不替代。
-     *
-     * fallback 清单：文本输出 = 本注记行（仅前沿非空时出现）；--json =
-     *        deeperEdgesExist 布尔位（恒出现，与 truncated 并列），机器
-     *        消费方以此区分"结果被截"与"还能更深"。
-     */
-    [[nodiscard]]
-    auto deeper_note(bool frontier_live) -> std::string
-    {
-        if (!frontier_live)
-        {
-            return {};
-        }
-        return "deeper edges exist: yes (listed entries are complete; raise "
-               "--depth to expand)\n";
     }
 
     /** @brief callers/callees 的文本表格（按深度分节；调用点坐标口径）。 */

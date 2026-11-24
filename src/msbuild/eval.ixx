@@ -1,7 +1,7 @@
 module;
 // 经典流头预热：util::read_text_file 的导出内联体（istream::read）在
 // 本接口单元的实例化点需要经典 <istream> 的完整定义在场（std 模块
-// 的导出声明面单独不足；全局片段 include 的先例见 pipeline.ixx）。
+// 的导出声明面单独不足）。
 #include <istream>
 #include <ostream>
 
@@ -86,8 +86,8 @@ export namespace cg::msbuild::eval
     /** @brief 单 TU 的枚举产物（37 字段完整面留在工程级 raw_json）。 */
     struct EvalTu
     {
-        std::string file; ///< EvaluatedInclude 原样
-        std::string abs;  ///< 绝对化（工程目录合成）
+        std::string file;                ///< EvaluatedInclude 原样
+        std::string abs;                 ///< 绝对化（工程目录合成）
         std::string excluded_from_build; ///< 非空且非 "false" 时的原样值
     };
 
@@ -101,14 +101,16 @@ export namespace cg::msbuild::eval
         std::string vcxproj;
         std::string active_cfg;
         std::string active_platform;
-        bool build_in_solution = true;
-        bool degraded_missing_imports = false;
+        bool        build_in_solution = true;
+        bool        degraded_missing_imports = false;
         std::string error; ///< 空 = 成功；非空 = 工程级失败（不中断会话）
         // —— 断言与披露用的关键字段提炼（完整 37 字段面在 raw_json）——
-        std::string platform_toolset;  ///< top_props 的 PlatformToolset
-        std::string language_standard; ///< cl_item_definition 的 LanguageStandard
-        std::string defines;           ///< cl_item_definition 的 PreprocessorDefinitions 原样
-        std::size_t tu_count = 0;
+        std::string platform_toolset; ///< top_props 的 PlatformToolset
+        std::string
+            language_standard; ///< cl_item_definition 的 LanguageStandard
+        std::string
+            defines; ///< cl_item_definition 的 PreprocessorDefinitions 原样
+        std::size_t         tu_count = 0;
         std::vector<EvalTu> tus;
         /** @brief 已解析 import 闭包的绝对路径（降级腿未解析的条目是
          *         "?"——快照构建侧跳过该占位）。 */
@@ -127,12 +129,12 @@ export namespace cg::msbuild::eval
      */
     struct EvalOutcome
     {
-        bool completed = false;
-        bool timed_out = false;
-        std::size_t ok_projects = 0;
-        std::size_t failed_projects = 0;
+        bool                        completed = false;
+        bool                        timed_out = false;
+        std::size_t                 ok_projects = 0;
+        std::size_t                 failed_projects = 0;
         std::vector<EvalProjectOut> projects;
-        std::string error;
+        std::string                 error;
         std::size_t tu_field_checks = 0; ///< summary 自检：回放校验次数
         std::size_t mismatches = 0;      ///< summary 自检：失配次数（须为 0）
     };
@@ -220,9 +222,9 @@ export namespace cg::msbuild::eval
     /** @brief 环境身份四元组（全部参与门比对）。 */
     struct RefreshSnapshotEnv
     {
-        std::string include; ///< 当前进程 INCLUDE 的 sha256（十六进制）
-        std::string msbuild; ///< MSBuild.exe 绝对路径（正斜杠规范化）
-        std::string cl;      ///< 主工程 cl.exe 绝对路径（正斜杠规范化）
+        std::string include;    ///< 当前进程 INCLUDE 的 sha256（十六进制）
+        std::string msbuild;    ///< MSBuild.exe 绝对路径（正斜杠规范化）
+        std::string cl;         ///< 主工程 cl.exe 绝对路径（正斜杠规范化）
         std::string vc_targets; ///< VCTargetsPath（尾反斜杠原生形态）
     };
 
@@ -239,8 +241,8 @@ export namespace cg::msbuild::eval
     {
         std::vector<RefreshSnapshotFile> files;
         RefreshSnapshotEnv               env;
-        std::string ccg_version;
-        std::string written_at; ///< ISO-8601 UTC
+        std::string                      ccg_version;
+        std::string                      written_at; ///< ISO-8601 UTC
     };
 
     /**
@@ -264,9 +266,9 @@ export namespace cg::msbuild::eval
      */
     [[nodiscard]]
     auto build_refresh_snapshot(
-        const std::string&              msbuild_exe,
-        const std::string&              cl,
-        const EvalRequest&              request,
+        const std::string&                 msbuild_exe,
+        const std::string&                 cl,
+        const EvalRequest&                 request,
         const std::vector<EvalProjectOut>& projects) -> RefreshSnapshot;
 
     /**
@@ -275,7 +277,7 @@ export namespace cg::msbuild::eval
      * 只在采集成功后由调用方调用——失败保旧同步保快照。
      */
     auto save_refresh_snapshot(
-        const std::string&   path,
+        const std::string&     path,
         const RefreshSnapshot& snapshot) -> void;
 
     /**
@@ -362,14 +364,12 @@ namespace cg::msbuild::eval
             -> RunResult
         {
             plat::ChildRunSpec spec;
-            spec.cmdline = std::format(
-                L"{} {}",
-                plat::quote_for_command_line(exe),
-                args);
+            spec.cmdline =
+                std::format(L"{} {}", plat::quote_for_command_line(exe), args);
             spec.stdin_mode = plat::ChildStdin::NullHandle;
             spec.create_no_window = true;
             const plat::ChildRunResult run = plat::run_child(spec);
-            RunResult result;
+            RunResult                  result;
             result.started = run.started && run.pipes_ok;
             result.exit_code = run.exit_code;
             result.out = std::move(run.out);
@@ -402,10 +402,9 @@ namespace cg::msbuild::eval
                     cg::util::cstd::get_env("ProgramFiles(x86)");
                 x86.has_value() && !x86->empty())
             {
-                const fs::path candidate =
-                    fs_path_from_utf8(*x86)
-                    / L"Microsoft Visual Studio"
-                    / L"Installer" / L"vswhere.exe";
+                const fs::path  candidate = fs_path_from_utf8(*x86)
+                                            / L"Microsoft Visual Studio"
+                                            / L"Installer" / L"vswhere.exe";
                 std::error_code ec;
                 if (fs::is_regular_file(candidate, ec))
                 {
@@ -439,8 +438,7 @@ namespace cg::msbuild::eval
             {
                 return {active_cfg, {}};
             }
-            return {
-                active_cfg.substr(0, bar), active_cfg.substr(bar + 1)};
+            return {active_cfg.substr(0, bar), active_cfg.substr(bar + 1)};
         }
 
         /** Begin 请求 JSON（json 门面构造；载荷键序对齐垫片侧解析）。 */
@@ -515,15 +513,15 @@ namespace cg::msbuild::eval
          * 继续跑至完成或进程退出，垫片对象经 abandon 短路保留）。
          */
         auto watched_call(
-            CallPack pack, std::chrono::steady_clock::time_point deadline)
+            CallPack                              pack,
+            std::chrono::steady_clock::time_point deadline)
             -> std::optional<cg::util::cshost::ObjOutcome>
         {
             std::promise<cg::util::cshost::ObjOutcome> promise;
-            std::future<cg::util::cshost::ObjOutcome> future =
+            std::future<cg::util::cshost::ObjOutcome>  future =
                 promise.get_future();
             std::thread worker(
-                [pack = std::move(pack),
-                 promise = std::move(promise)]() mutable
+                [pack = std::move(pack), promise = std::move(promise)]() mutable
                 {
                     std::vector<cg::util::cshost::ObjArg> argv;
                     argv.reserve(pack.args.size());
@@ -545,7 +543,7 @@ namespace cg::msbuild::eval
         /** project 事件 JSON → 结构化产物（解析失败按坏行处理）。 */
         [[nodiscard]]
         auto parse_project_event(
-            const std::string& payload,
+            const std::string&               payload,
             const cg::util::json::ValueView& root) -> EvalProjectOut
         {
             namespace json = cg::util::json;
@@ -565,8 +563,7 @@ namespace cg::msbuild::eval
             p.vcxproj = str("vcxproj");
             p.active_cfg = str("active_cfg");
             p.active_platform = str("active_platform");
-            if (const auto b = root.get("build_in_solution");
-                b && b->is_bool())
+            if (const auto b = root.get("build_in_solution"); b && b->is_bool())
             {
                 p.build_in_solution = *b->as_bool();
             }
@@ -576,8 +573,7 @@ namespace cg::msbuild::eval
                 p.degraded_missing_imports = *d->as_bool();
             }
             p.error = str("error");
-            if (const auto tp = root.get("top_props");
-                tp && tp->is_object())
+            if (const auto tp = root.get("top_props"); tp && tp->is_object())
             {
                 if (const auto v = tp->get("PlatformToolset");
                     v && v->is_string())
@@ -611,27 +607,23 @@ namespace cg::msbuild::eval
                         continue;
                     }
                     EvalTu tu;
-                    if (const auto v = it->get("file");
-                        v && v->is_string())
+                    if (const auto v = it->get("file"); v && v->is_string())
                     {
                         tu.file = std::string{*v->as_string()};
                     }
-                    if (const auto v = it->get("abs");
-                        v && v->is_string())
+                    if (const auto v = it->get("abs"); v && v->is_string())
                     {
                         tu.abs = std::string{*v->as_string()};
                     }
                     if (const auto v = it->get("excluded_from_build");
                         v && v->is_string())
                     {
-                        tu.excluded_from_build =
-                            std::string{*v->as_string()};
+                        tu.excluded_from_build = std::string{*v->as_string()};
                     }
                     p.tus.push_back(std::move(tu));
                 }
             }
-            if (const auto c = root.get("tu_count");
-                c && c->is_number())
+            if (const auto c = root.get("tu_count"); c && c->is_number())
             {
                 if (const auto v = c->as_int())
                 {
@@ -650,8 +642,7 @@ namespace cg::msbuild::eval
                     {
                         continue;
                     }
-                    p.import_closure.push_back(
-                        std::string{*it->as_string()});
+                    p.import_closure.push_back(std::string{*it->as_string()});
                 }
             }
             return p;
@@ -743,10 +734,7 @@ namespace cg::msbuild::eval
         if (segment.empty()
             || !std::ranges::all_of(
                 segment,
-                [](char c)
-                {
-                    return c >= '0' && c <= '9';
-                }))
+                [](char c) { return c >= '0' && c <= '9'; }))
         {
             return {};
         }
@@ -759,8 +747,8 @@ namespace cg::msbuild::eval
         const std::string& config,
         const std::string& platform) -> std::optional<EvalRequest>
     {
-        if (msbuild_exe.empty() || sln.empty()
-            || config.empty() || platform.empty())
+        if (msbuild_exe.empty() || sln.empty() || config.empty()
+            || platform.empty())
         {
             return std::nullopt;
         }
@@ -786,8 +774,7 @@ namespace cg::msbuild::eval
             return std::nullopt;
         }
 
-        const std::string solution_cfg =
-            std::format("{}|{}", config, platform);
+        const std::string solution_cfg = std::format("{}|{}", config, platform);
         for (const SlnProject& member :
              enumerate_sln_projects(sln, solution_cfg))
         {
@@ -815,8 +802,8 @@ namespace cg::msbuild::eval
                     "(Windows only)";
         return out;
 #else
-        std::optional<cshost::CsRef> session = cshost::open_msbuild_eval(
-            plat::widen_utf8(request.assembly_dir));
+        std::optional<cshost::CsRef> session =
+            cshost::open_msbuild_eval(plat::widen_utf8(request.assembly_dir));
         if (!session.has_value())
         {
             // 通道原语补一次探针取真实 rc（open_* 吞码；探针成功则
@@ -851,8 +838,8 @@ namespace cg::msbuild::eval
                 "MsbuildEval session open failed, probe rc={} {} detail={}",
                 probe,
                 extra,
-                std::string_view{cshost::face_detail(
-                    cshost::Face::Evaluation)});
+                std::string_view{
+                    cshost::face_detail(cshost::Face::Evaluation)});
             return out;
         }
 
@@ -860,7 +847,7 @@ namespace cg::msbuild::eval
             std::chrono::steady_clock::now() + timeout_budget();
 
         const std::string begin_json = build_begin_payload(request);
-        CallPack begin_pack;
+        CallPack          begin_pack;
         begin_pack.session = *session;
         begin_pack.method = "Begin";
         begin_pack.args.emplace_back("request", begin_json);
@@ -889,9 +876,8 @@ namespace cg::msbuild::eval
             {
                 session->abandon();
                 out.timed_out = true;
-                out.error =
-                    "eval session timed out (watchdog abandoned; "
-                    "CCG_EVAL_TIMEOUT_MS)";
+                out.error = "eval session timed out (watchdog abandoned; "
+                            "CCG_EVAL_TIMEOUT_MS)";
                 return out;
             }
             CallPack pack;
@@ -918,8 +904,7 @@ namespace cg::msbuild::eval
             std::optional<cg::util::json::Document> doc;
             try
             {
-                doc.emplace(
-                    cg::util::json::Document::parse(event->payload));
+                doc.emplace(cg::util::json::Document::parse(event->payload));
             }
             catch (const std::exception& ex)
             {
@@ -928,19 +913,18 @@ namespace cg::msbuild::eval
                     ex.what(),
                     event->payload.substr(
                         0,
-                        std::min<std::size_t>(
-                            event->payload.size(), 400)));
+                        std::min<std::size_t>(event->payload.size(), 400)));
                 return out;
             }
             const cg::util::json::ValueView root = doc->root();
-            const auto type = root.get("type");
+            const auto                      type = root.get("type");
             if (!type || !type->is_string())
             {
-                out.error = "event line missing type field: "
-                            + event->payload.substr(
-                                   0,
-                                   std::min<std::size_t>(
-                                       event->payload.size(), 400));
+                out.error =
+                    "event line missing type field: "
+                    + event->payload.substr(
+                        0,
+                        std::min<std::size_t>(event->payload.size(), 400));
                 return out;
             }
             const std::string_view kind = *type->as_string();
@@ -957,22 +941,18 @@ namespace cg::msbuild::eval
             if (kind == "summary")
             {
                 out.completed = true;
-                if (const auto v = root.get("ok");
-                    v && v->is_number())
+                if (const auto v = root.get("ok"); v && v->is_number())
                 {
                     if (const auto n = v->as_int())
                     {
-                        out.ok_projects =
-                            static_cast<std::size_t>(*n);
+                        out.ok_projects = static_cast<std::size_t>(*n);
                     }
                 }
-                if (const auto v = root.get("failed");
-                    v && v->is_number())
+                if (const auto v = root.get("failed"); v && v->is_number())
                 {
                     if (const auto n = v->as_int())
                     {
-                        out.failed_projects =
-                            static_cast<std::size_t>(*n);
+                        out.failed_projects = static_cast<std::size_t>(*n);
                     }
                 }
                 if (const auto sc = root.get("self_check");
@@ -983,8 +963,7 @@ namespace cg::msbuild::eval
                     {
                         if (const auto n = v->as_int())
                         {
-                            out.tu_field_checks =
-                                static_cast<std::size_t>(*n);
+                            out.tu_field_checks = static_cast<std::size_t>(*n);
                         }
                     }
                     if (const auto v = sc->get("mismatches");
@@ -992,16 +971,13 @@ namespace cg::msbuild::eval
                     {
                         if (const auto n = v->as_int())
                         {
-                            out.mismatches =
-                                static_cast<std::size_t>(*n);
+                            out.mismatches = static_cast<std::size_t>(*n);
                         }
                     }
                 }
                 return out;
             }
-            out.error = std::format(
-                "unknown event type '{}'",
-                kind);
+            out.error = std::format("unknown event type '{}'", kind);
             return out;
         }
 #endif
@@ -1019,9 +995,7 @@ namespace cg::msbuild::eval
         [[nodiscard]]
         auto snapshot_file_hash(const std::string& path) -> std::string
         {
-            std::ifstream in{
-                fs_path_from_utf8(path),
-                std::ios::binary};
+            std::ifstream in{fs_path_from_utf8(path), std::ios::binary};
             if (!in)
             {
                 return {};
@@ -1091,21 +1065,21 @@ namespace cg::msbuild::eval
         {
             snapshot.files.push_back(
                 RefreshSnapshotFile{
-                    .path     = path,
-                    .sha256   = snapshot_file_hash(path)});
+                    .path = path,
+                    .sha256 = snapshot_file_hash(path)});
         }
-        snapshot.env.include     = include_env_hash();
-        snapshot.env.msbuild     = cg::util::norm_path(msbuild_exe);
-        snapshot.env.cl          = cg::util::norm_path(cl);
-        snapshot.env.vc_targets  = request.vc_targets;
-        snapshot.ccg_version     = std::string{cg::util::version};
-        snapshot.written_at      = cg::util::cstd::iso8601_utc_timestamp();
+        snapshot.env.include = include_env_hash();
+        snapshot.env.msbuild = cg::util::norm_path(msbuild_exe);
+        snapshot.env.cl = cg::util::norm_path(cl);
+        snapshot.env.vc_targets = request.vc_targets;
+        snapshot.ccg_version = std::string{cg::util::version};
+        snapshot.written_at = cg::util::cstd::iso8601_utc_timestamp();
         return snapshot;
     }
 
     auto save_refresh_snapshot(
-        const std::string&      path,
-        const RefreshSnapshot&  snapshot) -> void
+        const std::string&     path,
+        const RefreshSnapshot& snapshot) -> void
     {
         namespace json = cg::util::json;
         json::Array files;
@@ -1136,15 +1110,14 @@ namespace cg::msbuild::eval
         -> std::optional<RefreshSnapshot>
     {
         namespace json = cg::util::json;
-        const std::optional<std::string> text =
-            cg::util::read_text_file(path);
+        const std::optional<std::string> text = cg::util::read_text_file(path);
         if (!text.has_value())
         {
             return std::nullopt;
         }
         try
         {
-            const json::Document  doc  = json::Document::parse(*text);
+            const json::Document  doc = json::Document::parse(*text);
             const json::ValueView root = doc.root();
             if (!root.is_object())
             {
@@ -1163,8 +1136,7 @@ namespace cg::msbuild::eval
                         continue;
                     }
                     RefreshSnapshotFile f;
-                    if (const auto v = entry->get("path");
-                        v && v->is_string())
+                    if (const auto v = entry->get("path"); v && v->is_string())
                     {
                         f.path = std::string{*v->as_string()};
                     }
@@ -1180,11 +1152,9 @@ namespace cg::msbuild::eval
                     snapshot.files.push_back(std::move(f));
                 }
             }
-            if (const auto env = root.get("env");
-                env && env->is_object())
+            if (const auto env = root.get("env"); env && env->is_object())
             {
-                const auto str =
-                    [&env](std::string_view key) -> std::string
+                const auto str = [&env](std::string_view key) -> std::string
                 {
                     const auto v = env->get(key);
                     if (!v || !v->is_string())
@@ -1193,18 +1163,16 @@ namespace cg::msbuild::eval
                     }
                     return std::string{*v->as_string()};
                 };
-                snapshot.env.include     = str("include");
-                snapshot.env.msbuild     = str("msbuild");
-                snapshot.env.cl          = str("cl");
-                snapshot.env.vc_targets  = str("vc_targets");
+                snapshot.env.include = str("include");
+                snapshot.env.msbuild = str("msbuild");
+                snapshot.env.cl = str("cl");
+                snapshot.env.vc_targets = str("vc_targets");
             }
-            if (const auto v = root.get("ccg_version");
-                v && v->is_string())
+            if (const auto v = root.get("ccg_version"); v && v->is_string())
             {
                 snapshot.ccg_version = std::string{*v->as_string()};
             }
-            if (const auto v = root.get("written_at");
-                v && v->is_string())
+            if (const auto v = root.get("written_at"); v && v->is_string())
             {
                 snapshot.written_at = std::string{*v->as_string()};
             }
@@ -1262,8 +1230,7 @@ namespace cg::msbuild::eval
         {
             return std::format(
                 "recorded cl path no longer resolves: {}",
-                registry_cl.empty() ? std::string{"<empty>"}
-                                    : registry_cl);
+                registry_cl.empty() ? std::string{"<empty>"} : registry_cl);
         }
         if (snapshot.env.cl != cg::util::norm_path(registry_cl))
         {

@@ -1,34 +1,39 @@
-module;
-#include "../db/db.tables.h"
-#include "../msbuild/capture.tables.h"
-
 /**
  * @module cg.cli.commands.entry
  *
  * @brief 命令入口域：查询库解析与 dispatch 主分派。
+ *
+ * @internal
+ * 族内只导入 cg.cli.commands.runs；index/update/msbuild/config/hook 五个
+ * 运行器与库打开函数（cg.cli.runners.engine）经各自的接口模块导入。
  */
 export module cg.cli.commands.entry;
 
 import std;
 import cg.util;
-import cg.db;
-import cg.graph;
-import cg.msbuild;
-import cg.cli.parse;
-import cg.cli.render;
-import cg.cli.runners;
+import cg.db.store;
+import cg.cli.parse.model;
+import cg.cli.parse.usage;
+import cg.cli.runners.engine;
 import cg.cli.layout;
 import cg.cli.index;
 import cg.cli.update;
 import cg.cli.msbuild;
 import cg.cli.config;
 import cg.cli.hook;
-import cg.cli.commands.matchers;
-import cg.cli.commands.targets;
 import cg.cli.commands.runs;
 
 export namespace cg::cli
 {
+
+    /** @brief 把查询族布局解析结果（db/配置/根）写回调用对象。 */
+    auto resolve_query_db_into(Invocation& inv) -> void
+    {
+        const LayoutChoice choice = layout::resolve_query_layout(inv);
+        inv.db_path = choice.db;
+        inv.config_name = choice.config;
+        inv.layout_root = choice.root;
+    }
 
     /**
      * @brief 运行一条已解析的调用。
@@ -43,15 +48,6 @@ export namespace cg::cli
      * 多配置点名候选、旧 ./ccg.db 给可行动提示）再进运行器；index/msbuild
      * 各自经 cg.cli.layout 解析自己的产出文件夹与配置。
      */
-    /** @brief 把查询族布局解析结果（db/配置/根）写回调用对象。 */
-    auto resolve_query_db_into(Invocation& inv) -> void
-    {
-        const LayoutChoice choice = layout::resolve_query_layout(inv);
-        inv.db_path = choice.db;
-        inv.config_name = choice.config;
-        inv.layout_root = choice.root;
-    }
-
     [[nodiscard]]
     auto dispatch(const Invocation& invocation) -> int
     {

@@ -8,15 +8,6 @@ module;
 #endif
 #include <windows.h>
 #endif
-// read_wrap_log 经 sqlpp23 读 capture.db：表模型必须以经典头形态在本
-// 单元全局片段可见（MSVC 上定义进命名模块再跨模块导入的表模板会让
-// IFC 读取器崩溃），故 include capture.tables.h。残留的 sqlite3 C API
-// 面是白名单接缝：SQLITE_OPEN_* 旗标宏（宏不跨模块边界）与
-// sqlite3_busy_timeout（连接器无超时旋钮），include 面由 cg_core 的
-// PUBLIC cg::sqlite3 链接传递；extern "C" 声明重复无 ODR 风险。
-#include <sqlite3.h>
-
-#include "capture.tables.h"
 
 /**
  * @module cg.msbuild.pipeline.configs
@@ -31,8 +22,6 @@ import cg.util;
 import cg.util.cstd;
 import cg.msbuild.translate; // ClInvocation / CdbEntry（wrap 日志载荷类型）
 import cg.msbuild.wrap;      // detail::env_wide / fs_path_from_utf8
-import sqlpp23.core;
-import sqlpp23.sqlite3;
 
 export namespace cg::msbuild
 {

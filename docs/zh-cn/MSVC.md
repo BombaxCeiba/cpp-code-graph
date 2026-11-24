@@ -158,13 +158,18 @@ GraphStore 析构双产出）并牵出一个真实悬垂引用，共四项修复
 1. **sqlpp23 算子静态成员 LNK2001×5**（`equal_to/logical_and/
    logical_or/greater/plus::symbol`）：MSVC 模块单元对"仅经
    `import sqlpp23.core;` 可见"的 inline 变量只发射 UNDEF 引用、不发射
-   COMDAT 定义（三个 operator 头不在 `db.tables.h` 的 GMF 文本闭包
-   内），定义责任落在文本拥有该头的 `sqlpp23.core.cppm.obj`——而
+   COMDAT 定义（树内的模块单元都不文本包含这三个 operator 头——表模型
+   模块的 GMF 只有名字标签宏头），定义责任落在文本拥有这些头的
+   `sqlpp23.core.cppm.obj`——而
    CMake 的 OBJECT→OBJECT 链接只传播 BMI/usage requirements、不传播
    目标文件，该 obj 从未出现在任何链接边上。**修复**：经典 TU 锚点
    `src/db/db.sqlpp.anchor.cpp`（`util.json.bridge.cpp` 先例形态，无
-   module 声明），匿名命名空间内以**引用绑定**式 odr-use 锚定全部 15
-   个算子 `symbol` 静态成员（实证要点：`&x` 取址数组形式在 /Od 会被
+   module 声明），匿名命名空间内以**引用绑定**式 odr-use 锚定 47 个
+   内联静态量：29 个运算符的 `symbol`、5 个连接类型的 `_name`、另外
+   3 个非模板类的静态数据成员（`no_name_t::name`、`consistent_t::value`、
+   `wrapped_static_assert::value`）与 10 个命名空间级内联变量对象（core
+   的 9 个加 sqlite3 的 `fallback`）；锚定面按缺陷的受害面划定，不止
+   当初浮出的那 5 个（实证要点：`&x` 取址数组形式在 /Od 会被
    常量折叠、不强制产出定义，引用绑定可靠），挂入 `cg_core` OBJECT
    源列表——cg_core 的 obj 骑在每条最终链接边上，一处生效全覆盖；
    clang 侧本就无这些符号，多余 COMDAT 可折叠、零影响。
@@ -211,18 +216,63 @@ clang64 绊线全绿。
   MSVC 下会丢失 STL charconv 内联静态量（所有 std::format 消费者
   LNK2001——探针实测）。MSVC 路径**不使用** `CXX_MODULE_STD` /
   实验性 UUID。
-- sqlpp23 表模型放在经典头文件 `src/db/db.tables.h`（最小经典包含
-  闭包）里，出现在每个 cg.db 单元的全局模块碎片中：从兄弟模块单元
-  导入表类型会导致 MSVC IFC 读取器崩溃（C1001）。GraphStore 用 pimpl
-  隐藏其 sqlpp 状态，确保没有任何 sqlpp 类型跨模块边界。
+- sqlpp23 表模型是命名模块：图数据库的是 `cg.db.tables`（入口
+  `src/db/db.tables.ixx` 自身不声明任何内容，只再导出
+  `cg.db.tables.core`、`cg.db.tables.graph`、`cg.db.tables.sites`、
+  `cg.db.tables.analysis` 四个子模块），采集库的是 `cg.msbuild.tables`
+  （`src/msbuild/msbuild.tables.ixx`）；用到表模型名字的单元 `import`
+  它们。这五个表模型模块单元的全局模块碎片里只放名字标签宏头
+  `<sqlpp23/core/name/create_name_tag.h>`（模块不导出宏；这个头只有宏
+  定义），机制经 `import sqlpp23.core;` 提供。表模型的写法是"名字标签
+  上提"：列说明仍嵌套在表结构体里、全部名字不变，只把每个列说明的名字
+  标签本体提到命名空间层次并导出——MSVC 14.44 与 14.51 的 IFC 读取器
+  读到"导出类里嵌套两层的类带静态数据成员"就崩（C1001），列说明里的
+  `_sqlpp_name_tag` 正是这种第二层嵌套类。同一翻译单元里不能既文本
+  包含表模型定义、又导入表模型模块（两份同名声明并存，使用处报歧义）。
+  GraphStore 用 pimpl（`std::unique_ptr<Impl>`）藏起连接、配置与预编译
+  语句这些 sqlpp23 状态：导出类的数据成员里没有 sqlpp23 类型，但接口上
+  仍有一个——`GraphStore::conn()` 返回 `sqlpp::sqlite3::connection&`，
+  供 cg.db.query 的查询模块执行类型化语句，cg.analysis.external 也
+  直接用它删除旧的 source=External 类型线索行。
 - JSON 门面（`cg.util.json`）通过纯 C 桥接（`util.json.bridge.h/.cpp`）
   基于 yyjson C API 实现：在模块单元内使用任何 yyjson-cpp 类型会
   导致 MSVC IFC 写入器崩溃（C1001，多种构造变体均复现）。
 - MSVC 特有的源码规则（探针实证）：`import std;` TU 的全局模块碎片中
-  除经批准的 sqlpp23/名称标签集外不得经典包含 STL 头；模块作用域内
-  不得出现 pfr 反射调用点；导出的模块函数不得包装 GMF 静态内联 C
-  辅助函数；**内部分区**（无 `export` 的 `module cg.m:p;`）翻译单元
+  不得经典包含标准库头与运行库头，例外见下一条；模块作用域内不得出现
+  pfr 反射调用点；导出的模块函数不得包装 GMF 静态内联 C 辅助函数；
+  **内部分区**（无 `export` 的 `module cg.m:p;`）翻译单元
   必须用 `.cpp` 扩展名、不得用 `.ixx`——cl 单凭 `.ixx` 扩展名即推断
   接口语义，与依赖扫描器为非导出分区发出的 `/module:internalPartition`
   冲突，报 C7622（单 TU 可确定性复现；树内现已无内部分区，本条作为
   平台规则与历史记录保留）。
+- 上一条里"不得经典包含"的例外只有 `import std;` 给不了的东西：src 下
+  33 个带全局片段的单元里有 10 个，括号里是只能文本取得的原因。
+  - `analysis.propagate.ixx`：`<cassert>`（`assert` 是宏）。
+  - `analysis.snapshot.ixx`：`<cstddef>`（`offsetof` 是宏）。
+  - `clang.loader.ixx`：`<dlfcn.h>`，只在非 Windows 分支（`dlopen` 一族
+    是 C 声明）。
+  - `db.store.ixx`：`<cstdio>`（`stderr` 是微软运行库头里的宏）。
+  - `msbuild/eval.ixx`、`msbuild/compose.ixx`：`<istream>`、`<ostream>`、
+    `<sstream>`（文件头写明 std 模块的导出声明面单独不足）。
+  - `util/cstd.ixx`：`<cstdlib>`、`<ctime>`，只在 MSVC
+    （`_dupenv_s`、`gmtime_s` 是微软 CRT 扩展名）。
+  - `util/crashdump.ixx`：`<csignal>`，只在 Windows 分支（`SIGABRT` 是
+    宏）；`<crtdbg.h>`、`<stdlib.h>`，只在 MSVC 分支（`_CrtSetReportMode`、
+    `_set_purecall_handler`、`_set_abort_behavior` 等微软 CRT 的调试
+    钩子与宏）。
+  - `util/guard.ixx`：`<csetjmp>`、`<csignal>`，只在非 Windows 分支
+    （`sigsetjmp`、`siglongjmp`、`sigaction` 与信号常量）。
+  - `util/platform.ixx`：`<io.h>`，只在 Windows 分支（`_get_osfhandle`）；
+    `<cerrno>`、`<cstdlib>`，只在非 Windows 分支（`errno` 与错误码是
+    宏、`_exit` 是 C 函数）；`<csignal>`，只在非 Windows 分支（读代码
+    没有找到使用处）；x86 上的 `<immintrin.h>`（MSVC）或 `<cpuid.h>`
+    （其它编译器）是 CPU 能力探测用到的内建函数的声明。
+- 名称标签宏头 `<sqlpp23/core/name/create_name_tag.h>` 只含宏，不算
+  标准库头，出现在表模型模块的全局碎片里。这条规则同样管 tests，那里
+  含这类头的测试单元有四个，理由同上：`clang.test.ixx` 的 `<cstdlib>`
+  （`std::system`，文件里注明经全局片段包含）；`cli.test.ixx` 的
+  `<cstdio>`、`<cstdlib>`、`<fcntl.h>`，Windows 分支另有 `<io.h>`、
+  `<share.h>`，非 Windows 分支另有 `<unistd.h>`（进程内 hook 测试在
+  文件描述符一级重定向输出）；`crashdump.probe.ixx` 的 `<cstdio>`
+  （`stderr` 是宏）与 MSVC 分支的 `<stdio.h>`；`test_harness.ixx` 的
+  `<cstdlib>`（`_putenv_s`）与 MSVC Debug 分支的 `<crtdbg.h>`。

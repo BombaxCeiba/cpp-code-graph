@@ -1,52 +1,26 @@
-module;
-#include "../db/db.tables.h"
-
 /**
  * @module cg.cli.runners.resolve
  *
- * @brief 编译命令解析域：驱动就绪判定、编译库装载与缺失诊断、按构建配置过滤。
+ * @brief 编译命令解析域：编译库装载与缺失诊断、按构建配置过滤。
  */
 export module cg.cli.runners.resolve;
 
 import std;
 import cg.util;
-import cg.util.cstd;
-import cg.db;
-import cg.clang;
-import cg.graph;
-import cg.cli.parse;
-import cg.cli.render;
+import cg.clang.compile_db.model;
+import cg.clang.compile_db.bmi;
+import cg.clang.bmi;
+import cg.clang.pch.model;
+import cg.clang.pch.plan;
+import cg.cli.parse.model;
 import cg.cli.layout;
 import cg.cli.runners.engine;
-import cg.cli.runners.route;
 
 export namespace cg::cli
 {
 
     namespace detail
     {
-
-        /**
-         * @brief 解析（并缓存）驱动器知识，使缺失驱动器是一个可行动的错误
-         *        而非每 TU 一个失败。
-         *
-         * @internal
-         * 已加载引擎把驱动器发现锚定在做解析的安装上；后续运行在静置时换
-         * 引擎，缓存自行重新键。
-         */
-        inline void require_driver()
-        {
-            if (cg::clang::driver_info().driver.empty())
-            {
-                throw std::runtime_error(
-                    "ccg: no clang driver executable found (looked beside the "
-                    "loaded LLVM engine library and under its installation "
-                    "prefix, then via CCG_LLVM_ROOT, then on PATH). Set "
-                    "CCG_LLVM_ROOT, pass `ccg index --llvm-root <prefix>`, or "
-                    "configure `ccg config set llvm-path <prefix>` to name the "
-                    "LLVM installation containing clang++/clang.");
-            }
-        }
 
         // 前置声明（定义在下方）。
         [[nodiscard]]

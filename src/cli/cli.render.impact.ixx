@@ -1,6 +1,3 @@
-module;
-#include "../db/db.tables.h"
-
 /**
  * @module cg.cli.render.impact
  *
@@ -15,9 +12,6 @@ import cg.graph;
 import cg.analysis.model;
 import cg.cli.parse;
 import cg.cli.render.base;
-import cg.cli.render.dispatch;
-import cg.cli.render.symbol;
-import cg.cli.render.context;
 
 export namespace cg::cli::render
 {

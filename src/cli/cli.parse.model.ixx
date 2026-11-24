@@ -1,6 +1,3 @@
-module;
-#include "../db/db.tables.h"
-
 /**
  * @module cg.cli.parse.model
  *

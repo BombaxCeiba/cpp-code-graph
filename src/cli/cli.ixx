@@ -1,7 +1,3 @@
-module;
-#include "../db/db.tables.h"
-#include "../msbuild/capture.tables.h"
-
 /**
  * @module cg.cli
  *
@@ -14,9 +10,7 @@ module;
  * run_main：argv -> Invocation -> cg.cli.commands 的分派，带顶层
  * try/catch 与退出码映射（0 成功、1 未找到/运行时错误、2 用法错误）。
  * 扇入放在此处，使任何 cg.cli 子模块都不必导入一个会反向导入自己的
- * 兄弟模块。db.tables.h 置于全局模块片段：本单元可达 cg.db（直接或经
- * 再导出的子模块），MSVC 要求 sqlpp23 表模型定义在此可见，以合并模块
- * 记录的模板特化（完整机理见 db.tables.h）。
+ * 兄弟模块。
  */
 export module cg.cli;
 

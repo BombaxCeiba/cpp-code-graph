@@ -1,6 +1,3 @@
-module;
-#include "../db/db.tables.h"
-
 /**
  * @module cg.cli.index
  *
@@ -13,9 +10,7 @@ module;
  * 脊柱（引擎准备、命令清单解析、索引尾部）在 cg.cli.runners；本模块
  * 持有：产出文件夹+--config 的布局解析、profile.json 的记录与恢复、
  * 编译数据库按内部构建配置签名的拆分（一配置一目录一库，无例外）、
- * 逐配置经共享尾部落库。db.tables.h 置于全局模块片段：本单元导入
- * cg.db，MSVC 要求 sqlpp23 表模型定义在此可见，以合并模块记录的模板
- * 特化（完整机理见 db.tables.h）。
+ * 逐配置经共享尾部落库。
  */
 export module cg.cli.index;
 

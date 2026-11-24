@@ -282,7 +282,6 @@ export namespace cg::clang
                     else
                     {
                         out.push_back(src[i]);
-                        ++i;
                         if (is_ident_char(src[i]))
                         {
                             if (tail.size() >= 3)
@@ -295,6 +294,7 @@ export namespace cg::clang
                         {
                             tail.clear();
                         }
+                        ++i;
                     }
                     break;
                 case St::line_comment:

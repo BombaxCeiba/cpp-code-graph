@@ -17,19 +17,15 @@
  *           永久移除）；注入内容只含确定性事实——register* 前缀形参
  *           提及等猜测性关联一律不采；每条 dlopen_boundary 行必须可
  *           溯源到具体调用点（related_var 存 API 锚点
- *           "API名@文件:行:列"）。db.tables.h 置于全局模块片段：本单元
- *           调用 cg.db 的查询与 remove 语句，MSVC 要求 sqlpp23 表模型
- *           定义在此可见（完整机理见 db.tables.h）。
+ *           "API名@文件:行:列"）。
  */
-module;
-#include "../db/db.tables.h"
-
 export module cg.analysis.external;
 
 import std;
 import cg.util;
 import sqlpp23.core;
 import cg.db;
+import cg.db.tables;
 import cg.analysis.model;
 
 export namespace cg::analysis

@@ -1,6 +1,3 @@
-module;
-#include "../db/db.tables.h"
-
 /**
  * @module cg.graph.build
  *
@@ -37,10 +34,6 @@ module;
  * 使失败无需手工重跑 clang 即可行动。
  * cl 方言（MSVC permissive）的方言语义残余另记 msvc-permissive-*
  * 具名类（classify_dialect_diag_failure），与模块分类学正交。
- *
- * db.tables.h 置于全局模块片段：本单元导入 cg.db，MSVC 要求 sqlpp23
- * 表模型定义在此可见，以合并模块记录的模板特化（完整机理见
- * db.tables.h）。
  */
 export module cg.graph.build;
 

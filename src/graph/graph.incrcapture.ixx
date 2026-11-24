@@ -1,14 +1,9 @@
-module;
-#include "../db/db.tables.h"
-
 /**
  * @module cg.graph.incrcapture
  *
  * @brief 被删行下游的旧边见证捕获域（值语义域对象）。
  *
- * @internal db.tables.h 置于全局模块片段：本单元导入 cg.db，MSVC 要求
- *           sqlpp23 表模型定义在此可见（同 cg.graph.build 的纪律）。
- *           cg.graph.build 以值成员嵌入并再导出本单元。
+ * @internal cg.graph.build 以值成员嵌入并再导出本单元。
  */
 
 export module cg.graph.incrcapture;

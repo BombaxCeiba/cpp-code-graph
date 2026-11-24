@@ -1,6 +1,3 @@
-module;
-#include "../db/db.tables.h"
-
 /**
  * @module cg.cli.render
  *
@@ -14,11 +11,6 @@ module;
  *
  * 渲染器按命令族分域在点分子模块实现，本单元聚合再导出，
  * 消费者经 import cg.cli.render 取得全部渲染器，可达面不变。
- *
- * @internal
- * db.tables.h 置于全局模块片段：本单元导入 cg.db，MSVC 要求 sqlpp23
- * 表模型定义在此可见，以合并模块记录的模板特化（完整机理见
- * db.tables.h）。
  */
 export module cg.cli.render;
 
@@ -30,7 +22,6 @@ import cg.analysis.model;
 import cg.cli.parse;
 
 export import cg.cli.render.base;
-export import cg.cli.render.dispatch;
 export import cg.cli.render.symbol;
 export import cg.cli.render.context;
 export import cg.cli.render.impact;

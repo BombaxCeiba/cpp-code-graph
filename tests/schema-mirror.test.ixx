@@ -1,9 +1,6 @@
 module;
-// 表模型放全局模块片段（与 db.test 同理：MSVC 要求 sqlpp23 表结构体在
-// 每个实例化单元以全局模块形态可见）；sqlite3 C API 直连跑 PRAGMA。
+// sqlite3 C API 直连跑 PRAGMA。
 #include <sqlite3.h>
-
-#include "../src/db/db.tables.h"
 
 export module cg.test.schemamirror;
 
@@ -12,7 +9,7 @@ export module cg.test.schemamirror;
 //
 // 覆盖的镜像对（全部点名）：
 // 1. 表结构两头：GraphStore 实建的 DDL（PRAGMA table_info 实测）对照
-//    db.tables.h 表模型的列名集；
+//    cg.db.tables 模块里表模型的列名集；
 // 2. kind 枚举两头：cg::db::SymbolKind/name_of 对照 cg::extract::SymKind/
 //    name_of（十种逐值），外加 db 层 kind 谓词族的字符串/枚举双载对账；
 // 3. edge 类型枚举两头：EdgeType/name_of 对照 EdgeKind/name_of；
@@ -29,6 +26,7 @@ export module cg.test.schemamirror;
 import std;
 import cg.util;
 import cg.db;
+import cg.db.tables;
 import cg.extract;
 import cg.analysis;
 import cg.test.harness;
@@ -191,8 +189,8 @@ namespace
                 std::format("table {} exists in the ddl", m.table));
         }
 
-        // coord_events 没有 db.tables.h 表模型（读写走 db.store 的原生
-        // 惰性语句——表可能缺席于同版本已存库的补建窗口，进
+        // coord_events 在 cg.db.tables 模块里没有表模型（读写走 db.store
+        // 的原生惰性语句——表可能缺席于同版本已存库的补建窗口，进
         // make_statements 会让连接打不开）；列名集在此手写锚定，DDL 与
         // 原生语句的绑定序两侧漂移时这里先红。
         {

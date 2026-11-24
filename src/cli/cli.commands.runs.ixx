@@ -1,38 +1,38 @@
-module;
-#include "../db/db.tables.h"
-#include "../msbuild/capture.tables.h"
-
 /**
  * @module cg.cli.commands.runs
  *
  * @brief
  * 命令运行器域：query/context/members/neighbors/impact/trace/stats/changes/check/graph
  * 的执行体与 stdin 路径补充。
+ *
+ * @internal
+ * 族内只导入底层共享模块 cg.cli.commands.matchers。
  */
 export module cg.cli.commands.runs;
 
 import std;
 import cg.util;
-import cg.db;
-import cg.graph;
-import cg.msbuild;
-import cg.cli.parse;
+import cg.db.schema;
+import cg.db.store;
+import cg.db.query.lookup;
+import cg.db.query.members;
+import cg.db.query.stats;
+import cg.graph.traverse.model;
+import cg.graph.traverse.queries;
+import cg.graph.traverse.context;
+import cg.graph.traverse.changes;
+import cg.cli.parse.model;
+import cg.cli.parse.usage;
 import cg.cli.render;
-import cg.cli.runners;
-import cg.cli.layout;
-import cg.cli.index;
-import cg.cli.update;
-import cg.cli.msbuild;
-import cg.cli.config;
-import cg.cli.hook;
 import cg.cli.commands.matchers;
-import cg.cli.commands.targets;
 
 export namespace cg::cli
 {
 
     namespace detail
     {
+
+        namespace fs = std::filesystem;
 
         /** @brief `ccg query` 运行器：按名查符号。 */
         auto run_query(cg::db::GraphStore& store, const Invocation& inv) -> int

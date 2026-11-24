@@ -1,9 +1,3 @@
-module;
-// db.tables.h 放在全局模块片段：本单元 import cg.db，而 MSVC 要求 sqlpp23
-// 的表模型定义在此处可见，才能合并该模块记录的模板特化（完整缘由见
-// db.tables.h）。
-#include "../src/db/db.tables.h"
-
 export module cg.test.db;
 
 // cg.db 存储层的单元测试，全部跑在 ":memory:" 上，除非某个用例

@@ -1,11 +1,3 @@
-module;
-// 本单元直接调用 cg.msbuild 的 capture 读写（capture_db_insert /
-// read_wrap_log 等导出内联函数，其 sqlpp23 语句构造在调用方单元实例
-// 化表模板）：MSVC 要求表模型定义在本单元的全局模块片段可见，否则
-// IFC 读取器在跨模块合并模板实例时崩溃（与 src/db/db.tables.h 同一
-// 探针矩阵结论，机理详见 capture.tables.h 注释）。
-#include "../src/msbuild/capture.tables.h"
-
 export module cg.test.msbuild;
 
 // MSBuild 层的单元 + golden 闸门：cl 模式编译命令

@@ -1,22 +1,10 @@
-module;
-#include "db.tables.h"
-
 /**
  * @module cg.db.schema
  *
- * @brief 图数据库的 schema 描述（SCHEMA 规格文档）：全新数据库上逐字经
+ * @brief 图数据库的 schema 描述：全新数据库上逐字经
  *        sqlpp23 连接调用运算符执行的 DDL 文本、每次打开都执行的
  *        PRAGMA 清单、kind/边类型字典（枚举形态）、flag 与 attr 位段、
- *        每个 cg.db 单元共享的 sqlpp23 表模型，以及 store 与 query
- *        模块交换的 id/行/值类型。
- *
- * @internal
- * sqlpp23 表模型放在 db.tables.h（经典头，经本文件上方的全局模块片段
- * include）：MSVC 要求表结构体在每个实例化单元都以全局模块形态可见
- * ——定义在一个模块单元里、再从兄弟单元导入会让 IFC 读取器崩溃
- * （探针矩阵结论：定义进模块再跨模块导入的两种形态（双模块/本模块）
- * 失败，各消费者经全局模块片段包含经典头的形态可行；完整机理见
- * db.tables.h）。
+ *        store 与 query 模块交换的 id/行/值类型。
  */
 export module cg.db.schema;
 
@@ -911,7 +899,7 @@ export namespace cg::db
      *
      * @internal type 由调用方给定：单类型查询（edges_of_type 等）拿的是
      * 查询参数本身，混合查询才从 typeId 换算。模板只做 sqlpp 结果行类型
-     * 推导，不做列集探测（不做深模板化——db.tables.h 的 MSVC IFC 雷区）。
+     * 推导，不做列集探测。
      */
     template <typename Row>
     [[nodiscard]]

@@ -7,13 +7,8 @@
  *
  * @internal 静态侧决议入口 resolve_static_site 按六段优先阶梯短路，
  *           每个成功档位早退，其后各段对决议站点恒 no-op；逐档判据
- *           与 reason 串语义见各函数注释。db.tables.h 置于全局模块
- *           片段：MSVC 要求 sqlpp23 表模型定义在此可见，以合并模块
- *           记录的模板特化（完整机理见 db.tables.h）。
+ *           与 reason 串语义见各函数注释。
  */
-module;
-#include "../db/db.tables.h"
-
 export module cg.analysis.dispatch.statics;
 
 import std;

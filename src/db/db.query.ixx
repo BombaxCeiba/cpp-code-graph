@@ -1,6 +1,3 @@
-module;
-#include "db.tables.h"
-
 /**
  * @module cg.db.query
  *
@@ -15,13 +12,6 @@ module;
  * 数个数可变无法进固定形状的预编译表，按块现场构建。
  */
 export module cg.db.query;
-
-import std;
-import cg.util;
-import sqlpp23.core;
-import sqlpp23.sqlite3;
-import cg.db.schema;
-import cg.db.store;
 
 export import cg.db.query.lookup;
 export import cg.db.query.batch;

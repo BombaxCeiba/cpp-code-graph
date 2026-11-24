@@ -1,6 +1,3 @@
-module;
-#include "../db/db.tables.h"
-
 /**
  * @module cg.cli.render.stats
  *
@@ -15,7 +12,6 @@ import cg.graph;
 import cg.analysis.model;
 import cg.cli.parse;
 import cg.cli.render.base;
-import cg.cli.render.dispatch;
 
 export namespace cg::cli::render
 {

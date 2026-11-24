@@ -1,6 +1,3 @@
-module;
-#include "../db/db.tables.h"
-
 /**
  * @module cg.cli.runners
  *
@@ -14,23 +11,10 @@ module;
  * cg.cli.update / cg.cli.msbuild。定义为接口驻留（inline）——把运行器
  * 函数体留在无 BMI 实现单元里的 C2801 时代要求已过时：规避补丁对决定性的
  * std BMI 宿主做了影子补丁（MSVC 移植注记），而"仅声明"的安排只是为
- * 绕开该缺陷的体量敏感性。db.tables.h 置于全局模块片段：本单元导入
- * cg.db，MSVC 要求 sqlpp23 表模型定义在此可见，以合并模块记录的模板
- * 特化（完整机理见 db.tables.h）。
+ * 绕开该缺陷的体量敏感性。
  */
 export module cg.cli.runners;
 
-import std;
-import cg.util;
-import cg.util.cstd;
-import cg.db;
-import cg.clang;
-import cg.graph;
-import cg.cli.parse;
-import cg.cli.render;
-import cg.cli.layout;
-
 export import cg.cli.runners.engine;
-export import cg.cli.runners.route;
 export import cg.cli.runners.resolve;
 export import cg.cli.runners.tail;

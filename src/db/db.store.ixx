@@ -1,7 +1,6 @@
 module;
 #include <sqlite3.h>
-
-#include "db.tables.h"
+#include <cstdio>
 
 /**
  * @module cg.db.store
@@ -11,10 +10,10 @@ module;
  *        includes 的幂等 upsert、按文件清除，以及事务 RAII 守卫。
  *
  * @internal
- * 全局模块片段承载 db.tables.h（为何不能是 import 见该头）与连接配置
- * 所需的 SQLITE_OPEN_* 宏旗标：宏不跨模块边界，include 只放在使用它
- * 的这一个单元；sqlite3 声明也就留在此处（全局模块片段单一属主
- * 规则）。
+ * 全局模块片段承载连接配置所需的 SQLITE_OPEN_* 宏旗标：宏不跨模块
+ * 边界，include 只放在使用它的这一个单元；sqlite3 声明也就留在此处
+ * （全局模块片段单一属主规则）。另有 <cstdio>：语句诊断倾倒里直接用
+ * 裸的 stderr（std::fflush）。
  */
 export module cg.db.store;
 
@@ -24,6 +23,36 @@ import cg.util.cstd;
 import sqlpp23.core;
 import sqlpp23.sqlite3;
 import cg.db.schema;
+import cg.db.tables;
+
+namespace
+{
+    /**
+     * @brief 让 std::format 一族在本单元的第一次实例化落在这段常量的初始化上。
+     *
+     * @internal clang 23.1.5 配 libc++ 时，本单元去掉这段常量，前端就在实例化
+     *           std::format 一族的格式串检查模板（basic_format_string 的构造函
+     *           数与 __handles_）时访问违例，重编五次结果相同。崩的位置是
+     *           std::format 一族的一次普通调用（std::format 或 std::println），
+     *           各单元的实参形态互不相同（单个 const char*、std::string、整数的
+     *           引用等），有的在 lambda 里。
+     *
+     *           同项目里另有 15 个单元同样导入 std、同样直接或间接导入 sqlpp23
+     *           的模块，不带这段常量能编过。与是否向 std::cerr 打印无关（不打印
+     *           的单元也崩），与本单元全局模块片段里有没有标准库头文本也无关
+     *           （带 `<cstdio>` 的单元也崩）。哪些单元会触发，规律没有查清，这
+     *           里只记实测到的事实。本单元的全局模块片段里带 `<cstdio>`，去掉仍
+     *           然崩。
+     *
+     *           这段常量抢在一切使用之前，把 std::format 一族在本单元的第一次实
+     *           例化固定成一次最简单的直接使用。在这套工具链上，别的单元若出现
+     *           同类崩溃（调用栈里有 basic_format_string 与 __handles_），按同
+     *           样的写法加一段；升级 clang 之后可以逐个单元去掉试编，不崩就删。
+     */
+    [[maybe_unused]]
+    inline const std::string FORMAT_WARMUP_TEXT =
+        std::format("{} {} {} {} {}", "a", std::string("b"), 1, 2.5, 'c');
+} // namespace
 
 namespace cg::db
 {
@@ -1737,7 +1766,10 @@ namespace cg::db
         void exec(std::string_view sql);
 
         /**
-         * @internal 仅供 cg.db.query 的内部接缝。sqlpp23 类型绝不出 cg.db。
+         * @internal 仅供 cg.db.query 与 cg.analysis.external 使用的内部接缝：前
+         *           者的查询模块在连接上执行类型化语句，后者在连接上删除旧的
+         *           source=External 类型线索行。这是 GraphStore 接口上唯一的
+         *           sqlpp23 类型。
          */
         auto conn() -> sqlpp::sqlite3::connection&;
 
@@ -1800,9 +1832,10 @@ namespace cg::db
 
     /**
      * @internal
-     * GraphStore 携带 sqlpp23 的状态，藏在 unique_ptr 后面：导出类的 IFC
-     * 完全不得描述 sqlpp23/ tab:: 类型，否则每个导入单元都要重新合并那些
-     * 模板实例化、并使 MSVC IFC 读取器崩溃（见 db.tables.h）。
+     * GraphStore 携带 sqlpp23 的状态，藏在 unique_ptr 后面：连接、配置与
+     * 预编译语句表的类型只出现在本单元的实现里，不出现在导出类的数据
+     * 成员描述中，导入方读 GraphStore 这类导出类的定义时不必带上这些
+     * 类型。
      */
     struct GraphStore::Impl
     {

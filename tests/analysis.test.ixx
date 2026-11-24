@@ -1,6 +1,5 @@
 module;
 #include "../src/analysis/symbits.kernels.h"
-#include "../src/db/db.tables.h"
 
 export module cg.test.analysis;
 

@@ -1,6 +1,3 @@
-module;
-#include "../db/db.tables.h"
-
 /**
  * @module cg.cli.render.symbol
  *
@@ -31,72 +28,6 @@ export namespace cg::cli::render
     using cg::graph::TraceResult;
 
     namespace json = cg::util::json;
-
-    /**
-     * @brief 参数类型的逗号连接后缀（限定名后括号内；非函数/未记录为空）。
-     *
-     * @internal symbols.param_types 存 JSON 字符串数组文本，与 type_set 共用
-     * cg::analysis::parse_string_array 解析；无参函数的合法形态是 "()"。
-     */
-    [[nodiscard]]
-    auto params_suffix(const SymbolRow& s) -> std::string
-    {
-        if (!s.param_types.has_value())
-        {
-            return {};
-        }
-        const std::vector<std::string> parts =
-            cg::analysis::parse_string_array(*s.param_types);
-        return std::format("({})", cg::util::join(parts, ", "));
-    }
-
-    /** @brief params 的 JSON 字符串数组（前置条件：s.param_types 有值）。 */
-    [[nodiscard]]
-    auto params_json(const SymbolRow& s) -> json::Array
-    {
-        json::Array arr;
-        for (const std::string& p :
-             cg::analysis::parse_string_array(*s.param_types))
-        {
-            arr.add(p);
-        }
-        return arr;
-    }
-
-    /**
-     * @brief 单个符号的 JSON 对象（query/target/from/to/hops 共享）。
-     */
-    [[nodiscard]]
-    auto symbol_json(const SymbolRow& s) -> json::Object
-    {
-        json::Object o;
-        o.set("uid", s.id);
-        o.set("kind", std::string_view{cg::db::name_of(s.kind)});
-        o.set("name", s.name);
-        o.set("qualified_name", s.qualified_name);
-        // 参数类型：非函数/未记录与 parent 同惯例给 null；无参函数是空数组
-        // （"()"），二者语义不同。
-        if (s.param_types.has_value())
-        {
-            o.set("params", params_json(s));
-        }
-        else
-        {
-            o.set_null("params");
-        }
-        o.set("file", s.file);
-        o.set("line", static_cast<std::int64_t>(s.line));
-        o.set("col", static_cast<std::int64_t>(s.col));
-        if (s.parent.empty())
-        {
-            o.set_null("parent");
-        }
-        else
-        {
-            o.set("parent", s.parent);
-        }
-        return o;
-    }
 
     /**
      * @brief 单个命中相对查询的层（1/2/3）：与 find_symbols 的层判据一致，
@@ -276,14 +207,6 @@ export namespace cg::cli::render
         root.set("members", std::move(arr));
         return json::stringify(std::move(root));
     }
-
-    /** @brief callers 零结果时的盲区三要素（置信标注）。 */
-    struct CallersBlindSpots
-    {
-        bool pointer_calls_invisible = true; // 机制性盲区：恒真
-        bool sibling_dispatch_possible = false;
-        bool member_address_taken = false;
-    };
 
     /** @brief --implements 结果行：派生类型 + 继承深度（1=直接）。 */
     struct ImplementRow

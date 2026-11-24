@@ -1,18 +1,9 @@
-module;
-#include "../db/db.tables.h"
-#include "../msbuild/capture.tables.h"
-
 /**
  * @module app.main
  *
  * @brief 可执行入口点：通往完整 CLI（cg.cli）的薄蹦床。
  *
  * 全部参数解析、输出与退出码都住在 cg.cli 里。
- *
- * @internal
- * db.tables.h 放在全局模块片段：本单元会抵达 cg.db（直接或经再导出的
- * 子模块），MSVC 要求 sqlpp23 的表模型定义在此可见，模块才能合并其记录
- * 的模板特化（缘由详见 db.tables.h）。
  */
 export module app.main;
 

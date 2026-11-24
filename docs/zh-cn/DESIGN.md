@@ -20,7 +20,11 @@ detect-changes、增量监听模式、MCP/serve。
 
 100% 具名模块，C++23，处处 `import std;`。每个项目源文件都是扩展名为
 `.ixx` 的模块单元。第三方头文件只出现在全局模块片段（GMF）内部，
-且每个头文件恰由一个模块拥有（单一所有者规则，见 §10）。模块接口保持
+且每个头文件恰由一个模块拥有（单一所有者规则，见 §10）。只含宏、不含
+声明的头不受这条约束：宏不能跨模块导出，用到的单元各自在全局模块片段
+里包含它，不会产生重复的声明；名字标签宏头
+`sqlpp23/core/name/create_name_tag.h` 现在就同时出现在 `cg.db.tables`
+的四个子模块与 `cg.msbuild.tables` 的全局模块片段里。模块接口保持
 小巧；主体内容放在每个总接口（umbrella）模块之下的小型点分名子模块中
 （它们曾是分区；点分名模块重构化解了分区语法）。
 
@@ -29,7 +33,7 @@ detect-changes、增量监听模式、MCP/serve。
                      |
                   cg.cli  (src/cli/cli.ixx)
                  /     \
-           cg.graph    cg.db* (sqlpp23/sqlite3 only via cg.db)
+           cg.graph    cg.db* (sqlpp23/sqlite3 imported directly, see below)
           /   |    \
    cg.extract cg.db cg.util
         |
@@ -40,10 +44,19 @@ detect-changes、增量监听模式、MCP/serve。
 严格分层：一个模块只能导入表中所在层严格低于它的模块。没有环；
 构建系统事实上强制了这一点，因为模块 BMI 编码了导入图。
 
+sqlpp23 的两个模块（`sqlpp23.core`、`sqlpp23.sqlite3`）不设包装，由用到
+它的单元直接导入：数据库层的 `cg.db.tables` 四个子模块、`cg.db.store`、
+`cg.db.query` 的五个子模块，`cg.msbuild` 层的 `cg.msbuild.tables`、
+`cg.msbuild.wrap`、`cg.msbuild.pipeline.wraplog`，以及
+`cg.analysis.external`（在连接上执行一条删除语句）。`sqlite3.h` 由
+`cg.db.store`、`cg.msbuild.wrap`、`cg.msbuild.pipeline.wraplog` 三个单元
+的全局模块片段包含（tests 的 schema-mirror 测试单元也包含）。
+
 | 模块 | 文件 | 导入（项目内） | GMF 第三方 include | 职责 |
 |---|---|---|---|---|
 | `cg.util` | `src/util/util.ixx`（+ `cg.util.json` = `src/util/util.json.ixx`、`cg.util.platform` = `src/util/util.platform.ixx`，均由总接口模块再导出） | — | `cpp_yyjson.hpp`（仅在 `cg.util.json` 中，带 §10.2 的 assert 垫片）；平台头（`io.h`/`windows.h` 或 `unistd.h`，仅在 `cg.util.platform` 中） | 版本串；FNV-1a 64；限定名拆分/拼接；路径规范化（正斜杠、小写盘符）；`PathCaseCache` + 磁盘大小写重拼写；内存 `Interner` 缓存；基于 yyjson-cpp 的最小 JSON 读/写门面；`cg.util.platform` 的控制台与管道 stdin 探测（OS API 唯一允许出现的地方） |
-| `cg.db` | `src/db/db.ixx` + `cg.db.schema`（`db.schema.ixx`）、`cg.db.store`（`db.store.ixx`）、`cg.db.query`（`db.query.ixx`） | — | `sqlite3.h`、`sqlpp23/core/name/create_name_tag.h`（仅宏） | 经 sqlpp23 使用 SQLite：打开/PRAGMA/DDL、字符串驻留表、upsert（files/symbols/edges/includes/imports）、按文件清除、全部查找与遍历形态的查询、stats。对 libclang 一无所知 |
+| `cg.db` | `src/db/db.ixx` + `cg.db.schema`（`db.schema.ixx`）、`cg.db.store`（`db.store.ixx`）、`cg.db.query`（`db.query.ixx`） | — | `sqlite3.h` | 经 sqlpp23 使用 SQLite：打开/PRAGMA/DDL、字符串驻留表、upsert（files/symbols/edges/includes/imports）、按文件清除、全部查找与遍历形态的查询、stats。对 libclang 一无所知 |
+| `cg.db.tables` | `src/db/db.tables.ixx`（入口，自身不声明任何内容，只再导出下面四个子模块；不经总接口 `cg.db` 再导出）+ `cg.db.tables.core`（`db.tables.core.ixx`）、`cg.db.tables.graph`（`db.tables.graph.ixx`）、`cg.db.tables.sites`（`db.tables.sites.ixx`）、`cg.db.tables.analysis`（`db.tables.analysis.ixx`） | — | `sqlpp23/core/name/create_name_tag.h`（仅宏） | sqlpp23 表模型（命名空间 `cg::db::tab`），手写形状，表与表互不引用：`core` 是元数据与字符串表、kind/边类型字典、sqlite 目录表的只读模型、文件登记、指纹、失败条目、实时变更协调各表，加聚合与连接用的全部别名标签；`graph` 是符号、边、包含、导入四张表；`sites` 是类型线索与调用点两张表；`analysis` 是传播槽、透传包装、实例桥传入侧与体内调用侧、符号贡献登记五张表。用到表模型名字的单元自己 `import cg.db.tables;` |
 | `cg.clang` | `src/clang/clang.ixx` + `cg.clang.loader`、`cg.clang.capi`（`clang.capi.ixx`）、`cg.clang.driver`、`cg.clang.tu`（`clang.tu.ixx`）、`cg.clang.compile_db`（`clang.compile_db.ixx`）、`cg.clang.bmi` | `cg.util` | `clang-c/Index.h`（仅在 `cg.clang.capi` 中） | `cg.clang.capi` 再导出 CX 类型 + RAII（`Str`、`Index`、`Tu`）+ 薄游标门面（kind/spelling/location/children/…）；`cg.clang.tu` 解析 + 诊断；`cg.clang.compile_db` 读取 compile_commands.json、对命令串分词、构建每 TU 的 argv |
 | `cg.extract` | `src/extract/extract.ixx` + `cg.extract.model`（`extract.model.ixx`）、`cg.extract.visitor`（`extract.visitor.ixx`） | `cg.clang`、`cg.util` | — | `cg.extract.model` 的纯记录类型（`SymbolRec`、`EdgeRec`、`IncludeRec`、`ImportRec`、`TuExtract`）+ 那个唯一的 `unique_key` 构建器（单一事实来源，§4）；`cg.extract.visitor` 遍历一个 TU 的游标树并产出记录（具名模块 import 来自 `CXCursor_ModuleImportDecl`、主文件过滤）。纯函数：无 DB、无 I/O |
 | `cg.analysis` | `src/analysis/analysis.ixx` + `cg.analysis.model`（`analysis.model.ixx`）、`cg.analysis.collect`（`analysis.collect.ixx`）、`cg.analysis.points_to`（`analysis.points_to.ixx`）、`cg.analysis.propagate`（`analysis.propagate.ixx`）、`cg.analysis.dispatch`（`analysis.dispatch.ixx`） | `cg.clang`、`cg.db`、`cg.util` | — | 动态派发分析（schema v11）。`model`：纯数据 + 置信度阶梯 + 字节一致的 `unique_key` 构建器（analysis 不能导入 `cg.extract`）；`collect`：第二次定向 AST 遍历，产出 `TuAnalysis`（L0 线索：声明、`new T`、聚合、`make_unique/shared`、转型、`&obj`、实参；纯数据，无游标离开工作线程）；`points_to`：`TypeOracle` 接缝（今天是桩，全程序指针/别名分析将来只替换该模块）；`propagate`：L1 函数内别名/返回值流 + L2 对已持久化提示/调用点的全局工作列表不动点（有界、确定）；`dispatch`：重写家族 ∩ 动态类型集合 → `virtual_dispatch` 边 + 候选集 + 如实回退。**依赖栅栏（既定设计）：analysis → 仅 db/clang；graph/cli → analysis；extract/db/clang 绝不导入 analysis**（由 `tests/portability_scan.cmake` 强制） |
@@ -276,9 +289,14 @@ _cpm_add_sqlpp23()
   （正是 sqlpp23 自己的模块测试模式）。这些坑是铁律（探针命中）：
   用 `std::int64_t` 不用 `int64_t`；select 结果以非 const 存储；
   `order_by(col.asc())`。
-- sqlite3.h 仅被 `cg.db` 各单元 GMF-include，只为 SQLITE_OPEN_* 旗标与
-  宏；宏不跨模块边界——把需要的常量再导出为 `inline constexpr`（探针
-  验证：永远只需要 `SQLITE_OPEN_READWRITE` 与 `SQLITE_OPEN_CREATE`）。
+- sqlite3.h 被 `cg.db.store`、`cg.msbuild.wrap`、`cg.msbuild.pipeline.wraplog`
+  三个单元的全局模块片段包含（tests 的 schema-mirror 测试单元也包含）。
+  宏不跨模块边界，所以用到 SQLITE_OPEN_* 旗标宏的单元只能自己包含；
+  `cg.db.store` 另直接调用预编译语句的绑定与执行、语句追踪等 sqlite3 C
+  接口，`cg.msbuild.wrap` 另执行裸 SQL 语句并调用
+  `sqlite3_busy_timeout`，`cg.msbuild.pipeline.wraplog` 只调用
+  `sqlite3_busy_timeout`。src 下实际用到的旗标只有
+  `SQLITE_OPEN_READWRITE` 与 `SQLITE_OPEN_CREATE`。
 - yyjson-cpp 只能经 `cg.util.json` 的门面触达。
 - libclang 只能经 `cg.clang.capi` 的导出触达。
 - SQLite 3.54.0 amalgamation 只是已文档化的升级路径——v1 不要接线。

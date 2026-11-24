@@ -6,13 +6,8 @@
  *
  * @internal 动态侧证据（槽提示的动态类型集）在此折算为展示候选与
  *           置信档；弱带动态证据（出参族并集、转型声称）与静态硬
- *           证明冲突时静态优先。逐档判据见各函数注释。db.tables.h
- *           置于全局模块片段：MSVC 要求 sqlpp23 表模型定义在此可
- *           见，以合并模块记录的模板特化（完整机理见 db.tables.h）。
+ *           证明冲突时静态优先。逐档判据见各函数注释。
  */
-module;
-#include "../db/db.tables.h"
-
 export module cg.analysis.dispatch.dynamics;
 
 import std;

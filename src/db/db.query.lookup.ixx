@@ -1,6 +1,3 @@
-module;
-#include "db.tables.h"
-
 /**
  * @module cg.db.query.lookup
  *
@@ -15,6 +12,7 @@ import sqlpp23.core;
 import sqlpp23.sqlite3;
 import cg.db.schema;
 import cg.db.store;
+import cg.db.tables;
 
 export namespace cg::db::query_detail
 {
@@ -349,12 +347,12 @@ namespace cg::db
      * @brief 一批符号 id 的轻量投影：一条连接查询拉七字段（分块 IN）。
      *
      * @internal
-     * 分块上限防 SQLite 变量数上限（与其他批量查询同一条红线）。str 名
-     * 字/唯一键经
-     * 外键恒在，用内连接；files 行用左连接——symbol_row 对缺失 files 行的
-     * 宽容（file 留空、符号照常返回）在此逐字复刻。同一 str 表在一批查询
-     * 里连接三次，表与结果列都显式别名（标签组在 db.tables.h 的 tab 命名
-     * 空间）。
+     * 分块上限防 SQLite 变量数上限（与其他批量查询同一条红线）。符号的名
+     * 字与唯一键经外键指向 str 表，对应的 str 行恒在，这两处用内连接；
+     * files 行用左连接——symbol_row 对缺失 files 行的宽容（file 留空、
+     * 符号照常返回）在此逐字复刻。同一 str 表在一批查询里连接三次，表与
+     * 结果列都显式别名（标签组在 cg.db.tables.core 的 tab 命名空间，经入
+     * 口 cg.db.tables 再导出）。
      */
     export auto symbol_briefs(GraphStore& store, std::span<const SymId> ids)
         -> std::vector<SymbolBrief>

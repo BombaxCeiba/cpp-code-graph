@@ -17,16 +17,11 @@
  * 轮内四阶段（函数内别名 / 实参→形参 / 出参写回 / 返回值→调用点）
  * 保持全扫版的阶段与扫描顺序，用脏
  * 队列只处理"自上次处理后输入有变化"的槽/站点；被跳过的访问是可
- * 证明的 no-op，固定点与全扫版一致。db.tables.h 置于全局
- * 模块片段：本单元调用 cg.db 的查询函数，MSVC 要求 sqlpp23 表模型
- * 定义在此可见，以合并模块记录的模板特化（完整机理见 db.tables.h）。
+ * 证明的 no-op，固定点与全扫版一致。
  */
 module;
-#include <cassert>
-#include <cstdint>
-#include <new>
+#include <cassert> // assert 是宏，import std 不透传宏，须在全局模块片段引入
 
-#include "../db/db.tables.h"
 #include "symbits.kernels.h"
 
 export module cg.analysis.propagate;
@@ -2171,8 +2166,8 @@ export namespace cg::analysis
                     // 重复应用会重复登记行级别名边）。保留槽的声称行只入缓
                     // 冲：文件清单/脏标记不动（快照的槽文件面已含声称行文
                     // 件，重复登记污染观测面）。
-                    const bool retained = !fresh
-                                          && slot_from_snap[it->second] != 0;
+                    const bool retained =
+                        !fresh && slot_from_snap[it->second] != 0;
                     if (retained
                         && row.source
                                != static_cast<int>(HintSource::CastTarget))
@@ -2187,8 +2182,7 @@ export namespace cg::analysis
                             slot_row_dirty[it->second] = 1;
                         }
                     }
-                    if (row.source
-                        == static_cast<int>(HintSource::CastTarget))
+                    if (row.source == static_cast<int>(HintSource::CastTarget))
                     {
                         // 转型声称行：只入缓冲——不发
                         // 传播边、不吸收槽标签（置信度/来源/reason 不动），
@@ -2226,9 +2220,8 @@ export namespace cg::analysis
                                 face.erase(
                                     std::unique(face.begin(), face.end()),
                                     face.end());
-                                fit = claim_face_of
-                                         .emplace(t, std::move(face))
-                                         .first;
+                                fit = claim_face_of.emplace(t, std::move(face))
+                                          .first;
                             }
                             for (const std::string& d : fit->second)
                             {
@@ -4675,8 +4668,7 @@ export namespace cg::analysis
                 // 纪律接管。
                 for (std::size_t i = 0; i < slots.size(); ++i)
                 {
-                    if (slot_cast_claims.empty()
-                        || slot_cast_claims[i].empty()
+                    if (slot_cast_claims.empty() || slot_cast_claims[i].empty()
                         || slots[i].type_len != 0)
                     {
                         continue;
@@ -4688,20 +4680,16 @@ export namespace cg::analysis
                     probe.static_types = slots[i].static_types;
                     probe.source = HintSource::CastTarget;
                     probe.confidence = Confidence::Low;
-                    std::vector<std::string> claimed =
-                        oracle.points_to(probe);
+                    std::vector<std::string> claimed = oracle.points_to(probe);
                     std::erase_if(
                         claimed,
                         [this](const std::string& t)
-                        {
-                            return !lookup.by_key(t).has_value();
-                        });
+                        { return !lookup.by_key(t).has_value(); });
                     if (claimed.empty())
                     {
                         continue;
                     }
-                    const std::vector<std::int32_t> ids =
-                        intern_ids(claimed);
+                    const std::vector<std::int32_t> ids = intern_ids(claimed);
                     if (add_types(
                             slots[i],
                             ids,
@@ -4714,8 +4702,7 @@ export namespace cg::analysis
                         slots[i].confidence = Confidence::Low;
                         slots[i].source = HintSource::CastTarget;
                         slots[i].reason =
-                            std::string{
-                                source_name(HintSource::CastTarget)};
+                            std::string{source_name(HintSource::CastTarget)};
                     }
                 }
                 // 每个槽的最终置信度：多候选一律 cap 到 low；无类型 =

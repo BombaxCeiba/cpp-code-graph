@@ -1,11 +1,9 @@
-module;
-#include "../db/db.tables.h"
-
 /**
  * @module cg.cli.render.base
  *
  * @brief
- * 渲染层共享原语：位置/等级/方向等枚举名、字节与耗时的人类可读化、站点与边标签文本、调用与影响站点摘取。
+ * 渲染层共享原语：位置/等级/方向等枚举名、字节与耗时的人类可读化、站点与边标签文本、调用与影响站点摘取、符号
+ * JSON 原子、深度前沿注记与派发观测摘要（状态名/置信度附注/计数/滞后提示）。
  */
 export module cg.cli.render.base;
 
@@ -43,6 +41,24 @@ export namespace cg::cli::render
             {
                 out.push_back(name);
             }
+        }
+
+        /** @brief 文件 id 的路径文本；查不到时给 "?"。 */
+        [[nodiscard]]
+        auto cycle_file_path(GraphStore& store, cg::db::FileId id)
+            -> std::string
+        {
+            const auto row = store.file(id);
+            return row ? row->path : std::string{"?"};
+        }
+
+        /** @brief 符号 id 的限定名；查不到时给 "sym<id>" 占位。 */
+        [[nodiscard]]
+        auto closure_symbol_name(GraphStore& store, cg::db::SymId id)
+            -> std::string
+        {
+            const auto row = cg::db::get_symbol(store, id);
+            return row ? row->qualified_name : std::format("sym{}", id);
         }
     } // namespace detail
 
@@ -402,5 +418,258 @@ export namespace cg::cli::render
             }
         }
         return std::nullopt;
+    }
+
+    using cg::graph::DispatchMode;
+    using cg::graph::DispatchStatus;
+
+    /** @brief callers 零结果时的盲区三要素（置信标注）。 */
+    struct CallersBlindSpots
+    {
+        bool pointer_calls_invisible = true; // 机制性盲区：恒真
+        bool sibling_dispatch_possible = false;
+        bool member_address_taken = false;
+    };
+
+    /**
+     * @brief 参数类型的逗号连接后缀（限定名后括号内；非函数/未记录为空）。
+     *
+     * @internal symbols.param_types 存 JSON 字符串数组文本，与 type_set 共用
+     * cg::analysis::parse_string_array 解析；无参函数的合法形态是 "()"。
+     */
+    [[nodiscard]]
+    auto params_suffix(const SymbolRow& s) -> std::string
+    {
+        if (!s.param_types.has_value())
+        {
+            return {};
+        }
+        const std::vector<std::string> parts =
+            cg::analysis::parse_string_array(*s.param_types);
+        return std::format("({})", cg::util::join(parts, ", "));
+    }
+
+    /** @brief params 的 JSON 字符串数组（前置条件：s.param_types 有值）。 */
+    [[nodiscard]]
+    auto params_json(const SymbolRow& s) -> json::Array
+    {
+        json::Array arr;
+        for (const std::string& p :
+             cg::analysis::parse_string_array(*s.param_types))
+        {
+            arr.add(p);
+        }
+        return arr;
+    }
+
+    /** @brief 单个符号的 JSON 对象（query/target/from/to/hops 共享）。 */
+    [[nodiscard]]
+    auto symbol_json(const SymbolRow& s) -> json::Object
+    {
+        json::Object o;
+        o.set("uid", s.id);
+        o.set("kind", std::string_view{cg::db::name_of(s.kind)});
+        o.set("name", s.name);
+        o.set("qualified_name", s.qualified_name);
+        // 参数类型：非函数/未记录与 parent 同惯例给 null；无参函数是空数组
+        // （"()"），二者语义不同。
+        if (s.param_types.has_value())
+        {
+            o.set("params", params_json(s));
+        }
+        else
+        {
+            o.set_null("params");
+        }
+        o.set("file", s.file);
+        o.set("line", static_cast<std::int64_t>(s.line));
+        o.set("col", static_cast<std::int64_t>(s.col));
+        if (s.parent.empty())
+        {
+            o.set_null("parent");
+        }
+        else
+        {
+            o.set("parent", s.parent);
+        }
+        return o;
+    }
+
+    /**
+     * @brief "还能更深"注记行：truncated 语义修正后的 BFS 前沿信号承接。
+     *
+     * 定义：truncated 只在结果被截断（找到的条目多于列出的条目）时为
+     *        true；graph 层的同名历史位（--depth 上限处前沿非空）不是
+     *        截断——列出的条目本身是完整的，缺的只是更深的层。
+     *
+     * soundness 边界：走查本身没有条目上限（找到即全部到达）；
+     *        neighbors/impact 的 --top 是展示端截断，截断处 truncated 按
+     *        "列出 < 找到"实算，计数仍覆盖全部找到的条目；changes/
+     *        call_closure 无条目上限仍恒 false；cycles 的 --max 另行渲染
+     *        "N of M groups"。本注记独立表达 --depth 上限处的前沿信号，
+     *        与截断互不替代。
+     *
+     * fallback 清单：文本输出 = 本注记行（仅前沿非空时出现）；--json =
+     *        deeperEdgesExist 布尔位（恒出现，与 truncated 并列），机器
+     *        消费方以此区分"结果被截"与"还能更深"。
+     */
+    [[nodiscard]]
+    auto deeper_note(bool frontier_live) -> std::string
+    {
+        if (!frontier_live)
+        {
+            return {};
+        }
+        return "deeper edges exist: yes (listed entries are complete; raise "
+               "--depth to expand)\n";
+    }
+
+    /** @internal 逐状态的计数（文本头与 JSON 汇总共用）。 */
+    struct DispatchCounts
+    {
+        std::int64_t inferred = 0;
+        std::int64_t family_estimate = 0;
+        std::int64_t none = 0;
+
+        void add(DispatchStatus status)
+        {
+            switch (status)
+            {
+            case DispatchStatus::Inferred:
+                ++inferred;
+                break;
+            case DispatchStatus::FamilyEstimate:
+                ++family_estimate;
+                break;
+            case DispatchStatus::None:
+                ++none;
+                break;
+            }
+        }
+    };
+
+    /** @brief JSON 的 dispatchStatus 取值（用户可见的唯一状态词汇）。 */
+    [[nodiscard]]
+    auto dispatch_status_name(DispatchStatus status) -> std::string_view
+    {
+        switch (status)
+        {
+        case DispatchStatus::Inferred:
+            return "inferred";
+        case DispatchStatus::FamilyEstimate:
+            return "family_estimate";
+        case DispatchStatus::None:
+            return "none";
+        }
+        return "none";
+    }
+
+    [[nodiscard]]
+    auto dispatch_mode_name(DispatchMode mode) -> std::string_view
+    {
+        switch (mode)
+        {
+        case DispatchMode::Off:
+            return "off";
+        case DispatchMode::Precise:
+            return "precise";
+        case DispatchMode::Fallback:
+            return "fallback";
+        case DispatchMode::Additive:
+            return "additive";
+        }
+        return "precise";
+    }
+
+    /**
+     * @brief 单条结果的派发标注。
+     *
+     * 用户可见文本禁止出现需要内部上下文的家族回退简写：
+     * 有证据时给数值置信度，没有证据时给自解释的 family estimate。
+     */
+    [[nodiscard]]
+    auto dispatch_note(DispatchStatus status, double confidence) -> std::string
+    {
+        switch (status)
+        {
+        case DispatchStatus::Inferred:
+            return std::format("   [dispatch {:.2f}]", confidence);
+        case DispatchStatus::FamilyEstimate:
+            return "   [dispatch unknown · family estimate]";
+        case DispatchStatus::None:
+            return {};
+        }
+        return {};
+    }
+
+    /**
+     * @brief 文本头：家族估算自解释行 + 状态计数。
+     *
+     * 仅当调用方确认模式不是 Off 时调用（Off 必须逐字节保持旧输出）。
+     */
+    [[nodiscard]]
+    auto dispatch_summary_text(const DispatchCounts& counts) -> std::string
+    {
+        std::string out;
+        if (counts.family_estimate > 0)
+        {
+            out = "family estimate: dynamic type unproven; estimated from the "
+                  "whole override family, may include non-target "
+                  "implementations\n";
+        }
+        out += std::format(
+            "dispatch: {} inferred, {} family estimate, {} static "
+            "(--no-dispatch for the static view)\n",
+            counts.inferred,
+            counts.family_estimate,
+            counts.none);
+        return out;
+    }
+
+    /** @brief JSON 汇总对象 `dispatch`。 */
+    [[nodiscard]]
+    auto dispatch_summary_json(DispatchMode mode, const DispatchCounts& counts)
+        -> json::Object
+    {
+        json::Object o;
+        o.set("mode", dispatch_mode_name(mode));
+        o.set("threshold", cg::graph::kDispatchConfidenceFloor);
+        o.set("inferred", counts.inferred);
+        o.set("familyEstimate", counts.family_estimate);
+        o.set("static", counts.none);
+        return o;
+    }
+
+    /**
+     * @brief 延迟收敛的滞后标注行（绝不静默旧派发数据）。
+     *
+     * dispatch_stale_files > 0（编辑批延迟了
+     * RTA/类型传播/dispatch、收敛批未跑）
+     * 时返回一行人话；已收敛（0/负）返回空串，输出与旧版逐字节一致。
+     */
+    [[nodiscard]]
+    auto dispatch_stale_text(std::int64_t stale_files) -> std::string
+    {
+        if (stale_files <= 0)
+        {
+            return {};
+        }
+        return std::format(
+            "dispatch analysis lags the index by {} file{} — virtual dispatch "
+            "data below predates those edits (run `ccg update --drain` to "
+            "converge)\n",
+            stale_files,
+            stale_files == 1 ? "" : "s");
+    }
+
+    /** @brief 同一滞后事实的 JSON 形态（>0 才写，键名与 hook 解析共享）。 */
+    inline void dispatch_stale_json(
+        json::Object& root,
+        std::int64_t  stale_files)
+    {
+        if (stale_files > 0)
+        {
+            root.set("dispatchStaleFiles", stale_files);
+        }
     }
 } // namespace cg::cli::render

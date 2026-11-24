@@ -1,6 +1,3 @@
-module;
-#include "db.tables.h"
-
 /**
  * @module cg.db.query.stats
  *
@@ -16,6 +13,7 @@ import sqlpp23.sqlite3;
 import cg.db.schema;
 import cg.db.store;
 import cg.db.query.lookup;
+import cg.db.tables;
 
 namespace cg::db
 {

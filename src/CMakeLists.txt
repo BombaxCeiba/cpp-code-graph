@@ -6,7 +6,8 @@
 # 与消费 sqlpp23 自家模块目标的形态一致（探针验证过）。
 # 唯一的经典源文件是下面两个 TU：yyjson 类型在 MSVC 上绝不能
 # 进入模块单元（util.json.bridge.cpp），
-# db.sqlpp.anchor.cpp 则锚定 sqlpp23 的运算符静态量。
+# db.sqlpp.anchor.cpp 则锚定 sqlpp23 的内联静态量：非模板类的
+# 静态数据成员与命名空间级内联变量。
 # SEH 崩溃守卫重新以模块单元编译（util.guard.ixx）——它在
 # gnu-ABI 的 clang 工具链上书写 __try 所需的 -fms-extensions
 # 语言选项由 cmake/CcgUtils.cmake 全构建范围注入，因此整棵树的
@@ -14,10 +15,11 @@
 # LangOpts 形态。
 add_library(cg_core OBJECT
     util/util.json.bridge.cpp
-    # 把 sqlpp23 的运算符符号内联静态量锚进
-    # cg_core 的经典 TU：MSVC 对模块单元中仅供导入的内联
-    # 变量只发出 UNDEF 引用，而 sqlpp23 的模块目标文件永远到不了
-    # ccg 的链接行（见 db.sqlpp.anchor.cpp 的头部注释）。
+    # 把 sqlpp23 的内联静态量（非模板类的静态数据成员与
+    # 命名空间级内联变量）锚进 cg_core 的经典 TU：MSVC 对模块
+    # 单元中仅供导入的内联变量只发出 UNDEF 引用，而 sqlpp23 的
+    # 模块目标文件永远到不了 ccg 的链接行
+    # （见 db.sqlpp.anchor.cpp 的头部注释）。
     db/db.sqlpp.anchor.cpp
     # SymBits 批量位运算内核，每档一个经典 TU：MSVC 没有
     # 按函数的 target 属性，因此向量档只能
@@ -55,6 +57,11 @@ ccg_add_modules(cg_core "${CMAKE_CURRENT_SOURCE_DIR}"
     util/util.treesit.ixx
     util/util.cshost.ixx
     util/util.shellscan.ixx
+    db/db.tables.core.ixx
+    db/db.tables.graph.ixx
+    db/db.tables.sites.ixx
+    db/db.tables.analysis.ixx
+    db/db.tables.ixx
     db/db.schema.ixx
     db/db.store.ixx
     db/db.query.lookup.ixx
@@ -129,6 +136,7 @@ ccg_add_modules(cg_core "${CMAKE_CURRENT_SOURCE_DIR}"
     graph/graph.ixx
     msbuild/msbuild.ixx
     msbuild/translate.ixx
+    msbuild/msbuild.tables.ixx
     msbuild/wrap.ixx
     msbuild/pipeline.configs.ixx
     msbuild/pipeline.registry.ixx
@@ -147,7 +155,6 @@ ccg_add_modules(cg_core "${CMAKE_CURRENT_SOURCE_DIR}"
     cli/cli.parse.parse.ixx
     cli/cli.parse.ixx
     cli/cli.render.base.ixx
-    cli/cli.render.dispatch.ixx
     cli/cli.render.symbol.ixx
     cli/cli.render.context.ixx
     cli/cli.render.impact.ixx
@@ -156,7 +163,6 @@ ccg_add_modules(cg_core "${CMAKE_CURRENT_SOURCE_DIR}"
     cli/cli.render.ixx
     cli/cli.layout.ixx
     cli/cli.commands.matchers.ixx
-    cli/cli.commands.targets.ixx
     cli/cli.commands.runs.ixx
     cli/cli.commands.entry.ixx
     cli/cli.commands.ixx
@@ -164,7 +170,6 @@ ccg_add_modules(cg_core "${CMAKE_CURRENT_SOURCE_DIR}"
     # 纯声明接口；自模块布局定稿起
     # 定义就地内联）与各 CLI 运行器模块。
     cli/cli.runners.engine.ixx
-    cli/cli.runners.route.ixx
     cli/cli.runners.resolve.ixx
     cli/cli.runners.tail.ixx
     cli/cli.runners.ixx

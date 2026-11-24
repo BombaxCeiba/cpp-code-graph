@@ -9,13 +9,8 @@
  *           距离、前置声明键兜底索引、槽级声明面索引、排除域闭包、
  *           折算缺边两表、同名方法行索引。同一 resolve 调用内跨站点
  *           共享：首查构建、重复查询复用（符号集在解析期只读不变，
- *           缓存不失效）。db.tables.h 置于全局模块片段：本单元调用
- *           cg.db 的查询函数，MSVC 要求 sqlpp23 表模型定义在此可见，
- *           以合并模块记录的模板特化（完整机理见 db.tables.h）。
+ *           缓存不失效）。
  */
-module;
-#include "../db/db.tables.h"
-
 export module cg.analysis.dispatch.context;
 
 import std;

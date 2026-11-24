@@ -1,7 +1,6 @@
 module;
 // 经典流头预热：本单元实例化 std::istringstream（AdditionalOptions 的
-// 空白切词与 INCLUDE 直读都走字符串流），std 模块的导出声明面单独不足，
-// 全局片段 include 的先例见 eval.ixx / pipeline.ixx。
+// 空白切词与 INCLUDE 直读都走字符串流），std 模块的导出声明面单独不足。
 #include <istream>
 #include <sstream>
 
@@ -52,9 +51,9 @@ export module cg.msbuild.compose;
 import std;
 import cg.util;
 import cg.util.cstd;
-import cg.msbuild.pipeline;   // ProjectCl（逐工程 cl）
-import cg.msbuild.translate;  // ClInvocation（载荷契约）
-import cg.msbuild.eval;       // EvalProjectOut（求值产物）
+import cg.msbuild.pipeline;  // ProjectCl（逐工程 cl）
+import cg.msbuild.translate; // ClInvocation（载荷契约）
+import cg.msbuild.eval;      // EvalProjectOut（求值产物）
 
 export namespace cg::msbuild::compose
 {
@@ -168,8 +167,7 @@ export namespace cg::msbuild::compose
         const std::vector<eval::EvalProjectOut>& projects,
         const std::vector<ProjectCl>&            project_cls,
         const ComposeOptions&                    options = {},
-        ComposeDiary*                            diary = nullptr)
-        -> std::vector<ClInvocation>;
+        ComposeDiary* diary = nullptr) -> std::vector<ClInvocation>;
 
 } // namespace cg::msbuild::compose
 
@@ -186,20 +184,14 @@ namespace cg::msbuild::compose
          *  的模块开关必须按 cg.util.msvcswitch 的规范拼写发出——静态
          *  断言钉死成员资格，清单改名或组装器漂移先红编译）。 */
         static_assert(
-            std::ranges::find(
-                cg::util::msvcswitch::valued,
-                "ifcOutput")
-                != std::end(cg::util::msvcswitch::valued));
+            std::ranges::find(cg::util::msvcswitch::valued, "ifcOutput")
+            != std::end(cg::util::msvcswitch::valued));
         static_assert(
-            std::ranges::find(
-                cg::util::msvcswitch::valued,
-                "ifcSearchDir")
-                != std::end(cg::util::msvcswitch::valued));
+            std::ranges::find(cg::util::msvcswitch::valued, "ifcSearchDir")
+            != std::end(cg::util::msvcswitch::valued));
         static_assert(
-            std::ranges::find(
-                cg::util::msvcswitch::valued,
-                "reference")
-                != std::end(cg::util::msvcswitch::valued));
+            std::ranges::find(cg::util::msvcswitch::valued, "reference")
+            != std::end(cg::util::msvcswitch::valued));
 
         /** 披露日记的便捷写行。 */
         class DiarySink
@@ -244,8 +236,7 @@ namespace cg::msbuild::compose
                 }
                 if (item_definition_.is_object())
                 {
-                    if (const auto v =
-                            item_definition_.get(field.msb_key);
+                    if (const auto v = item_definition_.get(field.msb_key);
                         v && v->is_string())
                     {
                         return std::string{*v->as_string()};
@@ -261,9 +252,8 @@ namespace cg::msbuild::compose
 
         /** 按字段表行从任意对象视图取字符串成员（top_props 提炼用）。 */
         [[nodiscard]]
-        auto obj_str(
-            const cg::util::json::ValueView& obj,
-            std::string_view                 key) -> std::string
+        auto obj_str(const cg::util::json::ValueView& obj, std::string_view key)
+            -> std::string
         {
             if (obj.is_object())
             {
@@ -311,7 +301,7 @@ namespace cg::msbuild::compose
         auto is_dir_like(std::string_view value) -> bool
         {
             return !value.empty()
-                && (value.back() == '\\' || value.back() == '/');
+                   && (value.back() == '\\' || value.back() == '/');
         }
 
         /** 源文件的全名（含扩展名——产物拼值用 mod.ixx.obj / mod.ixx.ifc
@@ -321,9 +311,8 @@ namespace cg::msbuild::compose
         {
             const std::size_t slash = path.find_last_of("/\\");
             return std::string{
-                slash == std::string_view::npos
-                    ? path
-                    : path.substr(slash + 1)};
+                slash == std::string_view::npos ? path
+                                                : path.substr(slash + 1)};
         }
 
         /** 源文件扩展名（小写、含点；模块单元判定用）。 */
@@ -381,11 +370,11 @@ namespace cg::msbuild::compose
         void emit_tri(
             std::vector<std::string>& argv,
             const DiarySink&          sink,
-            std::string_view         field_name,
-            std::string_view         raw_value,
-            std::string_view         positive,
-            std::string_view         negative,
-            Tri                      state)
+            std::string_view          field_name,
+            std::string_view          raw_value,
+            std::string_view          positive,
+            std::string_view          negative,
+            Tri                       state)
         {
             switch (state)
             {
@@ -401,10 +390,11 @@ namespace cg::msbuild::compose
             case Tri::Absent:
                 break;
             case Tri::Unknown:
-                sink.note(std::format(
-                    "compose: field {} '{}' unmapped, skipped",
-                    field_name,
-                    raw_value));
+                sink.note(
+                    std::format(
+                        "compose: field {} '{}' unmapped, skipped",
+                        field_name,
+                        raw_value));
                 break;
             }
         }
@@ -463,8 +453,11 @@ namespace cg::msbuild::compose
                 return "/Wall";
             }
             const std::pair<std::string_view, std::string_view> map[] = {
-                {"Level0", "/W0"}, {"Level1", "/W1"}, {"Level2", "/W2"},
-                {"Level3", "/W3"}, {"Level4", "/W4"},
+                {"Level0", "/W0"},
+                {"Level1", "/W1"},
+                {"Level2", "/W2"},
+                {"Level3", "/W3"},
+                {"Level4", "/W4"},
             };
             for (const auto& [meta, sw] : map)
             {
@@ -535,23 +528,22 @@ namespace cg::msbuild::compose
         const std::vector<eval::EvalProjectOut>& projects,
         const std::vector<ProjectCl>&            project_cls,
         const ComposeOptions&                    options,
-        ComposeDiary*                            diary) -> std::vector<ClInvocation>
+        ComposeDiary* diary) -> std::vector<ClInvocation>
     {
         namespace json = cg::util::json;
-        const DiarySink sink{diary};
+        const DiarySink           sink{diary};
         std::vector<ClInvocation> out;
 
         // INCLUDE 直读一次、全体共享（覆盖值供测试钉死）。
-        const std::string include_env = options.include_env.has_value()
-                                            ? *options.include_env
-                                            : cg::util::cstd::get_env(
-                                                  "INCLUDE")
-                                                  .value_or("");
+        const std::string include_env =
+            options.include_env.has_value()
+                ? *options.include_env
+                : cg::util::cstd::get_env("INCLUDE").value_or("");
 
         // 逐工程 cl 按条目名建索引（resolve_project_cls 与求值成员清单
         // 同用 enumerate_sln_projects 的 name——同一键）。
-        const auto find_cl = [&project_cls](const std::string& name)
-            -> const ProjectCl*
+        const auto find_cl =
+            [&project_cls](const std::string& name) -> const ProjectCl*
         {
             for (const ProjectCl& e : project_cls)
             {
@@ -567,28 +559,31 @@ namespace cg::msbuild::compose
         {
             if (!project.error.empty())
             {
-                sink.note(std::format(
-                    "compose: project {} skipped (eval error: {})",
-                    project.name,
-                    project.error.substr(
-                        0,
-                        std::min<std::size_t>(project.error.size(), 160))));
+                sink.note(
+                    std::format(
+                        "compose: project {} skipped (eval error: {})",
+                        project.name,
+                        project.error.substr(
+                            0,
+                            std::min<std::size_t>(project.error.size(), 160))));
                 continue;
             }
             if (!project.build_in_solution)
             {
-                sink.note(std::format(
-                    "compose: project {} skipped (Build.0 not set for this "
-                    "configuration)",
-                    project.name));
+                sink.note(
+                    std::format(
+                        "compose: project {} skipped (Build.0 not set for this "
+                        "configuration)",
+                        project.name));
                 continue;
             }
             const ProjectCl* pcl = find_cl(project.name);
             if (pcl == nullptr || pcl->cl.empty())
             {
-                sink.note(std::format(
-                    "compose: project {} skipped (no cl resolved)",
-                    project.name));
+                sink.note(
+                    std::format(
+                        "compose: project {} skipped (no cl resolved)",
+                        project.name));
                 continue;
             }
 
@@ -601,34 +596,34 @@ namespace cg::msbuild::compose
             }
             catch (const std::exception& ex)
             {
-                sink.note(std::format(
-                    "compose: project {} skipped (bad raw json: {})",
-                    project.name,
-                    ex.what()));
+                sink.note(
+                    std::format(
+                        "compose: project {} skipped (bad raw json: {})",
+                        project.name,
+                        ex.what()));
                 continue;
             }
             const json::ValueView root = parsed->root();
-            const auto item_definition = root.get("cl_item_definition");
-            const auto top_props       = root.get("top_props");
+            const auto        item_definition = root.get("cl_item_definition");
+            const auto        top_props = root.get("top_props");
             const std::string project_dir =
-                top_props
-                    ? obj_str(*top_props, "MSBuildProjectDirectory")
-                    : "";
+                top_props ? obj_str(*top_props, "MSBuildProjectDirectory") : "";
             const std::string int_dir =
                 top_props ? obj_str(*top_props, "IntDir") : "";
             const auto tus = root.get("tus");
             if (!item_definition || !tus || !tus->is_array()
                 || project_dir.empty())
             {
-                sink.note(std::format(
-                    "compose: project {} skipped (payload missing fields)",
-                    project.name));
+                sink.note(
+                    std::format(
+                        "compose: project {} skipped (payload missing fields)",
+                        project.name));
                 continue;
             }
 
             // 模块感知预扫：工程内任一 TU 是模块单元（显式 CompileAs
             // 模块或模块扩展名命中）即感知——/ifcOutput 的发出条件
-            //（记录通道实证：纯普通工程不发、感知工程每 TU 都发）。
+            // （记录通道实证：纯普通工程不发、感知工程每 TU 都发）。
             const bool module_aware = [&]
             {
                 for (std::size_t i = 0; i < tus->size(); ++i)
@@ -638,25 +633,24 @@ namespace cg::msbuild::compose
                     {
                         continue;
                     }
-                    const TuValues values{*item_definition, *t};
+                    const TuValues    values{*item_definition, *t};
                     const std::string compile_as =
                         values.value({"compile_as", "CompileAs"});
-                    if (cg::util::ascii_iequals(compile_as, "CompileAsCppModule"))
+                    if (cg::util::ascii_iequals(
+                            compile_as,
+                            "CompileAsCppModule"))
                     {
                         return true;
                     }
                     if (compile_as.empty()
                         || cg::util::ascii_iequals(compile_as, "Default"))
                     {
-                        const std::string ext =
-                            lower_ext_of([&]() -> std::string
-                                         {
-                                             const std::string abs =
-                                                 obj_str(*t, "abs");
-                                             return !abs.empty()
-                                                        ? abs
-                                                        : obj_str(*t, "file");
-                                         }());
+                        const std::string ext = lower_ext_of(
+                            [&]() -> std::string
+                            {
+                                const std::string abs = obj_str(*t, "abs");
+                                return !abs.empty() ? abs : obj_str(*t, "file");
+                            }());
                         if (ext == ".ixx" || ext == ".cppm")
                         {
                             return true;
@@ -674,31 +668,33 @@ namespace cg::msbuild::compose
                     continue;
                 }
                 const std::string tu_file = obj_str(*tu, "file");
-                const std::string tu_abs  = obj_str(*tu, "abs");
+                const std::string tu_abs = obj_str(*tu, "abs");
                 if (tu_file.empty() && tu_abs.empty())
                 {
                     continue;
                 }
-                const std::string excluded = obj_str(
-                    *tu,
-                    "excluded_from_build");
+                const std::string excluded =
+                    obj_str(*tu, "excluded_from_build");
                 if (!excluded.empty()
                     && !cg::util::ascii_iequals(excluded, "false"))
                 {
-                    sink.note(std::format(
-                        "compose: {} skipped (ExcludedFromBuild={})",
-                        tu_file,
-                        excluded));
+                    sink.note(
+                        std::format(
+                            "compose: {} skipped (ExcludedFromBuild={})",
+                            tu_file,
+                            excluded));
                     continue;
                 }
 
-                const TuValues values{*item_definition, *tu};
+                const TuValues    values{*item_definition, *tu};
                 const std::string source = !tu_abs.empty() ? tu_abs : tu_file;
                 const bool        interface_tu = [&]
                 {
                     const std::string compile_as =
                         values.value({"compile_as", "CompileAs"});
-                    if (cg::util::ascii_iequals(compile_as, "CompileAsCppModule"))
+                    if (cg::util::ascii_iequals(
+                            compile_as,
+                            "CompileAsCppModule"))
                     {
                         return true;
                     }
@@ -712,8 +708,8 @@ namespace cg::msbuild::compose
                 }();
 
                 ClInvocation inv;
-                inv.cwd       = project_dir;
-                inv.real_cl   = pcl->cl;
+                inv.cwd = project_dir;
+                inv.real_cl = pcl->cl;
                 inv.include_env = include_env;
                 std::vector<std::string>& argv = inv.argv_utf8;
                 argv.push_back(pcl->cl);
@@ -721,15 +717,13 @@ namespace cg::msbuild::compose
                 // —— 开关合成（序 = CL task SwitchOrder 实证归纳）——
 
                 // 模块前置族（模块感知工程的常规趟也带：分写两 token）。
-                for (const std::string& dir :
-                     split_list(values.value(
+                for (const std::string& dir : split_list(values.value(
                          {"bmi_dirs", "AdditionalBMIDirectories"})))
                 {
                     argv.emplace_back("/ifcSearchDir");
                     argv.push_back(dir);
                 }
-                for (const std::string& dep :
-                     split_list(values.value(
+                for (const std::string& dep : split_list(values.value(
                          {"module_dependencies",
                           "AdditionalModuleDependencies"})))
                 {
@@ -743,8 +737,7 @@ namespace cg::msbuild::compose
                 }
 
                 // include 族（连写）。
-                for (const std::string& dir :
-                     split_list(values.value(
+                for (const std::string& dir : split_list(values.value(
                          {"include_dirs", "AdditionalIncludeDirectories"})))
                 {
                     argv.push_back("/I" + dir);
@@ -752,8 +745,8 @@ namespace cg::msbuild::compose
 
                 // 调试信息族。
                 {
-                    const std::string v =
-                        values.value({"debug_format", "DebugInformationFormat"});
+                    const std::string v = values.value(
+                        {"debug_format", "DebugInformationFormat"});
                     if (cg::util::ascii_iequals(v, "ProgramDatabase"))
                     {
                         argv.emplace_back("/Zi");
@@ -768,10 +761,11 @@ namespace cg::msbuild::compose
                     }
                     else if (!v.empty())
                     {
-                        sink.note(std::format(
-                            "compose: field DebugInformationFormat '{}' "
-                            "unmapped, skipped",
-                            v));
+                        sink.note(
+                            std::format(
+                                "compose: field DebugInformationFormat '{}' "
+                                "unmapped, skipped",
+                                v));
                     }
                 }
 
@@ -786,10 +780,11 @@ namespace cg::msbuild::compose
                     }
                     else
                     {
-                        sink.note(std::format(
-                            "compose: field WarningLevel '{}' unmapped, "
-                            "skipped",
-                            wl));
+                        sink.note(
+                            std::format(
+                                "compose: field WarningLevel '{}' unmapped, "
+                                "skipped",
+                                wl));
                     }
                 }
 
@@ -813,24 +808,21 @@ namespace cg::msbuild::compose
                 }
 
                 // 内建函数（true → /Oi；无否定形——false/空都不发）。
-                if (is_true(values.value(
-                        {"intrinsics", "IntrinsicFunctions"})))
+                if (is_true(values.value({"intrinsics", "IntrinsicFunctions"})))
                 {
                     argv.emplace_back("/Oi");
                 }
 
                 // defines 族：CL task 唯一分写值开关族（"/D" "NAME"）。
-                for (const std::string& name :
-                     split_list(values.value(
-                         {"defines", "PreprocessorDefinitions"})))
+                for (const std::string& name : split_list(
+                         values.value({"defines", "PreprocessorDefinitions"})))
                 {
                     argv.emplace_back("/D");
                     argv.push_back(name);
                 }
 
                 // undefines 族（连写）。
-                for (const std::string& name :
-                     split_list(values.value(
+                for (const std::string& name : split_list(values.value(
                          {"undefines", "UndefinePreprocessorDefinitions"})))
                 {
                     argv.push_back("/U" + name);
@@ -844,8 +836,7 @@ namespace cg::msbuild::compose
                     values.value({"string_pooling", "StringPooling"}),
                     "/GF",
                     "/GF-",
-                    tri_of(values.value(
-                        {"string_pooling", "StringPooling"})));
+                    tri_of(values.value({"string_pooling", "StringPooling"})));
 
                 // 最小重建（否定形 /Gm-）。
                 emit_tri(
@@ -855,12 +846,13 @@ namespace cg::msbuild::compose
                     values.value({"minimal_rebuild", "MinimalRebuild"}),
                     "/Gm",
                     "/Gm-",
-                    tri_of(values.value(
-                        {"minimal_rebuild", "MinimalRebuild"})));
+                    tri_of(
+                        values.value({"minimal_rebuild", "MinimalRebuild"})));
 
                 // 异常模型族。
                 {
-                    const std::string v = values.value({"eh", "ExceptionHandling"});
+                    const std::string v =
+                        values.value({"eh", "ExceptionHandling"});
                     if (cg::util::ascii_iequals(v, "Sync"))
                     {
                         argv.emplace_back("/EHsc");
@@ -879,10 +871,11 @@ namespace cg::msbuild::compose
                     }
                     else if (!v.empty())
                     {
-                        sink.note(std::format(
-                            "compose: field ExceptionHandling '{}' unmapped, "
-                            "skipped",
-                            v));
+                        sink.note(
+                            std::format(
+                                "compose: field ExceptionHandling '{}' unmapped, "
+                                "skipped",
+                                v));
                     }
                 }
 
@@ -902,16 +895,18 @@ namespace cg::msbuild::compose
                     {
                         argv.emplace_back("/MD");
                     }
-                    else if (cg::util::ascii_iequals(v, "MultiThreadedDebugDll"))
+                    else if (
+                        cg::util::ascii_iequals(v, "MultiThreadedDebugDll"))
                     {
                         argv.emplace_back("/MDd");
                     }
                     else if (!v.empty())
                     {
-                        sink.note(std::format(
-                            "compose: field RuntimeLibrary '{}' unmapped, "
-                            "skipped",
-                            v));
+                        sink.note(
+                            std::format(
+                                "compose: field RuntimeLibrary '{}' unmapped, "
+                                "skipped",
+                                v));
                     }
                 }
 
@@ -940,13 +935,11 @@ namespace cg::msbuild::compose
                     sink,
                     "TreatWChar_tAsBuiltInType",
                     values.value(
-                        {"treat_wchar_builtin",
-                         "TreatWChar_tAsBuiltInType"}),
+                        {"treat_wchar_builtin", "TreatWChar_tAsBuiltInType"}),
                     "/Zc:wchar_t",
                     "/Zc:wchar_t-",
                     tri_of(values.value(
-                        {"treat_wchar_builtin",
-                         "TreatWChar_tAsBuiltInType"})));
+                        {"treat_wchar_builtin", "TreatWChar_tAsBuiltInType"})));
 
                 // 运行时类型信息（否定形 /GR-）。
                 emit_tri(
@@ -956,25 +949,28 @@ namespace cg::msbuild::compose
                     values.value({"runtime_typeinfo", "RuntimeTypeInfo"}),
                     "/GR",
                     "/GR-",
-                    tri_of(values.value(
-                        {"runtime_typeinfo", "RuntimeTypeInfo"})));
+                    tri_of(
+                        values.value({"runtime_typeinfo", "RuntimeTypeInfo"})));
 
                 // 语言标准（C++ 与 C 同位）。
                 {
-                    const std::string cpp = cpp_std_switch(
-                        values.value({"language_standard", "LanguageStandard"}));
+                    const std::string cpp = cpp_std_switch(values.value(
+                        {"language_standard", "LanguageStandard"}));
                     if (!cpp.empty())
                     {
                         argv.push_back(cpp);
                     }
-                    else if (const std::string raw = values.value(
-                                 {"language_standard", "LanguageStandard"});
-                             !raw.empty() && !cg::util::ascii_iequals(raw, "Default"))
+                    else if (
+                        const std::string raw = values.value(
+                            {"language_standard", "LanguageStandard"});
+                        !raw.empty()
+                        && !cg::util::ascii_iequals(raw, "Default"))
                     {
-                        sink.note(std::format(
-                            "compose: field LanguageStandard '{}' unmapped, "
-                            "skipped",
-                            raw));
+                        sink.note(
+                            std::format(
+                                "compose: field LanguageStandard '{}' unmapped, "
+                                "skipped",
+                                raw));
                     }
                     const std::string c = c_std_switch(values.value(
                         {"language_standard_c", "LanguageStandard_C"}));
@@ -982,14 +978,17 @@ namespace cg::msbuild::compose
                     {
                         argv.push_back(c);
                     }
-                    else if (const std::string raw = values.value(
-                                 {"language_standard_c", "LanguageStandard_C"});
-                             !raw.empty() && !cg::util::ascii_iequals(raw, "Default"))
+                    else if (
+                        const std::string raw = values.value(
+                            {"language_standard_c", "LanguageStandard_C"});
+                        !raw.empty()
+                        && !cg::util::ascii_iequals(raw, "Default"))
                     {
-                        sink.note(std::format(
-                            "compose: field LanguageStandard_C '{}' unmapped, "
-                            "skipped",
-                            raw));
+                        sink.note(
+                            std::format(
+                                "compose: field LanguageStandard_C '{}' unmapped, "
+                                "skipped",
+                                raw));
                     }
                 }
 
@@ -997,7 +996,7 @@ namespace cg::msbuild::compose
                 {
                     const std::string v =
                         values.value({"conformance_mode", "ConformanceMode"});
-                    const Tri        t = tri_of(v);
+                    const Tri t = tri_of(v);
                     if (t == Tri::True)
                     {
                         argv.emplace_back("/permissive-");
@@ -1008,10 +1007,11 @@ namespace cg::msbuild::compose
                     }
                     else if (t == Tri::Unknown)
                     {
-                        sink.note(std::format(
-                            "compose: field ConformanceMode '{}' unmapped, "
-                            "skipped",
-                            v));
+                        sink.note(
+                            std::format(
+                                "compose: field ConformanceMode '{}' unmapped, "
+                                "skipped",
+                                v));
                     }
                 }
 
@@ -1021,8 +1021,8 @@ namespace cg::msbuild::compose
                         values.value({"pch_use", "PrecompiledHeader"});
                     const std::string through =
                         values.value({"pch_through", "PrecompiledHeaderFile"});
-                    const std::string file =
-                        values.value({"pch_file", "PrecompiledHeaderOutputFile"});
+                    const std::string file = values.value(
+                        {"pch_file", "PrecompiledHeaderOutputFile"});
                     if (cg::util::ascii_iequals(use, "Create"))
                     {
                         argv.push_back("/Yc" + through);
@@ -1031,12 +1031,15 @@ namespace cg::msbuild::compose
                     {
                         argv.push_back("/Yu" + through);
                     }
-                    else if (!use.empty() && !cg::util::ascii_iequals(use, "NotUsing"))
+                    else if (
+                        !use.empty()
+                        && !cg::util::ascii_iequals(use, "NotUsing"))
                     {
-                        sink.note(std::format(
-                            "compose: field PrecompiledHeader '{}' unmapped, "
-                            "skipped",
-                            use));
+                        sink.note(
+                            std::format(
+                                "compose: field PrecompiledHeader '{}' unmapped, "
+                                "skipped",
+                                use));
                     }
                     if (cg::util::ascii_iequals(use, "Create")
                         || cg::util::ascii_iequals(use, "Use"))
@@ -1059,8 +1062,7 @@ namespace cg::msbuild::compose
                         argv.emplace_back("/ifcOutput");
                         if (is_dir_like(v) && interface_tu)
                         {
-                            argv.push_back(
-                                v + file_name_of(source) + ".ifc");
+                            argv.push_back(v + file_name_of(source) + ".ifc");
                         }
                         else
                         {
@@ -1116,24 +1118,24 @@ namespace cg::msbuild::compose
                         || cg::util::ascii_iequals(v, "Level4"))
                     {
                         argv.push_back(
-                            "/external:W"
-                            + std::to_string(warning_tier(v)));
+                            "/external:W" + std::to_string(warning_tier(v)));
                     }
-                    else if (v.empty()
+                    else if (
+                        v.empty()
                         || cg::util::ascii_iequals(v, "InheritWarningLevel"))
                     {
                         // 空 = 属性默认档；Inherit = 主警告级同档
-                        //（含空主警告级回落 /W1 的同源默认）。
+                        // （含空主警告级回落 /W1 的同源默认）。
                         argv.push_back(
-                            "/external:W"
-                            + std::to_string(warning_tier(wl)));
+                            "/external:W" + std::to_string(warning_tier(wl)));
                     }
                     else if (!v.empty())
                     {
-                        sink.note(std::format(
-                            "compose: field ExternalWarningLevel '{}' "
-                            "unmapped, skipped",
-                            v));
+                        sink.note(
+                            std::format(
+                                "compose: field ExternalWarningLevel '{}' "
+                                "unmapped, skipped",
+                                v));
                     }
                 }
 
@@ -1159,15 +1161,16 @@ namespace cg::msbuild::compose
                     }
                     else if (!v.empty())
                     {
-                        sink.note(std::format(
-                            "compose: field CallingConvention '{}' unmapped, "
-                            "skipped",
-                            v));
+                        sink.note(
+                            std::format(
+                                "compose: field CallingConvention '{}' unmapped, "
+                                "skipped",
+                                v));
                     }
                 }
 
                 // 语言模式：显式/默认扩展名推断；接口单元的 /TP 垫末尾
-                //（FixupCLCompileOptions 的追加位——记录通道实证接口
+                // （FixupCLCompileOptions 的追加位——记录通道实证接口
                 // 单元的 /TP 在全部 ToolSwitch 之后）。
                 std::string trailing_tp;
                 {
@@ -1187,8 +1190,7 @@ namespace cg::msbuild::compose
                         argv.emplace_back("/interface");
                         trailing_tp = "/TP";
                     }
-                    else if (v.empty()
-                        || cg::util::ascii_iequals(v, "Default"))
+                    else if (v.empty() || cg::util::ascii_iequals(v, "Default"))
                     {
                         if (ext == ".c")
                         {
@@ -1206,31 +1208,29 @@ namespace cg::msbuild::compose
                     }
                     else
                     {
-                        sink.note(std::format(
-                            "compose: field CompileAs '{}' unmapped, skipped",
-                            v));
+                        sink.note(
+                            std::format(
+                                "compose: field CompileAs '{}' unmapped, skipped",
+                                v));
                     }
                 }
 
                 // 禁用警告族（连写，语言模式之后）。
-                for (const std::string& w :
-                     split_list(values.value(
+                for (const std::string& w : split_list(values.value(
                          {"disable_warnings", "DisableSpecificWarnings"})))
                 {
                     argv.push_back("/wd" + w);
                 }
 
                 // 强制包含族（连写）。
-                for (const std::string& f :
-                     split_list(values.value(
+                for (const std::string& f : split_list(values.value(
                          {"forced_includes", "ForcedIncludeFiles"})))
                 {
                     argv.push_back("/FI" + f);
                 }
 
                 // AdditionalOptions：逐 token 垫在全部开关之后。
-                for (const std::string& token :
-                     split_whitespace(values.value(
+                for (const std::string& token : split_whitespace(values.value(
                          {"additional_options", "AdditionalOptions"})))
                 {
                     argv.push_back(token);

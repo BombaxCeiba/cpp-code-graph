@@ -11,19 +11,15 @@ module;
 #include <shellapi.h>
 #endif
 // clang-format on
-// capture.db 的读写经 sqlpp23：表模型必须以经典头形态在本单元全局
-// 片段可见（MSVC 上定义进命名模块再跨模块导入的表模板会让 IFC 读取
-// 器崩溃），故 include capture.tables.h。残留的 sqlite3 C API 面有两
-// 个白名单接缝：bootstrap_capture_db 的 PRAGMA journal_mode 探测与
-// 幂等 DDL（sqlpp23 无 schema 迁移 DSL、PRAGMA 无 ORM 旋钮，经
-// connection 的原生句柄调用），以及 SQLITE_OPEN_* 旗标宏与
-// sqlite3_busy_timeout（宏不跨模块边界，连接器自身无超时旋钮）。include
-// 面由 cg_core 的 PUBLIC cg::sqlite3 链接传递（自取 amalgamation，头
-// 目录 PUBLIC 暴露）。sqlite3.h 自带 extern "C"，函数声明跨单元重复
-// 无 ODR 风险，与 db.store 的全局片段属主并行不悖。
+// capture.db 的读写经 sqlpp23，表模型由 import cg.msbuild.tables 取得。
+// 残留的 sqlite3 C API 面有两个白名单接缝：bootstrap_capture_db 的
+// PRAGMA journal_mode 探测与幂等 DDL（sqlpp23 无 schema 迁移 DSL、PRAGMA
+// 无 ORM 旋钮，经 connection 的原生句柄调用），以及 SQLITE_OPEN_* 旗标宏
+// 与 sqlite3_busy_timeout（宏不跨模块边界，连接器自身无超时旋钮）。include
+// 面由 cg_core 的 PUBLIC cg::sqlite3 链接传递（自取 amalgamation，头目录
+// PUBLIC 暴露）。sqlite3.h 自带 extern "C"，函数声明跨单元重复无 ODR 风险，
+// 与 db.store 的全局片段属主并行不悖。
 #include <sqlite3.h>
-
-#include "capture.tables.h"
 
 /**
  * @module cg.msbuild.wrap
@@ -71,6 +67,7 @@ import cg.util.cstd;
 import cg.msbuild.translate;
 import sqlpp23.core;
 import sqlpp23.sqlite3;
+import cg.msbuild.tables;
 
 export namespace cg::msbuild
 {
@@ -766,7 +763,7 @@ export namespace cg::msbuild
             // 仍记原始值——解释器前缀只属于拉起形态，不属于记录契约。
             const std::string real_cl_lower =
                 cg::util::ascii_lower(real_cl_utf8);
-            std::wstring      cmdline;
+            std::wstring cmdline;
             if (real_cl_lower.ends_with(".py"))
             {
                 cmdline += L"python ";

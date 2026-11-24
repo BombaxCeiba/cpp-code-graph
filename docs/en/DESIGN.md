@@ -24,7 +24,13 @@ overlays, PDG/taint, detect-changes, incremental watch mode, MCP/serve.
 100% named modules, C++23, `import std;` everywhere. Every project source file
 is a module unit with extension `.ixx`. Third-party headers appear ONLY inside
 global module fragments (GMF), each owned by exactly one module (single-owner
-rule, see §10). Module interfaces stay small; the bulk lives in small
+rule, see §10). A header that contains only macros and no declarations is not
+bound by this rule: macros cannot be exported across modules, so every unit
+that uses one includes it in its own global module fragment without creating
+duplicate declarations; the name-tag macro header
+`sqlpp23/core/name/create_name_tag.h` currently appears in the global module
+fragments of the four `cg.db.tables` submodules and of `cg.msbuild.tables`.
+Module interfaces stay small; the bulk lives in small
 dotted-name submodules under each umbrella (former partitions; the
 dotted-name module refactor dissolved the partition syntax).
 
@@ -33,7 +39,7 @@ dotted-name module refactor dissolved the partition syntax).
                      |
                   cg.cli  (src/cli/cli.ixx)
                  /     \
-           cg.graph    cg.db* (sqlpp23/sqlite3 only via cg.db)
+           cg.graph    cg.db* (sqlpp23/sqlite3 imported directly, see below)
           /   |    \
    cg.extract cg.db cg.util
         |
@@ -45,10 +51,20 @@ Strict layering: a module may import only modules in layers strictly below it
 in the table. No cycles; the build system enforces it de facto because module
 BMIs encode the import graph.
 
+The two sqlpp23 modules (`sqlpp23.core`, `sqlpp23.sqlite3`) have no wrapper;
+the units that use them import them directly: in the database layer the four
+`cg.db.tables` submodules, `cg.db.store` and the five `cg.db.query`
+submodules; in the `cg.msbuild` layer `cg.msbuild.tables`, `cg.msbuild.wrap`
+and `cg.msbuild.pipeline.wraplog`; plus `cg.analysis.external` (one delete
+statement on the connection). `sqlite3.h` is included in the global module
+fragments of `cg.db.store`, `cg.msbuild.wrap` and
+`cg.msbuild.pipeline.wraplog` (and of the schema-mirror test unit).
+
 | Module | File(s) | Imports (project) | GMF third-party includes | Responsibility |
 |---|---|---|---|---|
 | `cg.util` | `src/util/util.ixx` (+ `cg.util.json` = `src/util/util.json.ixx`, `cg.util.platform` = `src/util/util.platform.ixx`, re-exported by the umbrella) | — | `cpp_yyjson.hpp` (in `cg.util.json` only, with the assert shim of §10.2); platform headers (`io.h`/`windows.h` or `unistd.h`, in `cg.util.platform` only) | version string; FNV-1a 64; qualified-name split/join; path normalization (forward slashes, lowercase drive); `PathCaseCache` + on-disk case re-spelling; in-memory `Interner` cache; minimal JSON read/write facade over yyjson-cpp; `cg.util.platform` console-vs-pipe stdin probe (the one place OS APIs may appear) |
-| `cg.db` | `src/db/db.ixx` + `cg.db.schema` (`db.schema.ixx`), `cg.db.store` (`db.store.ixx`), `cg.db.query` (`db.query.ixx`) | — | `sqlite3.h`, `sqlpp23/core/name/create_name_tag.h` (macro-only) | SQLite via sqlpp23: open/PRAGMAs/DDL, string interning table, upserts (files/symbols/edges/includes/imports), per-file purge, all lookups and traversal-shaped queries, stats. Knows nothing of libclang |
+| `cg.db` | `src/db/db.ixx` + `cg.db.schema` (`db.schema.ixx`), `cg.db.store` (`db.store.ixx`), `cg.db.query` (`db.query.ixx`) | — | `sqlite3.h` | SQLite via sqlpp23: open/PRAGMAs/DDL, string interning table, upserts (files/symbols/edges/includes/imports), per-file purge, all lookups and traversal-shaped queries, stats. Knows nothing of libclang |
+| `cg.db.tables` | `src/db/db.tables.ixx` (entry point; declares nothing itself and only re-exports the four submodules below; not re-exported by the umbrella `cg.db`) + `cg.db.tables.core` (`db.tables.core.ixx`), `cg.db.tables.graph` (`db.tables.graph.ixx`), `cg.db.tables.sites` (`db.tables.sites.ixx`), `cg.db.tables.analysis` (`db.tables.analysis.ixx`) | — | `sqlpp23/core/name/create_name_tag.h` (macro-only) | sqlpp23 table models (namespace `cg::db::tab`), hand-written shape, tables do not reference each other: `core` holds metadata and strings, the kind/edge-type dictionaries, a read-only model of the sqlite catalog table, file registry, fingerprints, failure entries and realtime coordination, plus every alias tag used for aggregates and joins; `graph` holds the symbols/edges/includes/imports tables; `sites` holds type hints and call sites; `analysis` holds propagation slots, passthrough wrappers, external parameter args and external invokes, and symbol contributions. Units that name a table model `import cg.db.tables;` themselves |
 | `cg.clang` | `src/clang/clang.ixx` + `cg.clang.loader`, `cg.clang.capi` (`clang.capi.ixx`), `cg.clang.driver`, `cg.clang.tu` (`clang.tu.ixx`), `cg.clang.compile_db` (`clang.compile_db.ixx`), `cg.clang.bmi` | `cg.util` | `clang-c/Index.h` (in `cg.clang.capi` only) | `cg.clang.capi` re-exports CX types + RAII (`Str`, `Index`, `Tu`) + thin cursor facade (kind/spelling/location/children/…); `cg.clang.tu` parse + diagnostics; `cg.clang.compile_db` reads compile_commands.json, tokenizes command strings, builds per-TU argv |
 | `cg.extract` | `src/extract/extract.ixx` + `cg.extract.model` (`extract.model.ixx`), `cg.extract.visitor` (`extract.visitor.ixx`) | `cg.clang`, `cg.util` | — | `cg.extract.model` plain record types (`SymbolRec`, `EdgeRec`, `IncludeRec`, `ImportRec`, `TuExtract`) + THE `unique_key` builder (single source of truth, §4); `cg.extract.visitor` walks one TU cursor tree and produces records (named-module imports from `CXCursor_ModuleImportDecl`, main-file filter). Pure: no DB, no I/O |
 | `cg.analysis` | `src/analysis/analysis.ixx` + `cg.analysis.model` (`analysis.model.ixx`), `cg.analysis.collect` (`analysis.collect.ixx`), `cg.analysis.points_to` (`analysis.points_to.ixx`), `cg.analysis.propagate` (`analysis.propagate.ixx`), `cg.analysis.dispatch` (`analysis.dispatch.ixx`) | `cg.clang`, `cg.db`, `cg.util` | — | Dynamic-dispatch analysis (schema v11). `model`: pure data + confidence ladder + the byte-identical `unique_key` builders (analysis cannot import `cg.extract`); `collect`: a second directed AST walk producing `TuAnalysis` (L0 clues: declaration, `new T`, aggregates, `make_unique/shared`, casts, `&obj`, arguments; pure data, no cursors leave the worker); `points_to`: the `TypeOracle` seam (stub today, whole-program pointer/alias analysis replaces only this module); `propagate`: L1 intra-function alias/return flow + L2 global worklist fixed point over persisted hints/call sites (bounded, deterministic); `dispatch`: override-family ∩ dynamic type set → `virtual_dispatch` edges + candidate set + honest fallback. **Dependency fence (design ruling): analysis → db/clang only; graph/cli → analysis; extract/db/clang must never import analysis** (enforced by `tests/portability_scan.cmake`) |
@@ -299,10 +315,16 @@ Consumption rules (single-owner, GMF include sites):
   structs use the macro-only header in the GMF (exactly sqlpp23's own
   module-test pattern). Gotchas that are LAW (probe-hit): `std::int64_t` not
   `int64_t`; select results stored non-const; `order_by(col.asc())`.
-- sqlite3.h is GMF-included by `cg.db` units only for SQLITE_OPEN_* flags and
-  macros; macros do not cross module boundaries — re-export needed constants
-  as `inline constexpr` (probe-proven: only `SQLITE_OPEN_READWRITE` and
-  `SQLITE_OPEN_CREATE` are ever needed).
+- sqlite3.h is included in the global module fragments of three units,
+  `cg.db.store`, `cg.msbuild.wrap` and `cg.msbuild.pipeline.wraplog` (and of
+  the schema-mirror test unit). Macros do not cross module boundaries, so a
+  unit that uses the SQLITE_OPEN_* flag macros has to include it itself;
+  `cg.db.store` additionally calls sqlite3 C API functions directly (binding
+  and running prepared statements, statement tracing), `cg.msbuild.wrap`
+  additionally runs raw SQL statements and calls `sqlite3_busy_timeout`, and
+  `cg.msbuild.pipeline.wraplog` only calls `sqlite3_busy_timeout`. The only
+  flags used under src are `SQLITE_OPEN_READWRITE` and
+  `SQLITE_OPEN_CREATE`.
 - yyjson-cpp is reachable only through `cg.util.json`'s facade.
 - libclang is reachable only through `cg.clang.capi` exports.
 - SQLite 3.54.0 amalgamation is a DOCUMENTED upgrade path only — do not

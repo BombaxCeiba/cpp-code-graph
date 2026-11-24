@@ -1,15 +1,10 @@
-module;
-#include "../db/db.tables.h"
-
 /**
  * @module cg.graph.headdomain
  *
  * @brief 头级缓存域（值语义域对象）：缓存实例、闭包摘要快照、主文件
  *        锚哈希面、包含差量放行集与指令摘要写回载荷。
  *
- * @internal db.tables.h 置于全局模块片段：本单元导入 cg.db，MSVC 要求
- *           sqlpp23 表模型定义在此可见（同 cg.graph.build 的纪律）。
- *           cg.graph.build 以值成员嵌入并再导出本单元。headcache_ 以
+ * @internal cg.graph.build 以值成员嵌入并再导出本单元。headcache_ 以
  *           optional 真值嵌入（空 = 关闭）；HeadCache 构造注入的闭包
  *           快照指针指向同域兄弟成员，地址稳定性随 Indexer 从不搬移
  *           成立，域对象因此删除拷贝与移动。

@@ -1,7 +1,3 @@
-module;
-#include "../db/db.tables.h"
-#include "../msbuild/capture.tables.h"
-
 /**
  * @module cg.cli.msbuild
  *
@@ -9,13 +5,7 @@ module;
  *
  * @internal
  * 曾为实现单元；分区语法退役改为接口模块——无 BMI 单元触发 C2801 的规避
- * 手法随之退役（std BMI 宿主影子补丁已承载根治）。db.tables.h
- * 置于全局模块片段：本单元 导入 cg.db，MSVC 要求 sqlpp23
- * 表模型定义在此可见，以合并模块记录的 模板特化（完整机理见
- * db.tables.h）。capture.tables.h 同理：本单元 调用 cg.msbuild 的 capture
- * 读写（read_wrap_log 等导出内联函数，其
- * 语句构造在调用方单元实例化表模板），MSVC 要求 capture 表模型同样
- * 在本单元全局片段可见（机理与 db 侧同一探针矩阵结论）。
+ * 手法随之退役（std BMI 宿主影子补丁已承载根治）。
  */
 export module cg.cli.msbuild;
 
@@ -95,6 +85,19 @@ export namespace cg::cli
                     e.extracted_at.empty() ? std::string{"?"} : e.extracted_at);
             }
             return 0;
+        }
+
+        /** @brief 按工程名在解决方案成员清单里查找成员，找不到返回空指针。 */
+        [[nodiscard]]
+        auto find_sln_member(
+            const std::vector<cg::msbuild::SlnProject>& members,
+            const std::string& name) -> const cg::msbuild::SlnProject*
+        {
+            const auto member = std::ranges::find(
+                members,
+                name,
+                &cg::msbuild::SlnProject::name);
+            return member == members.end() ? nullptr : &*member;
         }
 
         /**
@@ -333,13 +336,14 @@ export namespace cg::cli
             // 臂，测试/验证设施）；--full-build 真编（金标准对账逃生口）。
             const bool full_build = inv.msbuild_full_build;
             const bool record_run = inv.msbuild_record;
-            const bool evaluate   = !full_build && !record_run;
+            const bool evaluate = !full_build && !record_run;
             // ExtractMode 只对构建通道有意义（求值分支不构造 ExtractParams）。
             const cg::msbuild::ExtractMode mode =
                 full_build ? cg::msbuild::ExtractMode::FullBuild
                            : cg::msbuild::ExtractMode::Record;
-            const std::string mode_text = full_build ? "full-build"
-                                      : (record_run ? "record" : "evaluate");
+            const std::string mode_text =
+                full_build ? "full-build"
+                           : (record_run ? "record" : "evaluate");
 
             bool any_aborted = false;
             for (const cg::msbuild::ConfigPlatform& cp : configs)
@@ -401,12 +405,11 @@ export namespace cg::cli
                         ? std::string{}
                         : cg::msbuild::detail::new_capture_log_path(cdb_dir);
                 const std::string sandbox_root =
-                    record_run
-                        ? cg::util::norm_path(
-                              (fs::path{config_dir} / "msbuild-sandbox")
-                                  .lexically_normal()
-                                  .generic_string())
-                        : std::string{};
+                    record_run ? cg::util::norm_path(
+                                     (fs::path{config_dir} / "msbuild-sandbox")
+                                         .lexically_normal()
+                                         .generic_string())
+                               : std::string{};
                 const std::string int_dir =
                     record_run ? sandbox_root + "/int/" : std::string{};
                 const std::string out_dir =
@@ -429,7 +432,8 @@ export namespace cg::cli
                     run_start = std::filesystem::file_time_type::clock::now();
                 }
 
-                // 工具链发现缓存（项目文件事件联动）：注册表已存上次解析的 msbuild/cl
+                // 工具链发现缓存（项目文件事件联动）：注册表已存上次解析的
+                // msbuild/cl
                 // 绝对路径；路径仍在盘上、且本轮没有显式覆盖（--msbuild/--cl）
                 // 与 MSBuild 调参（--msbuild-args 可能改写 VCToolsInstallDir 的
                 // 求值结果）时直接复用，省掉 vswhere 与逐工程 -getProperty 的
@@ -473,18 +477,6 @@ export namespace cg::cli
                                     "{}|{}",
                                     cp.configuration,
                                     cp.platform));
-                        const auto find_member =
-                            [&members](
-                                const std::string& name)
-                            -> const cg::msbuild::SlnProject*
-                        {
-                            const auto member = std::ranges::find(
-                                members,
-                                name,
-                                &cg::msbuild::SlnProject::name);
-                            return member == members.end() ? nullptr
-                                                           : &*member;
-                        };
                         if (!prior->cl_projects.empty())
                         {
                             for (const cg::msbuild::ProjectClEntry& pc :
@@ -495,7 +487,7 @@ export namespace cg::cli
                                     continue;
                                 }
                                 const cg::msbuild::SlnProject* member =
-                                    find_member(pc.project);
+                                    find_sln_member(members, pc.project);
                                 if (member == nullptr
                                     || !fs::is_regular_file(
                                         fs::path{pc.cl},
@@ -595,11 +587,7 @@ export namespace cg::cli
                     }
                     else
                     {
-                        std::println(
-                            std::cerr,
-                            "  cdb {} (log {})",
-                            cdb,
-                            log);
+                        std::println(std::cerr, "  cdb {} (log {})", cdb, log);
                     }
                     std::println(std::cerr, "  msbuild {}", msbuild_exe);
                     if (discovery_cached)
@@ -647,14 +635,14 @@ export namespace cg::cli
                 // wrap 日志读取收进 !evaluate 守卫，泄漏扫描本就只在记录
                 // 通道有意义。两分支产出统一的 invocations 进共享翻译段。
                 std::vector<cg::msbuild::ClInvocation> invocations;
-                std::size_t eval_project_total  = 0;
-                std::size_t eval_project_failed = 0;
+                std::size_t                            eval_project_total = 0;
+                std::size_t                            eval_project_failed = 0;
                 // 刷新快照（内容哈希快照门）：求值分支在会话成功后构建，真
                 // 正落盘在配置循环尾部（cdb 写出、索引尾、注册表条目全
                 // 部成功之后）——失败保旧同步保快照，任何中途失败/异常
                 // 都不会带着新快照留下旧语料。
                 std::optional<cg::msbuild::eval::RefreshSnapshot>
-                    pending_snapshot;
+                                     pending_snapshot;
                 cg::msbuild::WrapLog capture; // 构建通道填充；求值恒空
                 if (evaluate)
                 {
@@ -662,8 +650,8 @@ export namespace cg::cli
                     // 组装器合成 argv。沙箱/桩/捕获日志/泄漏扫描全部不
                     // 出现：不跑构建、不桩化工具，这正是快的来源。——
                     const std::optional<cg::msbuild::eval::EvalRequest>
-                        eval_request = cg::msbuild::eval::
-                            build_evaluate_request(
+                        eval_request =
+                            cg::msbuild::eval::build_evaluate_request(
                                 msbuild_exe,
                                 input,
                                 cp.configuration,
@@ -687,15 +675,16 @@ export namespace cg::cli
                                 "failed)",
                                 msbuild_exe);
                         }
-                        else if (cg::msbuild::eval::vc_targets_dir_of(vs_root)
-                                     .empty())
+                        else if (
+                            cg::msbuild::eval::vc_targets_dir_of(vs_root)
+                                .empty())
                         {
-                            std::string candidates;
+                            std::string     candidates;
                             std::error_code list_ec;
                             for (const fs::directory_entry& d :
                                  fs::directory_iterator(
-                                     fs::path{vs_root} / "MSBuild"
-                                                       / "Microsoft" / "VC",
+                                     fs::path{vs_root} / "MSBuild" / "Microsoft"
+                                         / "VC",
                                      list_ec))
                             {
                                 const std::string name =
@@ -712,12 +701,12 @@ export namespace cg::cli
                                 }
                                 candidates += name;
                                 candidates += fs::is_regular_file(
-                                                 d.path()
-                                                     / "Microsoft.Cpp."
-                                                       "Default.props",
-                                                 props_ec)
-                                                 ? "(props-ok)"
-                                                 : "(incomplete)";
+                                                  d.path()
+                                                      / "Microsoft.Cpp."
+                                                        "Default.props",
+                                                  props_ec)
+                                                  ? "(props-ok)"
+                                                  : "(incomplete)";
                             }
                             hint = std::format(
                                 "no VC targets directory under "
@@ -726,9 +715,8 @@ export namespace cg::cli
                                 "Microsoft.Cpp.Common.props (candidates: "
                                 "{})",
                                 vs_root,
-                                candidates.empty()
-                                    ? std::string{"<none found>"}
-                                    : candidates);
+                                candidates.empty() ? std::string{"<none found>"}
+                                                   : candidates);
                         }
                         else
                         {
@@ -763,7 +751,7 @@ export namespace cg::cli
                     }
                     const cg::msbuild::eval::EvalOutcome outcome =
                         cg::msbuild::eval::evaluate(*eval_request);
-                    eval_project_total  = outcome.projects.size();
+                    eval_project_total = outcome.projects.size();
                     eval_project_failed = outcome.failed_projects;
                     // 工程级披露先于中止判定（通道级失败时已收到的工程
                     // 产物同样如实披露）：部分失败逐条 stderr；缺
@@ -804,9 +792,8 @@ export namespace cg::cli
                             "for {}: {})",
                             stem,
                             outcome.error.empty()
-                                ? std::string{
-                                      "every member project failed to "
-                                      "evaluate"}
+                                ? std::string{"every member project failed to "
+                                              "evaluate"}
                                 : outcome.error);
                         any_aborted = true;
                         continue;
@@ -831,17 +818,16 @@ export namespace cg::cli
                         {
                             continue;
                         }
-                        pc.active_cfg =
-                            echo->active_platform.empty()
-                                ? echo->active_cfg
-                                : echo->active_cfg + "|"
-                                      + echo->active_platform;
+                        pc.active_cfg = echo->active_platform.empty()
+                                            ? echo->active_cfg
+                                            : echo->active_cfg + "|"
+                                                  + echo->active_platform;
                         pc.in_build = echo->build_in_solution;
                     }
                     // 输入身份快照（哈希门的写侧素材）：文件哈希此刻与
                     // 求值所见同源；写回在循环尾部成功路径。
-                    pending_snapshot = cg::msbuild::eval::
-                        build_refresh_snapshot(
+                    pending_snapshot =
+                        cg::msbuild::eval::build_refresh_snapshot(
                             msbuild_exe,
                             primary_cl,
                             *eval_request,
@@ -850,10 +836,7 @@ export namespace cg::cli
                     {
                         for (const std::string& note : compose_diary.notes)
                         {
-                            std::println(
-                                std::cerr,
-                                "ccg msbuild: {}",
-                                note);
+                            std::println(std::cerr, "ccg msbuild: {}", note);
                         }
                         if (outcome.mismatches > 0)
                         {
@@ -904,9 +887,7 @@ export namespace cg::cli
                     // 统 include 目录）。空值不拦截：cdb 照常产出，缺的是
                     // -imsvc 物化面，索引侧按 per-TU 失败如实呈现；此处只
                     // 给出可行动的修复路径。
-                    if (cg::util::cstd::get_env("INCLUDE")
-                            .value_or("")
-                            .empty())
+                    if (cg::util::cstd::get_env("INCLUDE").value_or("").empty())
                     {
                         std::println(
                             std::cerr,
@@ -960,9 +941,8 @@ export namespace cg::cli
                         // 的产物）在记录模式属预期——替身零写盘，下游产物根本
                         // 不存在，复制/校验步骤必然失败；编译命令捕获不受影
                         // 响。退出码语义不变，仅提示归类。
-                        const std::string build_text =
-                            cg::util::ascii_lower(
-                                extract.out + "\n" + extract.err);
+                        const std::string build_text = cg::util::ascii_lower(
+                            extract.out + "\n" + extract.err);
                         const bool exec_failure =
                             build_text.find("msb3073") != std::string::npos
                             || (build_text.find("exited with code")
@@ -998,8 +978,7 @@ export namespace cg::cli
                                     stem);
                             }
                         }
-                        else if (!full_build
-                                 && !inv.msbuild_allow_failure)
+                        else if (!full_build && !inv.msbuild_allow_failure)
                         {
                             // --allow-failure：用户明示接受非零退出码（部署断
                             // 言/测试工程兜底检查等对沙盒不友好的自定义
@@ -1052,8 +1031,7 @@ export namespace cg::cli
                                     total > 80)
                                 {
                                     std::size_t seen = 0;
-                                    for (std::size_t i = combined.size();
-                                         i > 0;
+                                    for (std::size_t i = combined.size(); i > 0;
                                          --i)
                                     {
                                         if (combined[i - 1] == '\n')
@@ -1436,8 +1414,7 @@ export namespace cg::cli
                             // 部分失败的如实计数（成功工程产物照常组装）。
                             out.set(
                                 "failed_projects",
-                                static_cast<std::int64_t>(
-                                    eval_project_failed));
+                                static_cast<std::int64_t>(eval_project_failed));
                         }
                         if (record_run)
                         {

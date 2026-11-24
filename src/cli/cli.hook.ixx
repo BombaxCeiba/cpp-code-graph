@@ -18,24 +18,26 @@
  *   失败）。重活经派生的 ccg 子进程运行（update + changes / stats），
  *   使机器 JSON 从管道到达而不与本进程自身的 stdout 契约混淆
  *   （std::print 绕过任何 cout rdbuf 交换）。
- *
- * @internal db.tables.h 置于全局模块片段：本单元查询 cg.db 的影响面
- * 与统计，MSVC 要求 sqlpp23 表模型定义在此可见，以合并模块记录的
- * 模板特化（完整机理见 db.tables.h）。
  */
-module;
-#include "../db/db.tables.h"
-
 export module cg.cli.hook;
 
 import std;
 import cg.util;
 import cg.util.cstd;
 import cg.util.shellscan;
-import cg.db;
-import cg.graph;
-import cg.cli.parse;
-import cg.cli.render;
+import cg.db.schema;
+import cg.db.store;
+import cg.db.query.lookup;
+import cg.db.query.members;
+import cg.db.query.stats;
+import cg.db.query.dumpkeys;
+import cg.graph.traverse.model;
+import cg.graph.traverse.queries;
+import cg.graph.traverse.changes;
+import cg.cli.parse.model;
+import cg.cli.parse.opts;
+import cg.cli.parse.usage;
+import cg.cli.render.base;
 import cg.cli.layout;
 
 export namespace cg::cli

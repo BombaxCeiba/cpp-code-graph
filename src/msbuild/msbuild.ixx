@@ -1,21 +1,15 @@
-module;
-// capture 表模型置于全局模块片段：本单元重导出 wrap/pipeline，二者
-// 的导出内联函数（capture 读写）携带 capture 表模板的实例化记录；
-// MSVC 合并这些记录时要求表模型定义在本单元的全局片段可见（与
-// db.tables.h 同一探针矩阵结论，机理详见 capture.tables.h）。
-#include "capture.tables.h"
-
 /**
  * @module cg.msbuild
  *
- * @brief MSBuild 层的主接口：伞形重导出本层全部子模块。
+ * @brief MSBuild 层的主接口：伞形重导出本层除表模型模块外的全部子模块。
  *
  * 本层是设计上的 Windows 专属能力；代码本身是纯文本处理，平台洁净。
- * 子模块分工——cg.msbuild.translate（cl 方言编译命令适配器：cl 风格
- * flags 原样保留、供 --driver-mode=cl 重放）、cg.msbuild.wrap（ccg.exe
- * 内部的 CLToolExe 包装模式）、cg.msbuild.pipeline（发现、编排、注册表）、
- * cg.msbuild.eval（求值通道客户端：发现链推导 + cshost 桥上的
- * MsbuildEval 会话驱动与事件流消费）。
+ * 子模块分工——cg.msbuild.tables（采集库的 sqlpp23 表模型，不经本伞再导出，用到
+ * 表模型名字的单元自己导入）、cg.msbuild.translate（cl 方言编译命令适配器：cl
+ * 风格 flags 原样保留、供 --driver-mode=cl 重放）、cg.msbuild.wrap（ccg.exe 内
+ * 部的 CLToolExe 包装模式）、cg.msbuild.pipeline（发现、编排、注册表）、
+ * cg.msbuild.eval（求值通道客户端：发现链推导 + cshost 桥上的 MsbuildEval 会话
+ * 驱动与事件流消费）。
  *
  * @internal
  * 适配器的契约：cl 风格 flags 逐字保留进入编译数据库，仅在重放侧注入

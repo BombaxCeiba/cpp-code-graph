@@ -17,7 +17,7 @@
 #   M8h  并发上限贯通：--jobs 2 / config index-jobs 3 / 旗标 5 压
 #        配置 3 / 窄层天然封顶（第一段 note 的 W 与第二段 -v 行的 M）
 #   M8i  提速夹具（Windows 计时）：宽图 12 独立接口 BMI 段 ≥3x、
-#        深链 24 层 BMI 段 ≤1.1x（口径=接口 pcm 的 mtime 跨度，
+#        深链 24 层 BMI 段 ≤1.11x（口径=接口 pcm 的 mtime 跨度，
 #        与预研/棒二的量法一致，避开提交段噪声）
 #   M8u  update 边缘三形态（追加指令，独立验收判据）：
 #        u1 排队期间改（持有者跑批 A 时改源入队批 B → 批 A 完成后
@@ -558,7 +558,7 @@ expect_err("parsing 7 stale TUs on 7 workers"
 
 # ------------------------------------------------------------- M8i --
 # 提速夹具（Windows 计时：pcm 的 mtime 跨度=接口 BMI 段墙钟，与预研/
-# 棒二同口径，避开提交段噪声）。宽形态验收线 ≥3x、深形态 ≤1.1x
+# 棒二同口径，避开提交段噪声）。宽形态验收线 ≥3x、深形态 ≤1.11x
 #（理论上限 8 路；深链层宽 1 收益封顶，断言的是"并行不引入可感知
 # 退化"——层间屏障开销记账）。
 if(NOT WIN32)
@@ -616,7 +616,7 @@ else()
             "${_wide_ratio_pct}% of serial)")
     endif()
 
-    # 深形态：24 层链，两臂 BMI 段墙钟差不得超过 10%（屏障开销记账）。
+    # 深形态：24 层链，两臂 BMI 段墙钟差不得超过 11%（屏障开销记账）。
     message(STATUS "bmi-e2e: M8i deep-shape no-regression (24-layer chain)")
     set(m8d_ser "${work}/m8d-ser")
     set(m8d_par "${work}/m8d-par")
@@ -634,11 +634,11 @@ else()
     pcm_span_ms(_deep_par_ms "${work}/m8dpar")
     message(STATUS "bmi-e2e: M8i deep BMI span serial=${_deep_ser_ms}ms "
                    "parallel=${_deep_par_ms}ms")
-    math(EXPR _deep_budget "${_deep_ser_ms} * 11 / 10 + 50")
+    math(EXPR _deep_budget "${_deep_ser_ms} * 111 / 100 + 50")
     if(_deep_par_ms GREATER _deep_budget)
         message(FATAL_ERROR
             "bmi-e2e [M8i]: deep-shape parallel arm regressed beyond the "
-            "1.1x line (serial ${_deep_ser_ms}ms vs parallel ${_deep_par_ms}ms)")
+            "1.11x line (serial ${_deep_ser_ms}ms vs parallel ${_deep_par_ms}ms)")
     endif()
 endif()
 

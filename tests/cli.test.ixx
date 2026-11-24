@@ -1,10 +1,4 @@
 module;
-// db.tables.h 放在全局模块片段：本单元 import cg.db，而 MSVC 要求 sqlpp23
-// 的表模型定义在此处可见，才能合并该模块记录的模板特化（完整缘由见
-// db.tables.h）。 capture.tables.h 在 cg.msbuild 侧同理：本单元 import
-// cg.cli，其再导出链携带会实例化 capture 表模板的读写 inline 函数。
-#include "../src/db/db.tables.h"
-#include "../src/msbuild/capture.tables.h"
 // 进程内 hook 测试用的原始 fd 重定向（std::print 写向
 // C 的 stdout 流，换 iostream 缓冲区捕获不到它）。
 #include <cstdio>

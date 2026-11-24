@@ -35,14 +35,7 @@
  * PCH/强制包含/命名模块 TU 不参与缓存（这些输入（PCH 字节、pcm 内容）
  * 不在任何内容哈希内——宁可 miss）：is_module_tu 或 pch.identity 非空的
  * 条目查询恒 miss、记录恒跳过。
- *
- * db.tables.h 置于全局模块片段：本单元导入 cg.db，MSVC 要求 sqlpp23 表
- * 模型定义在此可见，以合并模块记录的模板特化（完整机理见 db.tables.h；
- * graph.traverse 同款纪律）。
  */
-module;
-#include "../db/db.tables.h"
-
 export module cg.graph.headcache;
 
 import std;
@@ -50,6 +43,34 @@ import cg.util;
 import cg.util.cstd;
 import cg.db;
 import cg.extract.model;
+
+namespace
+{
+    /**
+     * @brief 让 std::format 一族在本单元的第一次实例化落在这段常量的初始化上。
+     *
+     * @internal clang 23.1.5 配 libc++ 时，本单元去掉这段常量，前端就在实例化
+     *           std::format 一族的格式串检查模板（basic_format_string 的构造函
+     *           数与 __handles_）时访问违例，重编五次结果相同。崩的位置是
+     *           std::format 一族的一次普通调用（std::format 或 std::println），
+     *           各单元的实参形态互不相同（单个 const char*、std::string、整数的
+     *           引用等），有的在 lambda 里。
+     *
+     *           同项目里另有 15 个单元同样导入 std、同样直接或间接导入 sqlpp23
+     *           的模块，不带这段常量能编过。与是否向 std::cerr 打印无关（不打印
+     *           的单元也崩），与本单元全局模块片段里有没有标准库头文本也无关
+     *           （带 `<cstdio>` 的单元也崩）。哪些单元会触发，规律没有查清，这
+     *           里只记实测到的事实。
+     *
+     *           这段常量抢在一切使用之前，把 std::format 一族在本单元的第一次实
+     *           例化固定成一次最简单的直接使用。在这套工具链上，别的单元若出现
+     *           同类崩溃（调用栈里有 basic_format_string 与 __handles_），按同
+     *           样的写法加一段；升级 clang 之后可以逐个单元去掉试编，不崩就删。
+     */
+    [[maybe_unused]]
+    inline const std::string FORMAT_WARMUP_TEXT =
+        std::format("{} {} {} {} {}", "a", std::string("b"), 1, 2.5, 'c');
+} // namespace
 
 export namespace cg::graph::headcache
 {
