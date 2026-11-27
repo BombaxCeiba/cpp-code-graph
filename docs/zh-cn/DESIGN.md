@@ -47,19 +47,22 @@ detect-changes、增量监听模式、MCP/serve。
 sqlpp23 的两个模块（`sqlpp23.core`、`sqlpp23.sqlite3`）不设包装，由用到
 它的单元直接导入：数据库层的 `cg.db.tables` 四个子模块、`cg.db.store`、
 `cg.db.query` 的五个子模块，`cg.msbuild` 层的 `cg.msbuild.tables`、
-`cg.msbuild.wrap`、`cg.msbuild.pipeline.wraplog`，以及
-`cg.analysis.external`（在连接上执行一条删除语句）。`sqlite3.h` 由
-`cg.db.store`、`cg.msbuild.wrap`、`cg.msbuild.pipeline.wraplog` 三个单元
-的全局模块片段包含（tests 的 schema-mirror 测试单元也包含）。
+`cg.msbuild.wrap`、`cg.msbuild.pipeline.wraplog`，
+`cg.analysis.external`（在连接上执行一条删除语句），以及 tests 的
+handle 与 schema-mirror 两个测试单元（只导入 `sqlpp23.sqlite3`，用它的
+连接类）。`sqlite3.h` 由 `cg.db.store`、`cg.db.native`、`cg.msbuild.wrap`、
+`cg.msbuild.pipeline.wraplog` 四个单元的全局模块片段包含（tests 的
+handle 与 schema-mirror 两个测试单元、纯 C 冒烟测试 `sqlite_smoke.c`
+也包含）。
 
 | 模块 | 文件 | 导入（项目内） | GMF 第三方 include | 职责 |
 |---|---|---|---|---|
-| `cg.util` | `src/util/util.ixx`（+ `cg.util.json` = `src/util/util.json.ixx`、`cg.util.platform` = `src/util/util.platform.ixx`，均由总接口模块再导出） | — | `cpp_yyjson.hpp`（仅在 `cg.util.json` 中，带 §10.2 的 assert 垫片）；平台头（`io.h`/`windows.h` 或 `unistd.h`，仅在 `cg.util.platform` 中） | 版本串；FNV-1a 64；限定名拆分/拼接；路径规范化（正斜杠、小写盘符）；`PathCaseCache` + 磁盘大小写重拼写；内存 `Interner` 缓存；基于 yyjson-cpp 的最小 JSON 读/写门面；`cg.util.platform` 的控制台与管道 stdin 探测（OS API 唯一允许出现的地方） |
+| `cg.util` | `src/util/util.ixx`（+ `cg.util.json` = `src/util/util.json.ixx`、`cg.util.platform` = `src/util/util.platform.ixx`、`cg.util.handle` = `src/util/util.handle.ixx`、`cg.util.ownedptr` = `src/util/util.ownedptr.ixx`，均由总接口模块再导出） | — | `cpp_yyjson.hpp`（仅在 `cg.util.json` 中，带 §10.2 的 assert 垫片）；平台头（`io.h`/`windows.h`/`objbase.h` 或 `unistd.h`/`dirent.h`/`dlfcn.h`/`sys/mman.h`；封装单元清单里的单元，另有少数单元为了不涉及资源的系统调用而包含） | 版本串；FNV-1a 64；限定名拆分/拼接；路径规范化（正斜杠、小写盘符）；`PathCaseCache` + 磁盘大小写重拼写；内存 `Interner` 缓存；基于 yyjson-cpp 的最小 JSON 读/写门面；`cg.util.handle` 的拥有型句柄与删除器、`cg.util.ownedptr` 的带删除器拥有型指针、`cg.util.platform` 的控制台与管道 stdin 探测（直接取用或释放操作系统资源的单元清单见下文“C 接口资源的持有规则与封装单元”） |
 | `cg.util.pcre2`、`cg.util.regex` | `src/util/util.pcre2.ixx`、`src/util/util.regex.ixx`（不经总接口 `cg.util` 再导出） | `cg.util.regex` 导入 `cg.util.pcre2` | `pcre2.h`（仅在 `cg.util.pcre2` 中，8 位码元宽度） | `cg.util.pcre2` 是 PCRE2 C 接口的纯再导出（函数、不透明类型、选项与返回值常量；不设包装类、不含实现）；`cg.util.regex` 是钩子受限正则路径的匹配层：一个编译好的模式对象拥有匹配数据块与匹配上下文，给出全名字匹配（首尾两个锚定选项）、部分匹配（不带选项位）与能否匹配空串（按部分匹配语义用空串试一次）三个查询，每次匹配带显式的步数上限，结局三分（命中、不命中、触限等错误；扫描层把第三类按不命中处理并累计其数目，交出口披露） |
 | `cg.cli.scan.names` | `src/cli/cli.scan.names.ixx`（不经总接口 `cg.cli` 再导出） | `cg.util.regex`、`cg.db.schema`、`cg.db.store`、`cg.db.query.dumpkeys`；`cg.cli.hook` 导入它 | — | 钩子受限正则路径的符号名表扫描：按段物化符号名、逐名匹配，先按全匹配扫一遍，零命中且模式不能匹配空串时再按部分匹配重扫一遍，返回命中名与步数触限的名字数（属于产出最终命中名的那一遍）；段间与段内截止探针由调用方以可调用对象注入，触线即整体放弃。不读环境变量、不读时钟、不决定命中之后的出口 |
 | `cg.cli.lookup.name` | `src/cli/cli.lookup.name.ixx`（不经总接口 `cg.cli` 再导出） | 只导入标准库；`cg.cli.hook` 导入它 | — | 钩子查找路径对符号名的两处形态判定：限定链在尖括号之外最后一个双冒号处切开（模板实参里的双冒号不是分隔符）；名字能否原样当作查找模式重查回来（裸标识符不受长度护栏约束，其余形态不超过模式长度上限、不含正则特殊字符与控制字符、尖括号之外没有双冒号；噪声词由调用方结合词表排除）。纯字符串判定，不碰库 |
 | `cg.cli.render.disclose` | `src/cli/cli.render.disclose.ixx`（不经总接口 `cg.cli` 再导出） | `cg.util`；`cg.cli.hook` 导入它 | — | 钩子注入文本的纯字符串组装：字节上限的 UTF-8 序列安全前缀、显示截断、预算保险丝、超限分级信封（命中总数、能原样重查的名字里字典序最小的前几名、一行收窄建议，未判定数不为零时首行注明）、步数上限披露行与把它接在正文之后的预算内拼接。不碰库、不碰截止探针 |
-| `cg.db` | `src/db/db.ixx` + `cg.db.schema`（`db.schema.ixx`）、`cg.db.store`（`db.store.ixx`）、`cg.db.query`（`db.query.ixx`） | — | `sqlite3.h` | 经 sqlpp23 使用 SQLite：打开/PRAGMA/DDL、字符串驻留表、upsert（files/symbols/edges/includes/imports）、按文件清除、全部查找与遍历形态的查询、stats。对 libclang 一无所知 |
+| `cg.db` | `src/db/db.ixx` + `cg.db.schema`（`db.schema.ixx`）、`cg.db.store`（`db.store.ixx`）、`cg.db.query`（`db.query.ixx`）；另有 `cg.db.native`（`db.native.ixx`，不经总接口 `cg.db` 再导出） | — | `sqlite3.h` | 经 sqlpp23 使用 SQLite：打开/PRAGMA/DDL、字符串驻留表、upsert（files/symbols/edges/includes/imports）、按文件清除、全部查找与遍历形态的查询、stats。`cg.db.native` 是 SQLite 原生接口的拥有型封装（`NativeStatement`、`NativeText`、`exec_native`）：采集库的引导步骤经它的语句对象与执行助手；图存储的三张旁路表由图存储单元自己的拥有型指针持有，只从这里取库分配文本的拥有者。对 libclang 一无所知 |
 | `cg.db.tables` | `src/db/db.tables.ixx`（入口，自身不声明任何内容，只再导出下面四个子模块；不经总接口 `cg.db` 再导出）+ `cg.db.tables.core`（`db.tables.core.ixx`）、`cg.db.tables.graph`（`db.tables.graph.ixx`）、`cg.db.tables.sites`（`db.tables.sites.ixx`）、`cg.db.tables.analysis`（`db.tables.analysis.ixx`） | — | `sqlpp23/core/name/create_name_tag.h`（仅宏） | sqlpp23 表模型（命名空间 `cg::db::tab`），手写形状，表与表互不引用：`core` 是元数据与字符串表、kind/边类型字典、sqlite 目录表的只读模型、文件登记、指纹、失败条目、实时变更协调各表，加聚合与连接用的全部别名标签；`graph` 是符号、边、包含、导入四张表；`sites` 是类型线索与调用点两张表；`analysis` 是传播槽、透传包装、实例桥传入侧与体内调用侧、符号贡献登记五张表。用到表模型名字的单元自己 `import cg.db.tables;` |
 | `cg.clang` | `src/clang/clang.ixx` + `cg.clang.loader`、`cg.clang.capi`（`clang.capi.ixx`）、`cg.clang.driver`、`cg.clang.tu`（`clang.tu.ixx`）、`cg.clang.compile_db`（`clang.compile_db.ixx`）、`cg.clang.bmi` | `cg.util` | `clang-c/Index.h`（仅在 `cg.clang.capi` 中） | `cg.clang.capi` 再导出 CX 类型 + RAII（`Str`、`Index`、`Tu`）+ 薄游标门面（kind/spelling/location/children/…）；`cg.clang.tu` 解析 + 诊断；`cg.clang.compile_db` 读取 compile_commands.json、对命令串分词、构建每 TU 的 argv |
 | `cg.extract` | `src/extract/extract.ixx` + `cg.extract.model`（`extract.model.ixx`）、`cg.extract.visitor`（`extract.visitor.ixx`） | `cg.clang`、`cg.util` | — | `cg.extract.model` 的纯记录类型（`SymbolRec`、`EdgeRec`、`IncludeRec`、`ImportRec`、`TuExtract`）+ 那个唯一的 `unique_key` 构建器（单一事实来源，§4）；`cg.extract.visitor` 遍历一个 TU 的游标树并产出记录（具名模块 import 来自 `CXCursor_ModuleImportDecl`、主文件过滤）。纯函数：无 DB、无 I/O |
@@ -74,6 +77,80 @@ sqlpp23 的两个模块（`sqlpp23.core`、`sqlpp23.sqlite3`）不设包装，�
 再导出子模块，自身不声明任何大块内容。（历史上这些是模块分区；点分名
 模块重构把分区语法化解为普通点分名模块，因此总接口的 `import cg.util;`
 表面不变。）
+
+### C 接口资源的持有规则与封装单元
+
+C 库与操作系统接口交出来的资源——动态库句柄、文件与进程句柄、共享内存
+的句柄与视图、预编译语句、引擎里的字符串与数组、接口指针、运行时上下
+文……——一律由拥有它的对象管生命周期。这样的对象叫拥有型对象：可以是带
+删除器的拥有型指针（`cg.util.handle` 的 `OwnedPtr`），也可以是专门的类；
+析构时它把资源交还。
+规则有六条：
+
+1. **取用即接管。** 直接向 C 接口取资源的调用，只出现在该类资源的封装
+   单元里；取到的资源立即交给拥有型对象，不留裸指针等人手配对。
+2. **释放调用只出现在拥有者的生命周期函数里。** 即拥有者的析构函数、
+   移动赋值、释放函数、构造失败时的回滚，以及只被这些位置调用的删除器
+   或桥接释放函数的函数体。封装单元的普通函数里也不许有靠人手配对的
+   取与放。
+3. **业务代码两样都不做。** 封装单元之外的单元既不写释放调用，也不直
+   接向 C 接口取资源，只能使用封装类与门面函数。
+4. **按设计永不释放的进程级资源要显式交出、集中登记。** 装载或创建成
+   功之后，由拥有型对象的 `release` 一类的成员把所有权显式交给进程级
+   状态，在那里登记并写明为什么常驻；不要求在进程退出时释放。中途失
+   败的路径仍由拥有型对象析构释放。
+5. **测试只有在两种情形下允许直调 C 接口**：被测对象就是原语本身（协议
+   测试），或被测对象是封装类与原始库的对照关系。这样的测试文件逐个登
+   记理由；即使如此也不手写释放，资源由测试里的拥有型对象持有。
+6. **例外。** 崩溃防护从硬件故障恢复时不运行析构函数（见
+   `cg.util.guard`），防护点之内的资源不适用本规则；现有约定是防护下
+   只运行可以整体丢弃的叶子工作，原样保留。
+
+```mermaid
+flowchart LR
+    B["业务单元<br/>cli、graph、analysis、msbuild 等"] -->|"只用封装类与门面函数"| W["封装单元<br/>见下方清单"]
+    W -->|"取资源"| C["C 库与操作系统接口"]
+    W -->|"取到即交给它"| O["拥有型对象<br/>析构、移动赋值、释放函数、删除器"]
+    O -->|"释放调用只在这些位置"| C
+    O -.->|"按设计常驻：<br/>显式交出所有权"| P["进程级状态<br/>集中登记并写明理由"]
+```
+
+封装单元清单：每一类接口只在下列单元里直接出现，清单之外的单元都是业务
+代码。
+
+| 资源族 | 封装单元 | 要点 |
+|---|---|---|
+| 操作系统句柄、系统缓冲、动态库句柄、映射视图、接口指针 | `cg.util.handle`（`src/util/util.handle.ixx`）、`cg.util.platform`（`src/util/util.platform.ixx`） | `cg.util.handle` 给出通用拥有型句柄 `Owned` 与一组删除器，`cg.util.ownedptr` 给出带删除器的拥有型指针 `OwnedPtr`，C 接口经出参交回的指针直接写进它；两者都不分配堆内存，可以放在钩子与子进程派生的路径上；`cg.util.platform` 的函数取到句柄即接管。崩溃路径的系统调用归 `cg.util.crashdump`（`src/util/util.crashdump.ixx`），C 运行库差异归 `cg.util.cstd`（`src/util/util.cstd.ixx`） |
+| LLVM 引擎库的装载 | `cg.clang.loader`（`src/clang/clang.loader.ixx`）、`cg.clang.capi.api`（`src/clang/clang.capi.api.ixx`） | `Library` 拥有动态库句柄，析构时卸载；装载成功后交出所有权，引擎库按设计常驻到进程退出（§9） |
+| libclang 交出的字符串、翻译单元、索引、诊断、记号数组、覆写游标数组 | `cg.clang.capi.api`、`cg.clang.capi.model`、`cg.clang.capi.cursor`、`cg.clang.capi.type`（`src/clang/clang.capi*.ixx`） | `Str`、`Tu`、`Index`，以及门面模型与游标两个单元里放在 detail 命名空间的三个拥有者（单条诊断、记号数组、覆写游标数组）；取用与交还只在门面里出现 |
+| SQLite 原生接口 | `cg.db.store`（`src/db/db.store.ixx`）、`cg.db.native`（`src/db/db.native.ixx`） | 三张旁路表（协调审计表与头缓存两张表）的原生惰性语句由拥有型指针持有；`NativeStatement`、`NativeText`、`exec_native` 供需要手写语句的单元使用。类型化查询库 sqlpp23 自身的连接类与预编译语句类就是拥有者 |
+| JSON（yyjson） | `cg.util.json`（`src/util/util.json.ixx`）与它的桥接层 `src/util/util.json.bridge.cpp` | 门面的析构函数与删除器各经配对的桥接释放函数恰好释放一次 |
+| 语法解析（tree-sitter） | `cg.util.treesit`（`src/util/util.treesit.ixx`） | `Tree`、`Parser` |
+| 正则（PCRE2） | `cg.util.regex`（`src/util/util.regex.ixx`）；`cg.util.pcre2` 只是纯再导出 | `Pattern` 拥有编译好的模式、匹配数据块与匹配上下文 |
+| C# 对象宿主（hostfxr、组件对象、对象协议） | `cg.util.cshost`（`src/util/util.cshost.ixx`） | `CsRef` 按引用计数持有垫片侧对象；动态库、运行时上下文、接口指针、共享内存的句柄与视图、结果串取到即接管；对象协议的三个原语只导出给协议测试（`protocol_test` 命名空间） |
+
+登记为直调接口的测试文件（规则 5 的例外登记）：
+
+- `tests/shellscan.test.ixx`：对象协议测试，被测对象就是原语本身，经协议
+  测试面直调三个原语；文件句柄由 `Owned` 持有，建出的垫片侧对象由测试
+  内的拥有者持有，拆除的返回值照旧由断言检查。
+- `tests/regex.test.ixx`：对照引擎的原始返回码，三项引擎资源由测试内的
+  拥有型对象持有。
+- `tests/cli.test.ixx`：文件描述符重定向夹具自带的描述符拥有者，关闭调
+  用只在它的复位函数里。运行库的文件描述符不是内核句柄，通用拥有型句柄
+  管不了它。
+- `tests/handle.test.ixx`：被测对象是拥有型封装与原始接口的对照关系：
+  资源计数探针要自己造句柄，释放一律经拥有者。
+- `tests/clang.test.ixx`：动态库拥有者与原始接口的对照；引擎切换用例要按
+  模块名取副本引擎的句柄，句柄交给 `Library` 持有、随它卸载。
+- `tests/sqlite_smoke.c`：纯 C 冒烟测试，按测试数据对待。
+- `tests/crashdump.probe.ixx`：崩溃转储矩阵的探针，按测试数据对待。多线
+  程崩溃形态里建的两个工作线程句柄不设拥有者：进程紧接着崩溃，句柄随
+  进程终止回收。
+
+直接包含平台头的单元比上面两张清单略多：另有少数单元为了不涉及资源的
+系统调用（取当前目录、读环境变量、探测文件属性、取模块文件名一类）而
+包含它；取用与释放资源则只发生在封装单元里。
 
 ### CMake 目标结构
 
@@ -548,7 +625,9 @@ libclang——是按库的世界观，且是运行时加载的（cg.clang.loader
   `llvm_version`）；解析出的引擎在任一值上不同则强制全量（世界观变更）。
   特性之前的数据库没有记录的身份——引擎未知——因此升级后第一次运行重
   解析一次，然后记录。
-- 生命周期：第一个 `cg.clang::Index`（或显式 CLI 加载）完成解析 + 加载；
+- 生命周期：第一个 `cg.clang::Index`（或显式 CLI 加载）完成解析 + 加载。
+  库句柄先由装载路径上的 `Library` 对象持有，全部步骤成功之后才显式交出
+  所有权、登记进引擎状态，中途失败的装载由该对象的析构卸载。此后
   句柄在进程生命周期内保持映射——有意地永不释放，因为 libclang 的静态
   初始化器会安装进程级全局崩溃恢复状态（Windows 上的向量化 SEH 处理器），
   FreeLibrary/dlclose 不会撤除它：实测的加载/卸载/重载循环在启用崩溃恢复

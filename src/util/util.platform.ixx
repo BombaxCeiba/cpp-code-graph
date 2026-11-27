@@ -7,6 +7,7 @@ module;
 #include <windows.h>
 #include <winioctl.h>
 #include <psapi.h>
+#include <shellapi.h>
 #else
 #include <dirent.h>
 #include <fcntl.h>
@@ -19,8 +20,11 @@ module;
 #include <csignal>
 #include <cstdlib>
 #if defined(__APPLE__)
+#include <crt_extern.h>
 #include <mach-o/dyld.h>
 #endif
+// 进程环境块的全局变量：各平台的头文件未必声明它，这里自行声明。
+extern "C" char** environ;
 #endif
 // x86 家族的 CPU 能力探测头（供批量位运算三档的分派探测；非 x86 不
 // 定义 CG_CPUID_X86，探测恒回标量档）。
@@ -40,16 +44,19 @@ module;
  * @brief 平台守卫下的运行时探针集。
  *
  * @internal
- * 独立成分区是为了让 OS API 的使用集中在恰一个单元里（跨平台规则）：
- * 每个助手都有 Windows 与 POSIX 两个分支，工程
- * 其他任何地方都不得直接 include 平台头。全局模块片段里这些平台头是
- * cg.util 触碰 OS API 的唯一场所（跨平台指令要求两分支皆实现）；宏与
- * C 声明永不跨模块边界，故 include 住在全局模块片段。
+ * 直接调用系统接口并取用、释放资源的只有封装单元：本单元与句柄、宿主
+ * 桥接、崩溃转储、引擎装载等单元；另有少数单元为了不涉及资源的系统
+ * 调用（取当前目录、读环境变量、探测文件属性一类）而包含平台头。
+ * 本单元的每个助手都有 Windows 与 POSIX 两个分支（跨平台规则
+ * 要求两分支皆实现）；宏与 C 声明永不跨模块边界，所以平台头住在全局
+ * 模块片段里。本单元取到的句柄与文件描述符一律立即交给 cg.util.handle
+ * 的拥有型对象，关闭调用只出现在拥有者那里；必须提前关闭的用显式复位。
  */
 export module cg.util.platform;
 
 import std;
 import cg.util.cstd;
+import cg.util.handle;
 
 export namespace cg::util::platform
 {
@@ -452,17 +459,16 @@ export namespace cg::util::platform
             return false;
         }
 #if defined(_WIN32)
-        const HANDLE handle = OpenProcess(
+        const handle::Owned process = handle::Owned::adopt(OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION,
             FALSE,
-            static_cast<DWORD>(pid));
-        if (handle == nullptr)
+            static_cast<DWORD>(pid)));
+        if (!process.valid())
         {
             return GetLastError() == ERROR_ACCESS_DENIED;
         }
         DWORD      code = 0;
-        const bool queried = GetExitCodeProcess(handle, &code) != 0;
-        CloseHandle(handle);
+        const bool queried = GetExitCodeProcess(process.get(), &code) != 0;
         return queried && code == STILL_ACTIVE;
 #else
         if (pid > static_cast<std::int64_t>(std::numeric_limits<pid_t>::max()))
@@ -666,15 +672,15 @@ export namespace cg::util::platform
         const std::wstring target_native =
             detail::extended_win_path(final_path);
 
-        const HANDLE handle = CreateFileW(
+        handle::Owned source = handle::Owned::adopt_file(CreateFileW(
             tmp_native.c_str(),
             DELETE | SYNCHRONIZE,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr,
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
-            nullptr);
-        if (handle != INVALID_HANDLE_VALUE)
+            nullptr));
+        if (source.valid())
         {
             // sizeof 已含 file_name[1] 与尾部填充；额外字符数为
             // target_native.size()（再加结尾 NUL 也在尾部填充内）。
@@ -692,18 +698,19 @@ export namespace cg::util::platform
                 info->file_name);
             info->file_name[target_native.size()] = L'\0';
             const BOOL renamed = SetFileInformationByHandle(
-                handle,
+                source.get(),
                 file_rename_info_ex,
                 info,
                 static_cast<DWORD>(bytes));
-            CloseHandle(handle);
             if (renamed != 0)
             {
                 return true;
             }
         }
-        // 回退：目标被打开且不允许删除时这里同样失败——返回 false 并保留
-        // 旧文件，由调用方清理 tmp。
+        // 回退：先关掉 tmp 的句柄再改名（与首选路径的先后一致）。目标
+        // 被打开且不允许删除时这里同样失败——返回 false 并保留旧文件，
+        // 由调用方清理 tmp。
+        source.reset();
         return MoveFileExW(
                    tmp_native.c_str(),
                    target_native.c_str(),
@@ -728,15 +735,15 @@ export namespace cg::util::platform
 #if defined(_WIN32)
         // 用 CreateFileW + 扩展长度路径写 tmp：std::ofstream 走 CRT，
         // 路径超过 MAX_PATH 时会在写入阶段就失败，原子替换根本没机会发生。
-        const HANDLE handle = CreateFileW(
+        handle::Owned file = handle::Owned::adopt_file(CreateFileW(
             detail::extended_win_path(tmp).c_str(),
             GENERIC_WRITE,
             0,
             nullptr,
             CREATE_ALWAYS,
             FILE_ATTRIBUTE_NORMAL,
-            nullptr);
-        if (handle == INVALID_HANDLE_VALUE)
+            nullptr));
+        if (!file.valid())
         {
             return false;
         }
@@ -748,7 +755,7 @@ export namespace cg::util::platform
                 std::min<std::size_t>(bytes.size() - offset, 1U << 20U));
             DWORD written = 0;
             if (WriteFile(
-                    handle,
+                    file.get(),
                     bytes.data() + offset,
                     chunk,
                     &written,
@@ -761,7 +768,9 @@ export namespace cg::util::platform
             }
             offset += chunk;
         }
-        CloseHandle(handle);
+        // 必须先关句柄再善后：失败分支要删临时文件，而句柄是零共享打开
+        // 的，开着的时候删不掉。
+        file.reset();
         if (!ok)
         {
             remove_file(tmp);
@@ -804,174 +813,120 @@ export namespace cg::util::platform
      *           (PAGE_READONLY) + MapViewOfFile(FILE_MAP_READ)；POSIX：
      *           open(O_RDONLY) + mmap(PROT_READ, MAP_PRIVATE)。空文件不建
      *           映射（MapViewOfFile 对零长度失败），bytes() 恒可安全调用。
-     *           独占句柄都在析构/移动赋值中关闭，解除映射先于关文件。
+     *           文件句柄、映射句柄与视图都由拥有型对象持有：构造函数每
+     *           取到一步就交给局部拥有者，全部建成才转移给成员，中途失
+     *           败的对象不持有任何句柄，回滚由局部拥有者的析构完成；析
+     *           构、移动构造与移动赋值因此都是默认的。
      */
     class ReadOnlyMap
     {
     public:
         ReadOnlyMap() = default;
+
+        /** @brief 映射视图的拥有者；析构时解除映射。 */
+        using View = handle::OwnedPtr<void, handle::ViewDeleter>;
+
         /** @brief 打开并映射整个文件；任何一步失败则对象保持空（valid 假）。 */
         explicit ReadOnlyMap(const std::filesystem::path& path)
         {
 #if defined(_WIN32)
-            const HANDLE file = CreateFileW(
+            handle::Owned file = handle::Owned::adopt_file(CreateFileW(
                 detail::extended_win_path(path).c_str(),
                 GENERIC_READ,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 nullptr,
                 OPEN_EXISTING,
                 FILE_ATTRIBUTE_NORMAL,
-                nullptr);
-            if (file == INVALID_HANDLE_VALUE)
+                nullptr));
+            if (!file.valid())
             {
                 return;
             }
             LARGE_INTEGER size{};
-            if (GetFileSizeEx(file, &size) == 0 || size.QuadPart <= 0)
+            if (GetFileSizeEx(file.get(), &size) == 0 || size.QuadPart <= 0)
             {
-                CloseHandle(file);
                 return;
             }
-            const HANDLE mapping =
-                CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
-            if (mapping == nullptr)
+            handle::Owned mapping = handle::Owned::adopt(CreateFileMappingW(
+                file.get(),
+                nullptr,
+                PAGE_READONLY,
+                0,
+                0,
+                nullptr));
+            if (!mapping.valid())
             {
-                CloseHandle(file);
                 return;
             }
-            void* view = MapViewOfFile(
-                mapping,
+            View view = View::adopt(MapViewOfFile(
+                mapping.get(),
                 FILE_MAP_READ,
                 0,
                 0,
-                static_cast<std::size_t>(size.QuadPart));
-            if (view == nullptr)
+                static_cast<std::size_t>(size.QuadPart)));
+            if (!view)
             {
-                CloseHandle(mapping);
-                CloseHandle(file);
                 return;
             }
-            file_ = file;
-            mapping_ = mapping;
-            view_ = view;
             size_ = static_cast<std::size_t>(size.QuadPart);
+            file_ = std::move(file);
+            mapping_ = std::move(mapping);
+            view_ = std::move(view);
 #else
-            const int fd = ::open(path.c_str(), O_RDONLY);
-            if (fd < 0)
+            handle::Owned file =
+                handle::Owned::adopt(::open(path.c_str(), O_RDONLY));
+            if (!file.valid())
             {
                 return;
             }
             struct stat st{};
-            if (::fstat(fd, &st) != 0 || st.st_size <= 0)
+            if (::fstat(file.get(), &st) != 0 || st.st_size <= 0)
             {
-                ::close(fd);
                 return;
             }
-            void* view = ::mmap(
-                nullptr,
-                static_cast<std::size_t>(st.st_size),
-                PROT_READ,
-                MAP_PRIVATE,
-                fd,
-                0);
-            if (view == MAP_FAILED)
+            const auto  size = static_cast<std::size_t>(st.st_size);
+            void* const raw =
+                ::mmap(nullptr, size, PROT_READ, MAP_PRIVATE, file.get(), 0);
+            if (raw == MAP_FAILED)
             {
-                ::close(fd);
                 return;
             }
-            fd_ = fd;
-            view_ = view;
-            size_ = static_cast<std::size_t>(st.st_size);
+            View view = View::adopt(raw, handle::ViewDeleter{.size = size});
+            size_ = size;
+            file_ = std::move(file);
+            view_ = std::move(view);
 #endif
         }
 
-        ~ReadOnlyMap() { release(); }
+        ~ReadOnlyMap() = default;
         ReadOnlyMap(const ReadOnlyMap&) = delete;
         ReadOnlyMap& operator=(const ReadOnlyMap&) = delete;
 
-        ReadOnlyMap(ReadOnlyMap&& other) noexcept
-            :
-#if defined(_WIN32)
-              file_(other.file_), mapping_(other.mapping_),
-#else
-              fd_(other.fd_),
-#endif
-              view_(other.view_), size_(other.size_)
-        {
-#if defined(_WIN32)
-            other.file_ = INVALID_HANDLE_VALUE;
-            other.mapping_ = nullptr;
-#else
-            other.fd_ = -1;
-#endif
-            other.view_ = nullptr;
-            other.size_ = 0;
-        }
-
-        ReadOnlyMap& operator=(ReadOnlyMap&& other) noexcept
-        {
-            if (this != &other)
-            {
-                release();
-#if defined(_WIN32)
-                file_ = other.file_;
-                mapping_ = other.mapping_;
-                other.file_ = INVALID_HANDLE_VALUE;
-                other.mapping_ = nullptr;
-#else
-                fd_ = other.fd_;
-                other.fd_ = -1;
-#endif
-                view_ = other.view_;
-                size_ = other.size_;
-                other.view_ = nullptr;
-                other.size_ = 0;
-            }
-            return *this;
-        }
+        ReadOnlyMap(ReadOnlyMap&&) noexcept = default;
+        ReadOnlyMap& operator=(ReadOnlyMap&&) noexcept = default;
 
         /** @brief 映射是否有效（空文件或打开失败时假）。 */
         [[nodiscard]]
         bool valid() const noexcept
         {
-            return view_ != nullptr;
+            return view_.valid();
         }
 
         /** @brief 映射字节（valid 假时空视图）。 */
         [[nodiscard]]
         auto bytes() const noexcept -> std::span<const std::byte>
         {
-            return {static_cast<const std::byte*>(view_), size_};
-        }
-
-        void release() noexcept
-        {
-            if (view_ != nullptr)
-            {
-#if defined(_WIN32)
-                (void)UnmapViewOfFile(view_);
-                CloseHandle(mapping_);
-                mapping_ = nullptr;
-                CloseHandle(file_);
-                file_ = INVALID_HANDLE_VALUE;
-#else
-                (void)::munmap(view_, size_);
-                ::close(fd_);
-                fd_ = -1;
-#endif
-                view_ = nullptr;
-                size_ = 0;
-            }
+            return {static_cast<const std::byte*>(view_.get()), size_};
         }
 
     private:
+        /** @brief 成员按文件、映射、视图的次序声明：析构次序相反，解除
+         *          映射先于关映射、关文件。 */
+        handle::Owned file_;
 #if defined(_WIN32)
-        HANDLE file_ = INVALID_HANDLE_VALUE;
-        HANDLE mapping_ = nullptr;
-#else
-        int fd_ = -1;
+        handle::Owned mapping_;
 #endif
-        void*       view_ = nullptr;
+        View        view_;
         std::size_t size_ = 0;
     };
 
@@ -983,6 +938,10 @@ export namespace cg::util::platform
      * 成为可回收的孤儿（由 `try_acquire_file_lock` 的 pid 探活识别）。
      * 析构关闭句柄后删除锁文件——只在确实持有时删，故不会误删新持有者
      * 的锁（新持有者只有在旧文件被 unlink 后才可能 CREATE_NEW 成功）。
+     * 是否持有只看句柄成员：路径与句柄在创建函数末尾一前一后就位，任
+     * 一步抛出都由局部拥有者关掉句柄，所以「创建成功即持有」成立，不
+     * 另设持有标记。路径成员存的是已转换好的原生路径，释放函数因此
+     * 不分配内存。
      */
     class FileLock
     {
@@ -992,21 +951,9 @@ export namespace cg::util::platform
         FileLock(const FileLock&) = delete;
         FileLock& operator=(const FileLock&) = delete;
         FileLock(FileLock&& other) noexcept
-            : path_(std::move(other.path_)), held_(other.held_)
-#if defined(_WIN32)
-              ,
-              handle_(other.handle_)
-#else
-              ,
-              fd_(other.fd_)
-#endif
+            : path_(std::move(other.path_)), handle_(std::move(other.handle_))
         {
-            other.held_ = false;
-#if defined(_WIN32)
-            other.handle_ = INVALID_HANDLE_VALUE;
-#else
-            other.fd_ = -1;
-#endif
+            other.path_.clear();
         }
         FileLock& operator=(FileLock&& other) noexcept
         {
@@ -1014,54 +961,34 @@ export namespace cg::util::platform
             {
                 release();
                 path_ = std::move(other.path_);
-                held_ = other.held_;
-                other.held_ = false;
-#if defined(_WIN32)
-                handle_ = other.handle_;
-                other.handle_ = INVALID_HANDLE_VALUE;
-#else
-                fd_ = other.fd_;
-                other.fd_ = -1;
-#endif
+                handle_ = std::move(other.handle_);
+                other.path_.clear();
             }
             return *this;
         }
 
+        /** @brief 是否持有锁（创建了锁文件且句柄仍开着）。 */
         [[nodiscard]]
         auto held() const noexcept -> bool
         {
-            return held_;
+            return handle_.valid();
         }
 
-        void release()
+        /** @brief 释放锁：先关句柄，再删锁文件；不抛、不分配。 */
+        void release() noexcept
         {
-            if (!held_)
+            // 先关句柄再删文件：Windows 上句柄以零共享模式打开，开着时
+            // 删不掉。
+            handle_.reset();
+            if (!path_.empty())
             {
-                return;
-            }
-            held_ = false;
 #if defined(_WIN32)
-            if (handle_ != INVALID_HANDLE_VALUE)
-            {
-                CloseHandle(handle_);
-                handle_ = INVALID_HANDLE_VALUE;
-            }
-            if (!path_.empty())
-            {
-                (void)DeleteFileW(detail::extended_win_path(path_).c_str());
-            }
+                (void)DeleteFileW(path_.c_str());
 #else
-            if (fd_ >= 0)
-            {
-                (void)::close(fd_);
-                fd_ = -1;
-            }
-            if (!path_.empty())
-            {
-                (void)::unlink(path_.native().c_str());
-            }
+                (void)::unlink(path_.c_str());
 #endif
-            path_.clear();
+                path_.clear();
+            }
         }
 
     private:
@@ -1077,51 +1004,53 @@ export namespace cg::util::platform
             const std::string&           content)
         {
 #if defined(_WIN32)
-            const std::wstring native = detail::extended_win_path(lock_path);
-            const HANDLE       handle = CreateFileW(
+            std::wstring  native = detail::extended_win_path(lock_path);
+            handle::Owned handle = handle::Owned::adopt_file(CreateFileW(
                 native.c_str(),
                 GENERIC_READ | GENERIC_WRITE,
                 0,
                 nullptr,
                 CREATE_NEW,
                 FILE_ATTRIBUTE_NORMAL,
-                nullptr);
-            if (handle == INVALID_HANDLE_VALUE)
+                nullptr));
+#else
+            std::string   native = lock_path.native();
+            handle::Owned handle = handle::Owned::adopt(
+                ::open(native.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600));
+#endif
+            if (!handle.valid())
             {
                 return false;
             }
+#if defined(_WIN32)
             DWORD written = 0;
             (void)WriteFile(
-                handle,
+                handle.get(),
                 content.data(),
                 static_cast<DWORD>(content.size()),
                 &written,
                 nullptr);
-            handle_ = handle;
 #else
-            const int fd = ::open(
-                lock_path.native().c_str(),
-                O_CREAT | O_EXCL | O_WRONLY,
-                0600);
-            if (fd < 0)
-            {
-                return false;
-            }
-            (void)::write(fd, content.data(), content.size());
-            fd_ = fd;
+            (void)::write(handle.get(), content.data(), content.size());
 #endif
-            path_ = lock_path;
-            held_ = true;
+            // 先记路径（可能分配内存，此时句柄仍归局部拥有者，抛出就随
+            // 它关闭），最后把句柄转移给成员：两个成员要么同时就位，
+            // 要么都不动。
+            path_ = std::move(native);
+            handle_ = std::move(handle);
             return true;
         }
 
-        std::filesystem::path path_;
-        bool                  held_ = false;
 #if defined(_WIN32)
-        HANDLE handle_ = INVALID_HANDLE_VALUE;
+        /** @brief 锁文件的原生路径：已转换的扩展长度路径，删除时直接
+         *          用，不再分配。 */
+        using NativePath = std::wstring;
 #else
-        int fd_ = -1;
+        /** @brief 锁文件的原生路径。 */
+        using NativePath = std::string;
 #endif
+        NativePath    path_;
+        handle::Owned handle_;
     };
 
     /**
@@ -1396,22 +1325,22 @@ export namespace cg::util::platform
         {
             return; // 文件系统不支持压缩（exFAT、ReFS、FAT32 等）
         }
-        const HANDLE handle = CreateFileW(
+        const handle::Owned handle = handle::Owned::adopt_file(CreateFileW(
             wide.c_str(),
             FILE_ALL_ACCESS,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr,
             OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS,
-            nullptr);
-        if (handle == INVALID_HANDLE_VALUE)
+            nullptr));
+        if (!handle.valid())
         {
             return;
         }
         constexpr USHORT format = COMPRESSION_FORMAT_DEFAULT;
         DWORD            returned = 0;
         (void)DeviceIoControl(
-            handle,
+            handle.get(),
             FSCTL_SET_COMPRESSION,
             const_cast<USHORT*>(&format),
             sizeof(format),
@@ -1419,7 +1348,6 @@ export namespace cg::util::platform
             0,
             &returned,
             nullptr);
-        CloseHandle(handle);
 #else
         (void)dir;
 #endif
@@ -1613,6 +1541,190 @@ export namespace cg::util::platform
         return out;
     }
 
+    /**
+     * @brief 本进程命令行的参数列表（宽字符），含首个参数，即程序自身
+     *        的拼写。
+     *
+     * @internal
+     * Windows 分支把命令行的宽字符原文按与入口函数相同的切分规则拆开；
+     * 系统分配的参数数组由带删除器的拥有型指针持有，调用方只拿到列表，
+     * 取不到时返回空列表。Linux 分支读 /proc/self/cmdline，macOS 分支
+     * 读运行库保存的参数表，其余平台返回空列表；这三个分支都按字节
+     * 拓宽（口径同 widen_utf8）。
+     */
+    [[nodiscard]]
+    inline auto process_args_wide() -> std::vector<std::wstring>
+    {
+#if defined(_WIN32)
+        int        argc = 0;
+        const auto argv = handle::OwnedPtr<LPWSTR, handle::LocalDeleter>::adopt(
+            ::CommandLineToArgvW(::GetCommandLineW(), &argc));
+        if (!argv || argc <= 0)
+        {
+            return {};
+        }
+        std::vector<std::wstring> args;
+        args.reserve(static_cast<std::size_t>(argc));
+        for (int i = 0; i < argc; ++i)
+        {
+            args.emplace_back(argv.get()[i]);
+        }
+        return args;
+#elif defined(__APPLE__)
+        char**    argv = *_NSGetArgv();
+        const int argc = *_NSGetArgc();
+
+        std::vector<std::wstring> args;
+        for (int i = 0; argv != nullptr && i < argc; ++i)
+        {
+            args.push_back(widen_utf8(argv[i]));
+        }
+        return args;
+#elif defined(__linux__)
+        std::ifstream stream{"/proc/self/cmdline", std::ios::binary};
+        std::string   piece;
+
+        std::vector<std::wstring> args;
+        while (std::getline(stream, piece, '\0'))
+        {
+            args.push_back(widen_utf8(piece));
+        }
+        return args;
+#else
+        return {};
+#endif
+    }
+
+    /**
+     * @brief 当前进程环境块的条目列表，每条是"名字=值"形式的原文，含以
+     *        等号开头的隐藏条目。
+     *
+     * @internal
+     * Windows 分支取到的环境块由带删除器的拥有型指针持有，条目逐个拷进
+     * 列表后随作用域交还；取不到时返回空列表。非 Windows 分支遍历运行
+     * 库的环境块全局变量，按字节拓宽（口径同 widen_utf8）。
+     */
+    [[nodiscard]]
+    inline auto environment_entries_wide() -> std::vector<std::wstring>
+    {
+#if defined(_WIN32)
+        const auto block =
+            handle::OwnedPtr<wchar_t, handle::EnvBlockDeleter>::adopt(
+                ::GetEnvironmentStringsW());
+        if (!block)
+        {
+            return {};
+        }
+        std::vector<std::wstring> entries;
+        for (const wchar_t* entry = block.get(); *entry != L'\0';
+             entry += std::wcslen(entry) + 1)
+        {
+            entries.emplace_back(entry);
+        }
+        return entries;
+#else
+        std::vector<std::wstring> entries;
+        for (char** entry = ::environ; entry != nullptr && *entry != nullptr;
+             ++entry)
+        {
+            entries.push_back(widen_utf8(*entry));
+        }
+        return entries;
+#endif
+    }
+
+    namespace detail
+    {
+
+        /**
+         * @brief 一对管道端：读端与写端，各自是拥有型句柄。
+         *
+         * @internal
+         * 子进程派生专用的小件。建管道的接口经两个出参交回裸句柄，建管
+         * 道的函数一拿到就把两端交给拥有者；调用方从头到尾只接触拥有
+         * 型对象，派生之后必须提前关闭的一端用显式复位。只能移动。
+         */
+        struct PipePair
+        {
+            handle::Owned read;
+            handle::Owned write;
+
+            /** @brief 两端都建成了。 */
+            [[nodiscard]]
+            auto valid() const noexcept -> bool
+            {
+                return read.valid() && write.valid();
+            }
+        };
+
+#if defined(_WIN32)
+
+        /**
+         * @brief 建一对两端都可继承的管道；有一端没建成，两端都为空。
+         *
+         * @internal 不抛、不分配堆内存：子进程派生的热路径专用。
+         */
+        [[nodiscard]]
+        inline auto make_pipe(SECURITY_ATTRIBUTES& inheritable) noexcept
+            -> PipePair
+        {
+            HANDLE   raw_read = nullptr;
+            HANDLE   raw_write = nullptr;
+            PipePair pair;
+            if (::CreatePipe(&raw_read, &raw_write, &inheritable, 0) != 0)
+            {
+                pair.read = handle::Owned::adopt(raw_read);
+                pair.write = handle::Owned::adopt(raw_write);
+            }
+            return pair;
+        }
+
+        /**
+         * @brief 以可继承的方式打开空设备；失败返回空对象。
+         *
+         * @internal 给没有标准句柄的子进程顶上用的读端或写端，访问权
+         * 由调用方给。不抛、不分配堆内存。
+         */
+        [[nodiscard]]
+        inline auto open_inheritable_null_device(
+            DWORD                access,
+            SECURITY_ATTRIBUTES& inheritable) noexcept -> handle::Owned
+        {
+            return handle::Owned::adopt_file(
+                ::CreateFileW(
+                    L"NUL",
+                    access,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    &inheritable,
+                    OPEN_EXISTING,
+                    0,
+                    nullptr));
+        }
+
+#else
+
+        /**
+         * @brief 建一对管道；有一端没建成，两端都为空。
+         *
+         * @internal 不抛、不分配堆内存：子进程派生的热路径专用。
+         */
+        [[nodiscard]]
+        inline auto make_pipe() noexcept -> PipePair
+        {
+            int      raw[2] = {-1, -1};
+            PipePair pair;
+            if (::pipe(raw) == 0)
+            {
+                pair.read = handle::Owned::adopt(raw[0]);
+                pair.write = handle::Owned::adopt(raw[1]);
+            }
+            return pair;
+        }
+
+#endif
+
+    } // namespace detail
+
     /// capture_exec 的产出：out 为捕获到的 stdout 字节，exit_code 为
     /// 子进程状态（平台无法表达时为 -1）。
     struct CaptureExecOut
@@ -1634,6 +1746,8 @@ export namespace cg::util::platform
      * @internal
      * 参数不得内嵌引号或 NUL（调用方早在到达这里之前就会拒绝）。Windows
      * 分支逐参数做 UTF-8 → UTF-16 转换（hook 载荷以 UTF-8 JSON 到达）。
+     * 两个分支里管道端一取到就交给拥有型对象：派生之后我方的写端显式
+     * 复位（否则读端永远等不到文件尾），其余各端随作用域关闭。
      */
     [[nodiscard]]
     inline auto capture_exec(
@@ -1651,9 +1765,8 @@ export namespace cg::util::platform
             sizeof(SECURITY_ATTRIBUTES),
             nullptr,
             TRUE};
-        HANDLE read_end = nullptr;
-        HANDLE write_end = nullptr;
-        if (!CreatePipe(&read_end, &write_end, &inheritable, 0))
+        detail::PipePair pipe = detail::make_pipe(inheritable);
+        if (!pipe.valid())
         {
             return std::nullopt;
         }
@@ -1661,51 +1774,32 @@ export namespace cg::util::platform
         STARTUPINFOW   si{};
         si.cb = sizeof(si);
         si.dwFlags = STARTF_USESTDHANDLES;
-        si.hStdOutput = write_end;
+        si.hStdOutput = pipe.write.get();
         si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
         si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
         // 空标准句柄兜底：宿主无控制台（计划任务/服务式拉起）时
         // GetStdHandle 返回空句柄，STARTF_USESTDHANDLES 把它直传给子进程
         // 会让对方 CRT 启动即崩（微软文档登记形态）。NUL 设备读写各开一份
         // 可继承句柄顶上（同文件 capture_exec_timed 的先例）。
-        HANDLE null_input = nullptr;
-        HANDLE null_error = nullptr;
+        handle::Owned null_input;
+        handle::Owned null_error;
         if (si.hStdInput == nullptr || si.hStdInput == INVALID_HANDLE_VALUE)
         {
-            null_input = CreateFileW(
-                L"NUL",
-                GENERIC_READ,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                &inheritable,
-                OPEN_EXISTING,
-                0,
-                nullptr);
-            if (null_input == INVALID_HANDLE_VALUE)
+            null_input =
+                detail::open_inheritable_null_device(GENERIC_READ, inheritable);
+            if (null_input.valid())
             {
-                null_input = nullptr; // 兜底失败时维持原句柄
-            }
-            else
-            {
-                si.hStdInput = null_input;
+                si.hStdInput = null_input.get(); // 兜底失败时维持原句柄
             }
         }
         if (si.hStdError == nullptr || si.hStdError == INVALID_HANDLE_VALUE)
         {
-            null_error = CreateFileW(
-                L"NUL",
+            null_error = detail::open_inheritable_null_device(
                 GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                &inheritable,
-                OPEN_EXISTING,
-                0,
-                nullptr);
-            if (null_error == INVALID_HANDLE_VALUE)
+                inheritable);
+            if (null_error.valid())
             {
-                null_error = nullptr; // 兜底失败时维持原句柄
-            }
-            else
-            {
-                si.hStdError = null_error;
+                si.hStdError = null_error.get();
             }
         }
         PROCESS_INFORMATION pi{};
@@ -1720,49 +1814,33 @@ export namespace cg::util::platform
             nullptr,
             &si,
             &pi);
-        CloseHandle(write_end);
+        // 派生之后立刻关我方的写端：留着它，读端永远等不到文件尾。
+        pipe.write.reset();
         if (!spawned)
         {
-            CloseHandle(read_end);
-            if (null_input != nullptr)
-            {
-                CloseHandle(null_input);
-            }
-            if (null_error != nullptr)
-            {
-                CloseHandle(null_error);
-            }
             return std::nullopt;
         }
-        char  buffer[4096];
-        DWORD got = 0;
-        while (ReadFile(read_end, buffer, sizeof(buffer), &got, nullptr)
+        // 子进程与它的主线程句柄立即接管，随本函数返回关闭。
+        const handle::Owned process = handle::Owned::adopt(pi.hProcess);
+        const handle::Owned main_thread = handle::Owned::adopt(pi.hThread);
+        char                buffer[4096];
+        DWORD               got = 0;
+        while (ReadFile(pipe.read.get(), buffer, sizeof(buffer), &got, nullptr)
                && got != 0)
         {
             captured.out.append(buffer, got);
         }
-        CloseHandle(read_end);
-        WaitForSingleObject(pi.hProcess, INFINITE);
+        WaitForSingleObject(process.get(), INFINITE);
         DWORD code = 0;
-        if (GetExitCodeProcess(pi.hProcess, &code))
+        if (GetExitCodeProcess(process.get(), &code))
         {
             captured.exit_code = static_cast<int>(code);
         }
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        if (null_input != nullptr)
-        {
-            CloseHandle(null_input);
-        }
-        if (null_error != nullptr)
-        {
-            CloseHandle(null_error);
-        }
         return captured;
 #else
-        CaptureExecOut captured;
-        int            fds[2];
-        if (::pipe(fds) != 0)
+        CaptureExecOut   captured;
+        detail::PipePair pipe = detail::make_pipe();
+        if (!pipe.valid())
         {
             return std::nullopt;
         }
@@ -1777,9 +1855,11 @@ export namespace cg::util::platform
         const pid_t pid = ::fork();
         if (pid == 0)
         {
-            ::close(fds[0]);
-            ::dup2(fds[1], STDOUT_FILENO);
-            ::close(fds[1]);
+            // 子进程：我方的读端不要；写端挪到标准输出之后关闭，随即
+            // 执行新程序。
+            pipe.read.reset();
+            ::dup2(pipe.write.get(), STDOUT_FILENO);
+            pipe.write.reset();
             std::vector<char*> argv;
             argv.reserve(storage.size() + 1);
             for (const std::string& arg : storage)
@@ -1792,18 +1872,16 @@ export namespace cg::util::platform
         }
         if (pid < 0)
         {
-            ::close(fds[0]);
-            ::close(fds[1]);
             return std::nullopt;
         }
-        ::close(fds[1]);
+        // 父进程只留读端：留着写端，读端永远等不到文件尾。
+        pipe.write.reset();
         char    buffer[4096];
         ssize_t got = 0;
-        while ((got = ::read(fds[0], buffer, sizeof(buffer))) > 0)
+        while ((got = ::read(pipe.read.get(), buffer, sizeof(buffer))) > 0)
         {
             captured.out.append(buffer, static_cast<std::size_t>(got));
         }
-        ::close(fds[0]);
         int status = 0;
         if (::waitpid(pid, &status, 0) == pid && WIFEXITED(status))
         {
@@ -1871,32 +1949,33 @@ export namespace cg::util::platform
 
 #if defined(_WIN32)
 
-        /// 重定向用的临时文件（DELETE_ON_CLOSE、句柄可继承）；失败
-        /// 返回 INVALID_HANDLE_VALUE。
+        /// 重定向用的临时文件（DELETE_ON_CLOSE、句柄可继承）；取到句柄
+        /// 就交给拥有型对象返回，创建失败返回空对象。
         [[nodiscard]]
-        auto make_temp_capture_file(SECURITY_ATTRIBUTES& inheritable) -> HANDLE
+        auto make_temp_capture_file(SECURITY_ATTRIBUTES& inheritable)
+            -> handle::Owned
         {
             std::error_code             ec;
             const std::filesystem::path dir =
                 std::filesystem::temp_directory_path(ec);
             if (ec)
             {
-                return INVALID_HANDLE_VALUE;
+                return {};
             }
             wchar_t name[MAX_PATH + 1] = {};
             if (GetTempFileNameW(dir.wstring().c_str(), L"ccg", 0, name) == 0)
             {
-                return INVALID_HANDLE_VALUE;
+                return {};
             }
-            const HANDLE handle = CreateFileW(
+            handle::Owned handle = handle::Owned::adopt_file(CreateFileW(
                 name,
                 GENERIC_READ | GENERIC_WRITE,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 &inheritable,
                 OPEN_EXISTING,
                 FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE,
-                nullptr);
-            if (handle == INVALID_HANDLE_VALUE)
+                nullptr));
+            if (!handle.valid())
             {
                 DeleteFileW(name);
             }
@@ -1926,6 +2005,88 @@ export namespace cg::util::platform
             return out;
         }
 
+        /**
+         * @brief 进程启动属性列表：在自带的定长缓冲上建列表，析构时让
+         *        系统回收列表的内部资源。
+         *
+         * @internal
+         * 子进程派生的热路径专用，不分配堆内存：缓冲是对象里的字节数组，
+         * 系统为单个属性只要几十字节。缓冲不够或系统拒绝时对象为空，
+         * 调用方据此回退到全继承的旧写法。句柄白名单的数组不归本类持有
+         * （系统只保存指针），调用方要让数组与本对象都活到派生结束。本
+         * 类不可移动：列表建在哪个对象的缓冲里，就一直在那里用到析构。
+         * 关闭列表的调用只在 reset 一处，析构与构造失败回滚都经它。
+         */
+        class ProcAttrList
+        {
+        public:
+            ProcAttrList(const ProcAttrList&) = delete;
+            ProcAttrList& operator=(const ProcAttrList&) = delete;
+            ProcAttrList(ProcAttrList&&) = delete;
+            ProcAttrList& operator=(ProcAttrList&&) = delete;
+            ~ProcAttrList() { reset(); }
+
+            /**
+             * @brief 建一个只含句柄白名单的属性列表；建不成时对象为空。
+             *
+             * @internal 不抛：只调系统接口，缓冲用自己的。
+             */
+            explicit ProcAttrList(std::span<HANDLE> handles) noexcept
+            {
+                auto* raw =
+                    reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(buffer_);
+                SIZE_T bytes = sizeof(buffer_);
+                if (::InitializeProcThreadAttributeList(raw, 1, 0, &bytes) == 0)
+                {
+                    return; // 缓冲不够：对象保持为空
+                }
+                list_ = raw;
+                if (::UpdateProcThreadAttribute(
+                        list_,
+                        0,
+                        PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                        handles.data(),
+                        handles.size_bytes(),
+                        nullptr,
+                        nullptr)
+                    == 0)
+                {
+                    reset(); // 白名单挂不上：回收列表，对象保持为空
+                }
+            }
+
+            /** @brief 是否建成了可以交给派生调用的列表。 */
+            [[nodiscard]]
+            auto valid() const noexcept -> bool
+            {
+                return list_ != nullptr;
+            }
+
+            /** @brief 列表的原生指针，只供挂到启动结构上；空对象给空值。 */
+            [[nodiscard]]
+            auto get() const noexcept -> LPPROC_THREAD_ATTRIBUTE_LIST
+            {
+                return list_;
+            }
+
+        private:
+            /** @brief 回收列表，对象变为空；本来就不持有则不做任何事。 */
+            void reset() noexcept
+            {
+                if (list_ != nullptr)
+                {
+                    ::DeleteProcThreadAttributeList(list_);
+                    list_ = nullptr;
+                }
+            }
+
+            /** @brief 缓冲容量（字节）：远大于单个属性的实际需求。 */
+            static constexpr std::size_t BUFFER_CAPACITY = 256;
+
+            alignas(std::max_align_t) std::byte buffer_[BUFFER_CAPACITY] = {};
+            LPPROC_THREAD_ATTRIBUTE_LIST list_ = nullptr;
+        };
+
         /// capture_exec_timed 的 Windows 分支：句柄白名单与脱离 job 的
         /// 机制说明随 capture_exec_timed 的文档块。
         [[nodiscard]]
@@ -1939,32 +2100,14 @@ export namespace cg::util::platform
                 sizeof(SECURITY_ATTRIBUTES),
                 nullptr,
                 TRUE};
-            const HANDLE out_file = make_temp_capture_file(inheritable);
-            const HANDLE err_file = make_temp_capture_file(inheritable);
-            const HANDLE dev_null = CreateFileW(
-                L"NUL",
-                GENERIC_READ,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                &inheritable,
-                OPEN_EXISTING,
-                0,
-                nullptr);
-            if (out_file == INVALID_HANDLE_VALUE
-                || err_file == INVALID_HANDLE_VALUE
-                || dev_null == INVALID_HANDLE_VALUE)
+            // 三个句柄取到即接管；哪一个没建成都直接返回，已建成的随
+            // 析构关闭。
+            const handle::Owned out_file = make_temp_capture_file(inheritable);
+            const handle::Owned err_file = make_temp_capture_file(inheritable);
+            handle::Owned       dev_null =
+                open_inheritable_null_device(GENERIC_READ, inheritable);
+            if (!out_file.valid() || !err_file.valid() || !dev_null.valid())
             {
-                if (out_file != INVALID_HANDLE_VALUE)
-                {
-                    CloseHandle(out_file);
-                }
-                if (err_file != INVALID_HANDLE_VALUE)
-                {
-                    CloseHandle(err_file);
-                }
-                if (dev_null != INVALID_HANDLE_VALUE)
-                {
-                    CloseHandle(dev_null);
-                }
                 return result;
             }
 
@@ -1974,54 +2117,27 @@ export namespace cg::util::platform
             // 等后台 update 结束才见 EOF。白名单把可继承集收窄到这三个文件。
             STARTUPINFOEXW si{};
             si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-            si.StartupInfo.hStdOutput = out_file;
-            si.StartupInfo.hStdError = err_file;
-            si.StartupInfo.hStdInput = dev_null;
-            LPPROC_THREAD_ATTRIBUTE_LIST attributes = nullptr;
-            bool                         listed = false;
-            // lpValue 必须存活到 DeleteProcThreadAttributeList（属性列表只保存
-            // 指针而非拷贝），故句柄数组放在函数作用域而不是属性初始化块内。
-            HANDLE inherited_handles[] = {out_file, err_file, dev_null};
-            {
-                SIZE_T bytes = 0;
-                // 首射只取所需缓冲区大小（文档化的 ERROR_INSUFFICIENT_BUFFER
-                // 探测）；属性列表的内存在 CreateProcess 返回前必须保持有效。
-                (void)InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
-                if (bytes > 0)
-                {
-                    attributes = static_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(
-                        std::malloc(bytes));
-                }
-                if (attributes != nullptr
-                    && InitializeProcThreadAttributeList(
-                        attributes,
-                        1,
-                        0,
-                        &bytes))
-                {
-                    listed = UpdateProcThreadAttribute(
-                                 attributes,
-                                 0,
-                                 PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-                                 inherited_handles,
-                                 sizeof(inherited_handles),
-                                 nullptr,
-                                 nullptr)
-                             != 0;
-                    if (!listed)
-                    {
-                        DeleteProcThreadAttributeList(attributes);
-                    }
-                }
-            }
+            si.StartupInfo.hStdOutput = out_file.get();
+            si.StartupInfo.hStdError = err_file.get();
+            si.StartupInfo.hStdInput = dev_null.get();
+            // 系统要的是裸句柄值，而且只保存指针不拷贝：白名单数组必须活到
+            // 派生结束，所以放在函数作用域而不是属性对象的构造处。
+            HANDLE inherited_handles[] = {
+                out_file.get(),
+                err_file.get(),
+                dev_null.get()};
+            // 属性列表同理活到派生结束；建不成时对象为空，下面按全继承回退。
+            const ProcAttrList attributes{inherited_handles};
             // 属性列表必须挂到 STARTUPINFOEXW::lpAttributeList 上，否则
             // CreateProcess 根本看不到白名单（只初始化不挂接 = 白名单静默失效，
             // 全继承语义照旧）。未列为扩展时保持 STARTUPINFOW 的旧 ABI（cb 与
             // 创建旗标必须一致）。
-            si.lpAttributeList = listed ? attributes : nullptr;
-            si.StartupInfo.cb =
-                listed ? sizeof(STARTUPINFOEXW) : sizeof(STARTUPINFOW);
-            const DWORD extended = listed ? EXTENDED_STARTUPINFO_PRESENT : 0;
+            si.lpAttributeList =
+                attributes.valid() ? attributes.get() : nullptr;
+            si.StartupInfo.cb = attributes.valid() ? sizeof(STARTUPINFOEXW)
+                                                   : sizeof(STARTUPINFOW);
+            const DWORD extended =
+                attributes.valid() ? EXTENDED_STARTUPINFO_PRESENT : 0;
             PROCESS_INFORMATION pi{};
             const DWORD detached = CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS;
             BOOL        spawned = CreateProcessW(
@@ -2052,34 +2168,30 @@ export namespace cg::util::platform
                     &si.StartupInfo,
                     &pi);
             }
-            if (listed)
-            {
-                DeleteProcThreadAttributeList(attributes);
-            }
-            std::free(attributes);
-            result.restricted_handles = listed;
-            CloseHandle(dev_null);
+            result.restricted_handles = attributes.valid();
+            dev_null.reset();
             if (!spawned)
             {
-                CloseHandle(out_file);
-                CloseHandle(err_file);
                 return result;
             }
+            // 子进程与它的主线程句柄立即接管，随本函数返回关闭。
+            const handle::Owned process = handle::Owned::adopt(pi.hProcess);
+            const handle::Owned main_thread = handle::Owned::adopt(pi.hThread);
             result.started = true;
 
             const DWORD wait_ms = static_cast<DWORD>(std::min<std::int64_t>(
                 timeout.count(),
                 static_cast<std::int64_t>(0xFFFFFFFFLL)));
-            const DWORD waited = WaitForSingleObject(pi.hProcess, wait_ms);
+            const DWORD waited = WaitForSingleObject(process.get(), wait_ms);
             if (waited == WAIT_OBJECT_0)
             {
                 DWORD code = 0;
-                if (GetExitCodeProcess(pi.hProcess, &code))
+                if (GetExitCodeProcess(process.get(), &code))
                 {
                     result.exit_code = static_cast<int>(code);
                 }
-                result.out = read_back_capture_file(out_file);
-                result.err = read_back_capture_file(err_file);
+                result.out = read_back_capture_file(out_file.get());
+                result.err = read_back_capture_file(err_file.get());
             }
             else if (waited == WAIT_TIMEOUT)
             {
@@ -2087,18 +2199,16 @@ export namespace cg::util::platform
             }
             // 超时分支刻意不读输出、不等待：本进程的两个读端一关，子进程的
             // 独立写端继续存活，临时文件在它退出时随最后一个句柄一起删除。
-            CloseHandle(out_file);
-            CloseHandle(err_file);
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
             return result;
         }
 
 #else
 
         /// 重定向用的临时文件描述符（先 unlink 后用：进程退出
-        /// 不留盘上文件）；失败返回 -1。
-        auto make_temp_capture_fd() -> int
+        /// 不留盘上文件）；取到描述符就交给拥有型对象返回，创建
+        /// 失败返回空对象。
+        [[nodiscard]]
+        auto make_temp_capture_fd() -> handle::Owned
         {
             std::error_code       ec;
             std::filesystem::path dir =
@@ -2114,12 +2224,12 @@ export namespace cg::util::platform
                     dir.string(),
                     static_cast<long long>(::getpid()),
                     attempt);
-                const int fd =
-                    ::open(name.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
-                if (fd >= 0)
+                handle::Owned fd = handle::Owned::adopt(
+                    ::open(name.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600));
+                if (fd.valid())
                 {
                     // 先 unlink：父进程超时/退出都不会留下可被他人看到的
-                    // 文件；fd 仍可读写，空间随最后一个引用关闭而释放。
+                    // 文件；描述符仍可读写，空间随最后一个引用关闭而释放。
                     ::unlink(name.c_str());
                     return fd;
                 }
@@ -2128,7 +2238,7 @@ export namespace cg::util::platform
                     break;
                 }
             }
-            return -1;
+            return {};
         }
 
         /// 回读临时文件描述符的全部内容（读前复位于文件头；定位失败
@@ -2160,30 +2270,24 @@ export namespace cg::util::platform
         {
             TimedExecResult result;
 
-            const int out_fd = make_temp_capture_fd();
-            const int err_fd = make_temp_capture_fd();
-            if (out_fd < 0 || err_fd < 0)
+            // 两个临时文件描述符取到即接管：哪一个没建成都直接返回，
+            // 已建成的随析构关闭。
+            handle::Owned out_fd = make_temp_capture_fd();
+            handle::Owned err_fd = make_temp_capture_fd();
+            if (!out_fd.valid() || !err_fd.valid())
             {
-                if (out_fd >= 0)
-                {
-                    ::close(out_fd);
-                }
-                if (err_fd >= 0)
-                {
-                    ::close(err_fd);
-                }
                 return result;
             }
 
             // exec 失败哨兵：写端带 FD_CLOEXEC，exec 成功即在子进程里关闭，
             // 父进程读端看到 EOF；失败时子进程先把 errno 写进来。没有它，
             // fork 成功而 execv 失败会以 exit 127/空输出伪装成"已启动"。
-            int        exec_ctl[2] = {-1, -1};
-            const bool have_exec_ctl = ::pipe(exec_ctl) == 0;
+            PipePair   exec_ctl = make_pipe();
+            const bool have_exec_ctl = exec_ctl.valid();
             if (have_exec_ctl)
             {
-                (void)::fcntl(exec_ctl[0], F_SETFD, FD_CLOEXEC);
-                (void)::fcntl(exec_ctl[1], F_SETFD, FD_CLOEXEC);
+                (void)::fcntl(exec_ctl.read.get(), F_SETFD, FD_CLOEXEC);
+                (void)::fcntl(exec_ctl.write.get(), F_SETFD, FD_CLOEXEC);
             }
 
             const std::string        exe_native = exe.native();
@@ -2199,47 +2303,51 @@ export namespace cg::util::platform
             {
                 if (have_exec_ctl)
                 {
-                    ::close(exec_ctl[0]);
+                    exec_ctl.read.reset();
                 }
                 // 新会话：脱离父进程的进程组与控制终端，父进程退出后继续运行。
                 (void)::setsid();
-                const int dev_null = ::open("/dev/null", O_RDONLY);
-                if (dev_null >= 0)
+                handle::Owned dev_null =
+                    handle::Owned::adopt(::open("/dev/null", O_RDONLY));
+                if (dev_null.valid())
                 {
-                    ::dup2(dev_null, STDIN_FILENO);
-                    if (dev_null > STDERR_FILENO)
+                    ::dup2(dev_null.get(), STDIN_FILENO);
+                    if (dev_null.get() > STDERR_FILENO)
                     {
-                        ::close(dev_null);
+                        dev_null.reset();
                     }
                 }
-                ::dup2(out_fd, STDOUT_FILENO);
-                ::dup2(err_fd, STDERR_FILENO);
-                if (out_fd > STDERR_FILENO)
+                ::dup2(out_fd.get(), STDOUT_FILENO);
+                ::dup2(err_fd.get(), STDERR_FILENO);
+                if (out_fd.get() > STDERR_FILENO)
                 {
-                    ::close(out_fd);
+                    out_fd.reset();
                 }
-                if (err_fd > STDERR_FILENO)
+                if (err_fd.get() > STDERR_FILENO)
                 {
-                    ::close(err_fd);
+                    err_fd.reset();
                 }
                 // 关闭 3 号以上全部 fd：detached 子进程不得继承宿主的管道/套接
                 // 字写端，否则宿主读端要等后台 update 退出才见到 EOF。stdin/
                 // stdout/stderr 已换成 /dev/null 与临时文件。Linux 用
                 // /proc/self/fd 精确枚举；其它 POSIX 扫描 RLIMIT_NOFILE。
+                // 继承来的描述符不是这里取用的资源，逐个交给拥有型对象再
+                // 立即复位，是为了让关闭调用只出现在拥有者那里。
 #if defined(__linux__)
-                if (DIR* fds = ::opendir("/proc/self/fd"))
+                if (handle::OwnedPtr<DIR, handle::DirDeleter> fds =
+                        handle::OwnedPtr<DIR, handle::DirDeleter>::adopt(
+                            ::opendir("/proc/self/fd")))
                 {
-                    const int scan = ::dirfd(fds);
-                    while (const dirent* entry = ::readdir(fds))
+                    const int scan = ::dirfd(fds.get());
+                    while (const dirent* entry = ::readdir(fds.get()))
                     {
                         const int fd = std::atoi(entry->d_name);
                         if (fd > STDERR_FILENO && fd != scan
-                            && (!have_exec_ctl || fd != exec_ctl[1]))
+                            && (!have_exec_ctl || fd != exec_ctl.write.get()))
                         {
-                            ::close(fd);
+                            handle::Owned::adopt(fd).reset();
                         }
                     }
-                    ::closedir(fds);
                 }
                 else
 #endif
@@ -2253,11 +2361,11 @@ export namespace cg::util::platform
                          fd < static_cast<int>(limit);
                          ++fd)
                     {
-                        if (have_exec_ctl && fd == exec_ctl[1])
+                        if (have_exec_ctl && fd == exec_ctl.write.get())
                         {
                             continue; // 哨兵写端：exec 成功时由 FD_CLOEXEC 关闭
                         }
-                        ::close(fd);
+                        handle::Owned::adopt(fd).reset();
                     }
                 }
                 std::vector<char*> argv;
@@ -2271,22 +2379,20 @@ export namespace cg::util::platform
                 if (have_exec_ctl)
                 {
                     const int exec_errno = errno;
-                    (void)::write(exec_ctl[1], &exec_errno, sizeof(exec_errno));
+                    (void)::write(
+                        exec_ctl.write.get(),
+                        &exec_errno,
+                        sizeof(exec_errno));
                 }
                 ::_exit(127);
             }
             if (have_exec_ctl)
             {
-                ::close(exec_ctl[1]); // 父进程只留读端
+                // 父进程只留读端：自己攥着写端，读端就永远等不到文件尾。
+                exec_ctl.write.reset();
             }
             if (pid < 0)
             {
-                if (have_exec_ctl)
-                {
-                    ::close(exec_ctl[0]);
-                }
-                ::close(out_fd);
-                ::close(err_fd);
                 return result;
             }
             result.started = true;
@@ -2323,10 +2429,12 @@ export namespace cg::util::platform
                 ssize_t got = -1;
                 do
                 {
-                    got = ::read(exec_ctl[0], &exec_errno, sizeof(exec_errno));
+                    got = ::read(
+                        exec_ctl.read.get(),
+                        &exec_errno,
+                        sizeof(exec_errno));
                 } while (got < 0 && errno == EINTR);
                 exec_failed = got == static_cast<ssize_t>(sizeof(exec_errno));
-                ::close(exec_ctl[0]);
             }
             if (reaped)
             {
@@ -2334,8 +2442,8 @@ export namespace cg::util::platform
                 {
                     result.exit_code = WEXITSTATUS(status);
                 }
-                result.out = read_back_capture_fd(out_fd);
-                result.err = read_back_capture_fd(err_fd);
+                result.out = read_back_capture_fd(out_fd.get());
+                result.err = read_back_capture_fd(err_fd.get());
             }
             else
             {
@@ -2353,8 +2461,6 @@ export namespace cg::util::platform
                 result.out.clear();
                 result.err.clear();
             }
-            ::close(out_fd);
-            ::close(err_fd);
             return result;
         }
 
@@ -2489,6 +2595,10 @@ export namespace cg::util::platform
      * Rebuild、wrap 透传）全部是 Windows-only 调用面，本原语是对它们的
      * 收敛而非新平台功能；可移植的捕获族仍是 capture_exec /
      * capture_exec_timed（两分支皆实现，供 hook 路径跨平台使用）。
+     * 管道端取到即交给拥有型对象，派生之后要提前关闭的四端用显式复位；
+     * 读端按移动交给排水线程，线程结束时析构关闭。排水线程创建失败时
+     * 已移进线程构造函数的读端随构造失败被销毁，先建成的那条排水线程
+     * 随它的线程对象析构时汇合；异常照旧外抛，但不再带着没关闭的句柄。
      */
     [[nodiscard]]
     inline auto run_child(const ChildRunSpec& spec) -> ChildRunResult
@@ -2498,71 +2608,45 @@ export namespace cg::util::platform
             sizeof(SECURITY_ATTRIBUTES),
             nullptr,
             TRUE};
-        HANDLE     in_read = nullptr;
-        HANDLE     in_write = nullptr;
-        HANDLE     out_read = nullptr;
-        HANDLE     out_write = nullptr;
-        HANDLE     err_read = nullptr;
-        HANDLE     err_write = nullptr;
         const bool use_std_handles = !spec.inherit_parent_stdio;
-        bool       pipes_ok = true;
-        if (use_std_handles && spec.stdin_mode == ChildStdin::EofPipe
-            && !CreatePipe(&in_read, &in_write, &inheritable, 0))
+        // 管道取到即交给拥有者：哪一条没建成都直接返回，已建成的各端随
+        // 本作用域的析构关闭。
+        detail::PipePair in;
+        detail::PipePair out;
+        detail::PipePair err;
+        bool             pipes_ok = true;
+        if (use_std_handles && spec.stdin_mode == ChildStdin::EofPipe)
         {
-            pipes_ok = false;
+            in = detail::make_pipe(inheritable);
+            pipes_ok = in.valid();
         }
-        if (pipes_ok && use_std_handles && spec.capture_stdout
-            && !CreatePipe(&out_read, &out_write, &inheritable, 0))
+        if (pipes_ok && use_std_handles && spec.capture_stdout)
         {
-            pipes_ok = false;
+            out = detail::make_pipe(inheritable);
+            pipes_ok = out.valid();
         }
-        if (pipes_ok && use_std_handles && spec.capture_stderr
-            && !CreatePipe(&err_read, &err_write, &inheritable, 0))
+        if (pipes_ok && use_std_handles && spec.capture_stderr)
         {
-            pipes_ok = false;
+            err = detail::make_pipe(inheritable);
+            pipes_ok = err.valid();
         }
         if (!pipes_ok)
         {
-            // 部分建成的管道一并关闭（合一前的骨架在此泄漏先建的一端）。
-            if (in_read != nullptr)
-            {
-                CloseHandle(in_read);
-            }
-            if (in_write != nullptr)
-            {
-                CloseHandle(in_write);
-            }
-            if (out_read != nullptr)
-            {
-                CloseHandle(out_read);
-            }
-            if (out_write != nullptr)
-            {
-                CloseHandle(out_write);
-            }
-            if (err_read != nullptr)
-            {
-                CloseHandle(err_read);
-            }
-            if (err_write != nullptr)
-            {
-                CloseHandle(err_write);
-            }
             return result;
         }
         result.pipes_ok = true;
         // 我方持有的读端不继承进子进程（排水端是本进程私有的）。
-        if (in_write != nullptr)
+        if (in.write.valid())
         {
-            SetHandleInformation(in_write, HANDLE_FLAG_INHERIT, 0);
+            SetHandleInformation(in.write.get(), HANDLE_FLAG_INHERIT, 0);
         }
-        if (out_read != nullptr)
+        if (out.read.valid())
         {
-            SetHandleInformation(out_read, HANDLE_FLAG_INHERIT, 0);
+            SetHandleInformation(out.read.get(), HANDLE_FLAG_INHERIT, 0);
         }
-        if (err_read != nullptr)
+        if (err.read.valid())
         {
-            SetHandleInformation(err_read, HANDLE_FLAG_INHERIT, 0);
+            SetHandleInformation(err.read.get(), HANDLE_FLAG_INHERIT, 0);
         }
 
         STARTUPINFOW startup{};
@@ -2576,18 +2660,18 @@ export namespace cg::util::platform
                 startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
                 break;
             case ChildStdin::EofPipe:
-                startup.hStdInput = in_read;
+                startup.hStdInput = in.read.get();
                 break;
             case ChildStdin::NullHandle:
             default:
                 startup.hStdInput = nullptr;
                 break;
             }
-            startup.hStdOutput = out_write != nullptr
-                                     ? out_write
+            startup.hStdOutput = out.write.valid()
+                                     ? out.write.get()
                                      : GetStdHandle(STD_OUTPUT_HANDLE);
-            startup.hStdError = err_write != nullptr
-                                    ? err_write
+            startup.hStdError = err.write.valid()
+                                    ? err.write.get()
                                     : GetStdHandle(STD_ERROR_HANDLE);
         }
         DWORD flags = 0;
@@ -2618,47 +2702,32 @@ export namespace cg::util::platform
         const DWORD spawn_error = ok ? 0 : GetLastError();
         // 我方写端一律即刻关闭（子进程持有自己的副本）；EofPipe 的 in_read
         // 也关——关 in_write 正是令子进程 stdin 见 EOF 的动作。
-        if (in_read != nullptr)
-        {
-            CloseHandle(in_read);
-        }
-        if (in_write != nullptr)
-        {
-            CloseHandle(in_write);
-        }
-        if (out_write != nullptr)
-        {
-            CloseHandle(out_write);
-        }
-        if (err_write != nullptr)
-        {
-            CloseHandle(err_write);
-        }
+        in.read.reset();
+        in.write.reset();
+        out.write.reset();
+        err.write.reset();
         if (!ok)
         {
-            if (out_read != nullptr)
-            {
-                CloseHandle(out_read);
-            }
-            if (err_read != nullptr)
-            {
-                CloseHandle(err_read);
-            }
             result.spawn_error = spawn_error;
             return result;
         }
         result.started = true;
+        // 子进程与它的主线程句柄立即接管，随本函数返回关闭。
+        const handle::Owned child = handle::Owned::adopt(process.hProcess);
+        const handle::Owned child_main_thread =
+            handle::Owned::adopt(process.hThread);
 
         // 逐字排水循环（合一前四份骨架的共同核心）：阻塞读本流到 EOF、
-        // 逐块累积、可选钩子、收尾关端。两路并发由各持一条线程保证。
+        // 逐块累积、可选钩子、收尾关端。两路并发由各持一条线程保证。读端
+        // 按值接收，归排水线程所有，线程结束时析构关闭。
         const auto drain =
-            [](HANDLE pipe, std::string& sink, const DrainTap& tap)
+            [](handle::Owned pipe, std::string& sink, const DrainTap& tap)
         {
             char  buffer[4096];
             DWORD got = 0;
             for (;;)
             {
-                if (!ReadFile(pipe, buffer, sizeof(buffer), &got, nullptr)
+                if (!ReadFile(pipe.get(), buffer, sizeof(buffer), &got, nullptr)
                     || got == 0)
                 {
                     break;
@@ -2669,7 +2738,7 @@ export namespace cg::util::platform
                     tap.on_chunk(buffer, got);
                 }
             }
-            CloseHandle(pipe);
+            pipe.reset();
             if (tap.on_finish)
             {
                 tap.on_finish();
@@ -2677,19 +2746,19 @@ export namespace cg::util::platform
         };
         std::optional<std::jthread> out_reader;
         std::optional<std::jthread> err_reader;
-        if (out_read != nullptr)
+        if (out.read.valid())
         {
             out_reader.emplace(
                 drain,
-                out_read,
+                std::move(out.read),
                 std::ref(result.out),
                 std::cref(spec.out_tap));
         }
-        if (err_read != nullptr)
+        if (err.read.valid())
         {
             err_reader.emplace(
                 drain,
-                err_read,
+                std::move(err.read),
                 std::ref(result.err),
                 std::cref(spec.err_tap));
         }
@@ -2702,16 +2771,16 @@ export namespace cg::util::platform
                          : std::min<std::int64_t>(
                                raw,
                                static_cast<std::int64_t>(0x7FFFFFFF)));
-            if (WaitForSingleObject(process.hProcess, ceiling) == WAIT_TIMEOUT)
+            if (WaitForSingleObject(child.get(), ceiling) == WAIT_TIMEOUT)
             {
                 result.timed_out = true;
-                TerminateProcess(process.hProcess, WAIT_TIMEOUT);
-                WaitForSingleObject(process.hProcess, 5'000);
+                TerminateProcess(child.get(), WAIT_TIMEOUT);
+                WaitForSingleObject(child.get(), 5'000);
             }
         }
         else
         {
-            WaitForSingleObject(process.hProcess, INFINITE);
+            WaitForSingleObject(child.get(), INFINITE);
         }
         if (out_reader.has_value())
         {
@@ -2722,10 +2791,8 @@ export namespace cg::util::platform
             err_reader->join();
         }
         DWORD code = 0;
-        GetExitCodeProcess(process.hProcess, &code);
+        GetExitCodeProcess(child.get(), &code);
         result.exit_code = static_cast<int>(code);
-        CloseHandle(process.hProcess);
-        CloseHandle(process.hThread);
         return result;
     }
 

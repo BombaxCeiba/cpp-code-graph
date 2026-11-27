@@ -22,7 +22,9 @@ module;
  *
  * Bash 矩阵纯 tree-sitter 路径（跨平台恒跑）；PowerShell 矩阵经进程
  * 内引擎宿主，引擎不可用的环境整组跳过（本机与 CI 上的 Windows 必
- * 有 5.1 主路径，全量生效）。
+ * 有 5.1 主路径，全量生效）。对象协议用例是被测对象为原语本身的协议
+ * 测试：经协议测试面直调三个原语，建出的垫片侧对象与文件句柄都由测试
+ * 里的拥有型对象持有，拆除的返回值照旧由断言检查。
  */
 
 export module cg.test.shellscan;
@@ -38,6 +40,9 @@ namespace
     using R = cg::test::Result;
     namespace scan = cg::util::shellscan;
     namespace host = cg::util::cshost;
+    // 对象协议原语的协议测试面：只有这里的协议用例直调原语（被测对象就
+    // 是原语本身），生产代码与别的测试不得走它。
+    namespace proto = cg::util::cshost::protocol_test;
     namespace mx = cg::test::shellmatrix;
 
     /// 引擎枚举到矩阵字符串口径。
@@ -513,15 +518,17 @@ namespace
             // 篡改，行为用例不适用。
             return;
         }
-        HANDLE file = CreateFileW(
-            marker.c_str(),
-            FILE_WRITE_ATTRIBUTES,
-            0,
-            nullptr,
-            OPEN_EXISTING,
-            0,
-            nullptr);
-        if (file == INVALID_HANDLE_VALUE)
+        // 文件句柄一取到就交给拥有者；打开失败时断言失败并返回。
+        cg::util::handle::Owned file =
+            cg::util::handle::Owned::adopt_file(CreateFileW(
+                marker.c_str(),
+                FILE_WRITE_ATTRIBUTES,
+                0,
+                nullptr,
+                OPEN_EXISTING,
+                0,
+                nullptr));
+        if (!file.valid())
         {
             cg::test::check(r, false, "打开缓存时间戳失败");
             return;
@@ -536,8 +543,11 @@ namespace
         FILETIME shifted{};
         shifted.dwLowDateTime = stamp.LowPart;
         shifted.dwHighDateTime = stamp.HighPart;
-        const BOOL shifted_ok = SetFileTime(file, nullptr, nullptr, &shifted);
-        CloseHandle(file);
+        const BOOL shifted_ok =
+            SetFileTime(file.get(), nullptr, nullptr, &shifted);
+        // 必须在这里就关：句柄是以零共享方式打开的，开着的时候下面的
+        // 自刷新删不掉这个文件。
+        file.reset();
         cg::test::check(r, shifted_ok != 0, "篡改缓存时间戳");
         if (!shifted_ok)
         {
@@ -548,22 +558,21 @@ namespace
         cg::test::check(r, out.has_value(), "自刷新后引擎可用");
         // 重摆后缓存时间戳应与源回齐（hardlink 与源共享文件数据但
         // 目录项独立；回齐即证明整目录重摆发生）。
-        file = CreateFileW(
+        file = cg::util::handle::Owned::adopt_file(CreateFileW(
             marker.c_str(),
             FILE_READ_ATTRIBUTES,
             0,
             nullptr,
             OPEN_EXISTING,
             0,
-            nullptr);
-        if (file == INVALID_HANDLE_VALUE)
+            nullptr));
+        if (!file.valid())
         {
             cg::test::check(r, false, "重读缓存时间戳失败");
             return;
         }
         FILETIME after{};
-        GetFileTime(file, nullptr, nullptr, &after);
-        CloseHandle(file);
+        GetFileTime(file.get(), nullptr, nullptr, &after);
         ULARGE_INTEGER after_ui{};
         after_ui.LowPart = after.dwLowDateTime;
         after_ui.HighPart = after.dwHighDateTime;
@@ -593,6 +602,67 @@ namespace
     }
 
     /**
+     * @brief 协议测试里垫片侧对象的拥有者：持有一个协议面与一个令牌，离开
+     *        作用域时经协议测试面拆除；不参与引用计数。
+     *
+     * @internal
+     * 被测对象是原语本身，建立与拆除的返回值都要由断言原样检查，所以建
+     * 立的结果直接交给构造函数，拆除经 destroy 成员调原语、把返回码原样
+     * 交回并清零令牌；对已经拆除的令牌再调一次原语的断言照旧直调。令牌
+     * 不大于零表示没有建成（原语交回的是错误码），析构不去拆。拆除是跨
+     * 语言调用，内部会分配内存；析构里的那一次包住异常，从析构逃逸等于
+     * 终止进程。
+     */
+    class ProtoObject
+    {
+    public:
+        /** @brief 接管建立原语交回的结果：正数是令牌，其余是错误码。 */
+        ProtoObject(host::Face face, std::int32_t token) noexcept
+            : face_{face}, token_{token}
+        {
+        }
+
+        ProtoObject(const ProtoObject&) = delete;
+        auto operator=(const ProtoObject&) -> ProtoObject& = delete;
+        ProtoObject(ProtoObject&&) = delete;
+        auto operator=(ProtoObject&&) -> ProtoObject& = delete;
+
+        ~ProtoObject()
+        {
+            try
+            {
+                static_cast<void>(destroy());
+            }
+            catch (...)
+            {
+                // 吞掉之后拆除没有做成，垫片侧的条目随进程退出回收。
+            }
+        }
+
+        /**
+         * @brief 经协议测试面拆除当前持有的对象，清零令牌，原样交回原语
+         *        的返回码。
+         *
+         * @internal 没有持有对象时不调原语，交回 0（与拆除成功的返回码相
+         *           同）；是否建成要在拆除之前另行断言。
+         */
+        auto destroy() -> std::int32_t
+        {
+            if (token_ <= 0)
+            {
+                return 0;
+            }
+            const std::int32_t token = token_;
+            token_ = 0;
+            return proto::obj_destroy(face_, token);
+        }
+
+    private:
+        host::Face   face_;
+        std::int32_t token_;
+    };
+
+    /**
      * 生命周期与引用计数：往返三件、计数归零才真析构、孤儿释放
      * （abandon 只弃计数不拆除）、陈旧句柄被拒（拆除后/槽复用后）、
      * 协议错误码面。全程钉 51 线（FORBID hostfxr）保证形态确定。
@@ -615,30 +685,33 @@ namespace
         const host::ObjClass cls = host::ObjClass::SelectStringCore;
         const auto           argv = script_argv("Select-String -Pattern foo");
 
-        // 往返：create → call → destroy，拆除后旧 token 响亮拒绝。
+        // 往返：create → call → destroy，拆除后旧 token 响亮拒绝。建出的
+        // 对象一取到就交给拥有者；拆除的返回值经它的 destroy 成员断言。
         {
-            const std::int32_t token = host::obj_create(face, cls, L"");
+            const std::int32_t token = proto::obj_create(face, cls, L"");
+            ProtoObject        owner{face, token};
             cg::test::check(r, token > 0, std::format("token>0: {}", token));
-            const auto out = host::obj_call(face, cls, token, "Extract", argv);
+            const auto out = proto::obj_call(face, cls, token, "Extract", argv);
             cg::test::check(
                 r,
                 out.ok() && out.payload.find("requests") != std::string::npos,
                 std::format("Extract 成功: rc={}", out.rc));
             cg::test::check(
                 r,
-                host::obj_destroy(face, token)
-                    == static_cast<std::int32_t>(host::ObjErr::Ok),
+                owner.destroy() == static_cast<std::int32_t>(host::ObjErr::Ok),
                 "拆除返回 0");
             const auto stale =
-                host::obj_call(face, cls, token, "Extract", argv);
+                proto::obj_call(face, cls, token, "Extract", argv);
             cg::test::check(
                 r,
                 stale.rc
                     == static_cast<std::int32_t>(host::ObjErr::StaleHandle),
                 std::format("拆除后旧句柄被拒: rc={}", stale.rc));
+            // 对已经拆除的令牌再调一次原语：断言的是协议拒绝旧句柄，拆
+            // 的是失效的令牌，不交还任何东西，所以照旧直调。
             cg::test::check(
                 r,
-                host::obj_destroy(face, token)
+                proto::obj_destroy(face, token)
                     == static_cast<std::int32_t>(host::ObjErr::StaleHandle),
                 "二次拆除同为 stale（拆除恰一次）");
         }
@@ -654,14 +727,14 @@ namespace
                     const host::CsRef copy{*ref}; // AddRef
                 } // copy 析构：计数 2→1，垫片侧不得拆除
                 const auto alive =
-                    host::obj_call(face, cls, token, "Extract", argv);
+                    proto::obj_call(face, cls, token, "Extract", argv);
                 cg::test::check(
                     r,
                     alive.ok(),
                     std::format("计数未归零句柄仍活: rc={}", alive.rc));
                 ref.reset(); // 归零 → 拆除
                 const auto dead =
-                    host::obj_call(face, cls, token, "Extract", argv);
+                    proto::obj_call(face, cls, token, "Extract", argv);
                 cg::test::check(
                     r,
                     dead.rc
@@ -686,15 +759,17 @@ namespace
                         == static_cast<std::int32_t>(host::ObjErr::StaleHandle),
                     "abandon 后 call 拒绝");
                 ref.reset(); // 归零但短路：不 ObjDestroy
-                const auto orphan =
-                    host::obj_call(face, cls, token, "Extract", argv);
+                // 孤儿从此没有拥有者；拆除是断言（原语仍可达），经拥有者做。
+                ProtoObject owner{face, token};
+                const auto  orphan =
+                    proto::obj_call(face, cls, token, "Extract", argv);
                 cg::test::check(
                     r,
                     orphan.ok(),
                     std::format("孤儿路径垫片侧未拆除: rc={}", orphan.rc));
                 cg::test::check(
                     r,
-                    host::obj_destroy(face, token)
+                    owner.destroy()
                         == static_cast<std::int32_t>(host::ObjErr::Ok),
                     "孤儿条目显式拆除收尾");
             }
@@ -703,19 +778,21 @@ namespace
         // 代次失效：槽位转一圈复用后，旧 token 不复燃（垫片句柄表
         // 低 10 位槽号 + 高位代次；1100 次创建销毁必然跨圈）。
         {
-            const std::int32_t first = host::obj_create(face, cls, L"");
+            const std::int32_t first = proto::obj_create(face, cls, L"");
+            ProtoObject        first_owner{face, first};
             cg::test::check(r, first > 0, "代次用例首句柄");
             cg::test::check(
                 r,
-                host::obj_destroy(face, first)
+                first_owner.destroy()
                     == static_cast<std::int32_t>(host::ObjErr::Ok),
                 "首句柄拆除");
             bool all_live = true;
             for (int i = 0; i < 1100; ++i)
             {
-                const std::int32_t t = host::obj_create(face, cls, L"");
+                const std::int32_t t = proto::obj_create(face, cls, L"");
+                ProtoObject        owner{face, t};
                 if (t <= 0
-                    || host::obj_destroy(face, t)
+                    || owner.destroy()
                            != static_cast<std::int32_t>(host::ObjErr::Ok))
                 {
                     all_live = false;
@@ -724,7 +801,7 @@ namespace
             }
             cg::test::check(r, all_live, "槽复用循环 1100 次全活");
             const auto relic =
-                host::obj_call(face, cls, first, "Extract", argv);
+                proto::obj_call(face, cls, first, "Extract", argv);
             cg::test::check(
                 r,
                 relic.rc
@@ -737,40 +814,41 @@ namespace
         {
             cg::test::check(
                 r,
-                host::obj_call(face, cls, 0, "Extract", argv).rc
+                proto::obj_call(face, cls, 0, "Extract", argv).rc
                     == static_cast<std::int32_t>(host::ObjErr::BadHandle),
                 "零值句柄 BadHandle");
             cg::test::check(
                 r,
-                host::obj_call(face, cls, 424242, "Extract", argv).rc
+                proto::obj_call(face, cls, 424242, "Extract", argv).rc
                     == static_cast<std::int32_t>(host::ObjErr::StaleHandle),
                 "从未存在的 token StaleHandle");
-            const std::int32_t token = host::obj_create(face, cls, L"");
+            const std::int32_t token = proto::obj_create(face, cls, L"");
             cg::test::check(r, token > 0, "错误码用例句柄");
             if (token > 0)
             {
+                const ProtoObject owner{face, token};
                 cg::test::check(
                     r,
-                    host::obj_call(face, cls, token, "NoSuchMethod", {}).rc
+                    proto::obj_call(face, cls, token, "NoSuchMethod", {}).rc
                         == static_cast<std::int32_t>(
                             host::ObjErr::UnknownMethod),
                     "未知方法 UnknownMethod");
                 cg::test::check(
                     r,
-                    host::obj_call(face, cls, token, "Extract", {}).rc
+                    proto::obj_call(face, cls, token, "Extract", {}).rc
                         == static_cast<std::int32_t>(host::ObjErr::Payload),
                     "缺 script 实参 Payload");
                 cg::test::check(
                     r,
-                    host::obj_call(face, cls, token, "OnFinalRelease", {}).rc
+                    proto::obj_call(face, cls, token, "OnFinalRelease", {}).rc
                         == static_cast<std::int32_t>(
                             host::ObjErr::UnknownMethod),
                     "拆除钩子不在分派面");
-                static_cast<void>(host::obj_destroy(face, token));
+                // 没有显式拆除：对象随拥有者离开这个块时收尾。
             }
             cg::test::check(
                 r,
-                host::obj_create(
+                proto::obj_create(
                     face,
                     host::ObjClass::MsbuildEval,
                     L"Z:\\ccg-no-such-dir")
@@ -811,24 +889,24 @@ namespace
         const host::Face     face = host::Face::SelectString;
         const host::ObjClass cls = host::ObjClass::SelectStringCore;
         const auto           argv = script_argv("Select-String -Pattern foo");
-        const std::int32_t   token = host::obj_create(face, cls, L"");
+        const std::int32_t   token = proto::obj_create(face, cls, L"");
+        ProtoObject          owner{face, token};
         cg::test::check(r, token > 0, "7 线 SelectStringCore 建立");
         if (token > 0)
         {
-            const auto out = host::obj_call(face, cls, token, "Extract", argv);
+            const auto out = proto::obj_call(face, cls, token, "Extract", argv);
             cg::test::check(
                 r,
                 out.ok(),
                 std::format("7 线 Extract: {}", out.rc));
             cg::test::check(
                 r,
-                host::obj_destroy(face, token)
-                    == static_cast<std::int32_t>(host::ObjErr::Ok),
+                owner.destroy() == static_cast<std::int32_t>(host::ObjErr::Ok),
                 "7 线拆除");
         }
         cg::test::check(
             r,
-            host::obj_create(face, host::ObjClass::MsbuildEval, L"")
+            proto::obj_create(face, host::ObjClass::MsbuildEval, L"")
                 == static_cast<std::int32_t>(host::ObjErr::NotOnLine),
             "7 线请求 MsbuildEval 返回 NotOnLine");
         host::reset_for_tests();

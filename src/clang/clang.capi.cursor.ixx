@@ -187,6 +187,159 @@ export namespace cg::clang
         return out;
     }
 
+    namespace detail
+    {
+
+        /**
+         * @brief 拥有引擎交出的覆写方法游标数组：析构时交还给引擎。
+         *
+         * @internal
+         * 引擎把整条覆写链放进一个交由调用方持有的数组，读完后要整体交
+         * 还。数组指针由带删除器的拥有型指针持有，交还调用只出现在删除器
+         * 的函数体里。数组只在取用它的那个函数里读一遍，所以不移动也不
+         * 拷贝。引擎没有给出数组（非虚函数、没有基声明）时对象为空，不
+         * 发生交还。
+         */
+        class OverriddenCursors
+        {
+        public:
+            OverriddenCursors(const OverriddenCursors&) = delete;
+            auto operator=(const OverriddenCursors&)
+                -> OverriddenCursors& = delete;
+            OverriddenCursors(OverriddenCursors&&) = delete;
+            auto operator=(OverriddenCursors&&) -> OverriddenCursors& = delete;
+
+            /** @brief 取 c 覆写的方法游标数组并持有。 */
+            [[nodiscard]]
+            static auto of(const CXCursor& c) -> OverriddenCursors
+            {
+                Owner    cursors;
+                unsigned count = 0;
+                api().clang_getOverriddenCursors(
+                    c,
+                    cursors.release_and_get_address_of(),
+                    &count);
+                return OverriddenCursors{std::move(cursors), count};
+            }
+
+            /** @brief 数组里的游标个数。 */
+            [[nodiscard]]
+            auto size() const noexcept -> std::size_t
+            {
+                return count_;
+            }
+
+            /** @brief 第 index 个游标；index 必须小于 size()。 */
+            [[nodiscard]]
+            auto operator[](std::size_t index) const noexcept -> const CXCursor&
+            {
+                return cursors_.get()[index];
+            }
+
+        private:
+            /** @brief 覆写方法游标数组的删除器；交还调用只在这一处出现。 */
+            struct Deleter
+            {
+                auto operator()(CXCursor* cursors) const noexcept -> void
+                {
+                    api().clang_disposeOverriddenCursors(cursors);
+                }
+            };
+
+            /** @brief 游标数组的拥有者。 */
+            using Owner = cg::util::handle::OwnedPtr<CXCursor, Deleter>;
+
+            /** @brief 接管引擎交出的数组与它的游标个数。 */
+            OverriddenCursors(Owner cursors, unsigned count) noexcept
+                : cursors_{std::move(cursors)}, count_{count}
+            {
+            }
+
+            Owner       cursors_;
+            std::size_t count_ = 0;
+        };
+
+        /**
+         * @brief 拥有引擎交出的记号数组：析构时交还给引擎。
+         *
+         * @internal
+         * 记号数组是引擎在堆上分配的，交还时要带上取记号时用到的翻译单
+         * 元与记号个数，两者都记在删除器里。数组指针由带删除器的拥有型
+         * 指针持有，交还调用只出现在删除器的函数体里。数组只在取用它的
+         * 那个函数里读一遍，所以不移动也不拷贝。区间里词法不出记号时对
+         * 象为空，不发生交还。
+         */
+        class Tokens
+        {
+        public:
+            Tokens(const Tokens&) = delete;
+            auto operator=(const Tokens&) -> Tokens& = delete;
+            Tokens(Tokens&&) = delete;
+            auto operator=(Tokens&&) -> Tokens& = delete;
+
+            /**
+             * @brief 把 range 覆盖的源文本切成记号并持有。
+             *
+             * @param tu    range 所属的翻译单元。
+             * @param range 同一个文件内的一段源文本范围。
+             */
+            [[nodiscard]]
+            static auto tokenize(
+                const CXTranslationUnit& tu,
+                const CXSourceRange&     range) -> Tokens
+            {
+                Owner    tokens{TokenDeleter{.tu = tu}};
+                unsigned count = 0;
+                api().clang_tokenize(
+                    tu,
+                    range,
+                    tokens.release_and_get_address_of(),
+                    &count);
+                // 记号个数是调用之后才知道的：补进删除器，交还时要带上它。
+                tokens.get_deleter().count = count;
+                return Tokens{std::move(tokens)};
+            }
+
+            /** @brief 数组里的记号个数。 */
+            [[nodiscard]]
+            auto size() const noexcept -> std::size_t
+            {
+                return tokens_.get_deleter().count;
+            }
+
+            /** @brief 第 index 个记号；index 必须小于 size()。 */
+            [[nodiscard]]
+            auto operator[](std::size_t index) const noexcept -> CXToken
+            {
+                return tokens_.get()[index];
+            }
+
+        private:
+            /** @brief 记号数组的删除器：连同翻译单元与记号个数一起记下。 */
+            struct TokenDeleter
+            {
+                CXTranslationUnit tu = nullptr; ///< 取记号时用到的翻译单元
+                unsigned          count = 0;    ///< 数组里的记号个数
+
+                auto operator()(CXToken* tokens) const noexcept -> void
+                {
+                    api().clang_disposeTokens(tu, tokens, count);
+                }
+            };
+
+            /** @brief 记号数组的拥有者。 */
+            using Owner = cg::util::handle::OwnedPtr<CXToken, TokenDeleter>;
+
+            /** @brief 接管引擎交出的数组。 */
+            explicit Tokens(Owner tokens) noexcept : tokens_{std::move(tokens)}
+            {
+            }
+
+            Owner tokens_;
+        };
+
+    } // namespace detail
+
     /**
      * @brief 此（虚）成员函数游标覆写的方法，直接基优先。
      *
@@ -197,19 +350,19 @@ export namespace cg::clang
     [[nodiscard]]
     auto overridden(const CXCursor& c) -> std::vector<CXCursor>
     {
-        CXCursor* cursors = nullptr;
-        unsigned  count = 0;
-        detail::api().clang_getOverriddenCursors(c, &cursors, &count);
+        // 数组一取到就交给拥有者：下面预留容量抛出时，它也随本函数交还。
+        const detail::OverriddenCursors cursors =
+            detail::OverriddenCursors::of(c);
+        const std::size_t     count = cursors.size();
         std::vector<CXCursor> out;
-        if (static_cast<std::int64_t>(count) > 0)
+        if (count > 0)
         {
             out.reserve(count);
         }
-        for (unsigned i = 0; i < count; ++i)
+        for (std::size_t i = 0; i < count; ++i)
         {
             out.push_back(cursors[i]);
         }
-        detail::api().clang_disposeOverriddenCursors(cursors);
         return out;
     }
 
@@ -343,16 +496,14 @@ export namespace cg::clang
         {
             return out;
         }
-        CXToken* tokens = nullptr;
-        unsigned count = 0;
-        detail::api().clang_tokenize(tu, range, &tokens, &count);
-        for (unsigned i = 0; i < count; ++i)
+        // 记号数组一取到就交给拥有者：逐个取拼写时抛出，它也随本函数交还。
+        const detail::Tokens tokens = detail::Tokens::tokenize(tu, range);
+        for (std::size_t i = 0; i < tokens.size(); ++i)
         {
             out.push_back(
                 Str{detail::api().clang_getTokenSpelling(tu, tokens[i])}
                     .std_str());
         }
-        detail::api().clang_disposeTokens(tu, tokens, count);
         return out;
     }
 

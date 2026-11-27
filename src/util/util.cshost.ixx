@@ -60,18 +60,31 @@ module;
  * 任何降级链失败都走快速否决：返回不可用，绝不抛出、绝不崩溃。
  * 协议载荷的 JSON 构造经 cg.util.json 门面（自带库纪律，严禁手写
  * 序列化）。
+ *
+ * 资源持有的口径：宿主运行时交出来的东西——动态库句柄、hostfxr 运行时
+ * 上下文、接口指针、命名共享内存的句柄与视图、结构体桥交回的结果串、
+ * 文件句柄——一律由拥有型对象持有，释放调用只出现在拥有者的析构与
+ * 删除器里，本单元的普通函数里没有人手配对的取与放。按设计常驻到进程
+ * 退出的资源（两条线各自装载的库、5.1 线的运行时宿主接口指针、7 线
+ * 的三件委托）在装载成功时显式交出所有权，登记在进程级引擎状态里。
+ * 对象协议的三个原语只导出给协议测试（protocol_test 命名空间），本单元
+ * 内部与生产代码一律经引用计数句柄 CsRef。
  */
 
 export module cg.util.cshost;
 
 import std;
 // 可执行文件自身定位（随包垫片的同目录探测）；与伞头无关的兄弟
-// 模块直连，DAG 上 platform 只依赖 std，无环。
+// 模块直连。platform 只依赖标准库、cstd 与 handle，不导入本单元，
+// 无环。
 import cg.util.platform;
-// 环境变量读取单点（测试钩子 CCG_PSHOST_FORBID）；cstd 只依赖 std，无环。
+// 句柄、动态库、映射视图与接口指针的拥有型封装；handle 只依赖标准库。
+import cg.util.handle;
+// 环境变量读取单点（测试钩子 CCG_PSHOST_FORBID）；cstd 只依赖标准库与
+// handle，不导入本单元，无环。
 import cg.util.cstd;
 // 对象协议命令载荷（ObjCreate/ObjCall 的 JSON）经 json 门面构造；
-// json 只依赖 std 与 bridge，无环。
+// json 只依赖 std、bridge 与 handle，无环。
 import cg.util.json;
 
 export namespace cg::util::cshost
@@ -235,6 +248,36 @@ namespace cg::util::cshost
 
     /** 引用计数归零的收尾（Windows 侧拆除句柄并释放盒子；POSIX 只删盒子）。 */
     void drop_handle_last(HandleBox* box);
+
+    namespace detail
+    {
+
+        /**
+         * @name 对象协议三件的本体。
+         *
+         * @internal
+         * 本单元内部（CsRef、开门函数、归零拆除）走的实现函数，不导出；
+         * 定义在各平台分支里。对外只导出协议测试面 protocol_test 里的三
+         * 个转发，那里写明了它的用途。
+         */
+        /** @{ */
+        [[nodiscard]]
+        auto create_object(
+            Face              face,
+            ObjClass          cls,
+            std::wstring_view assembly_dir) -> std::int32_t;
+        [[nodiscard]]
+        auto call_object(
+            Face                    face,
+            ObjClass                cls,
+            std::int32_t            token,
+            std::string_view        method,
+            std::span<const ObjArg> args) -> ObjOutcome;
+        [[nodiscard]]
+        auto destroy_object(Face face, std::int32_t token) -> std::int32_t;
+        /** @} */
+
+    } // namespace detail
 }
 
 export namespace cg::util::cshost
@@ -321,33 +364,55 @@ export namespace cg::util::cshost
     auto open_select_string() -> std::optional<CsRef>;
 
     /**
-     * @brief 开一个 MsbuildEval 求值会话（钉 51 线，不走降级链）。
+     * @brief 开一个 MsbuildEval 求值会话，失败时带回错误码，而不是只
+     *        返回空。
      *
-     * VS 自带 Microsoft.Build.dll 是 net472 程序集，CoreCLR（7 线）
-     * 装不下 .NET Framework 家族程序集，求值面只由 51 线承载；51 线
-     * 不可用（垫片缺席 / CLR 起不来）= 调用方按指引性报错处理。
+     * 求值面钉 51 线，不走降级链：VS 自带 Microsoft.Build.dll 是 net472
+     * 程序集，CoreCLR（7 线）装不下 .NET Framework 家族程序集，求值面
+     * 只由 51 线承载；51 线不可用（垫片缺席 / CLR 起不来）= 调用方按
+     * 指引性报错处理。
+     *
+     * @internal
+     * 失败时带回的就是对象协议错误码（负数）：51 线不可用时是
+     * LineUnavailable，构造失败（目录无效 / 引擎程序集缺失）时是垫片
+     * 回传的 ErrConstruct。求值客户端凭错误码决定重试与诊断，不必绕过
+     * 封装类去调裸原语探一下。
      *
      * @param assembly_dir MSBuild.exe 同目录（VS 自带程序集的解析根，
      *                     经 ObjCreate 构造参数递入；垫片的依赖解析
      *                     只认这个根）。
-     * @return 会话句柄；构造失败（目录无效/引擎程序集缺失——垫片回
-     *         ErrConstruct）或 51 线不可用时返回 std::nullopt。
+     * @return 成功时是计数 1 的会话句柄；失败时是对象协议错误码。
      */
     [[nodiscard]]
-    auto open_msbuild_eval(std::wstring_view assembly_dir)
-        -> std::optional<CsRef>;
+    auto try_open_msbuild_eval(std::wstring_view assembly_dir)
+        -> std::expected<CsRef, std::int32_t>;
+
+} // namespace cg::util::cshost
+
+/**
+ * @brief 对象协议底层通道原语的协议测试面：直接以裸 token 驱动三件。
+ *
+ * 只供对象协议测试使用。那里的被测对象就是原语本身（陈旧句柄的对抗
+ * 验证要绕过引用计数），别的代码不得导入本命名空间：生产路径一律走
+ * CsRef（开门函数 + call），防泄漏防复活；本单元内部经不导出的实现函
+ * 数。模块机制下不导出的名字对导入方不可见，测试要直调就只能导出，
+ * 所以三个原语在这个单独的命名空间里导出，名字一望即知用途，不再与
+ * 开门函数同处一个导出面。
+ */
+export namespace cg::util::cshost::protocol_test
+{
 
     /**
-     * @brief 对象协议底层通道原语（显式面，RAII 之外的无状态形态）。
-     *
-     * 求值客户端与协议单测的消费面：直接以裸 token 驱动三件（不经
-     * 引用计数），用于分派方法的显式控制与陈旧句柄的对抗性验证。
-     * 生产路径应优先 CsRef（open_* + call），防泄漏防复活。
+     * @brief ObjCreate 通道原语。
      *
      * @return token（正数）或负错误码。
      */
+    [[nodiscard]]
     auto obj_create(Face face, ObjClass cls, std::wstring_view assembly_dir)
-        -> std::int32_t;
+        -> std::int32_t
+    {
+        return detail::create_object(face, cls, assembly_dir);
+    }
 
     /**
      * @brief ObjCall 通道原语：按句柄与方法名反射分派实例方法。
@@ -358,36 +423,53 @@ export namespace cg::util::cshost
      * @return 成功时 payload 为方法返回 JSON；失败时 rc 携带专用
      *         错误码、payload 为诊断文本。
      */
+    [[nodiscard]]
     auto obj_call(
         Face                    face,
         ObjClass                cls,
         std::int32_t            token,
         std::string_view        method,
-        std::span<const ObjArg> args) -> ObjOutcome;
+        std::span<const ObjArg> args) -> ObjOutcome
+    {
+        return detail::call_object(face, cls, token, method, args);
+    }
 
     /**
      * @brief ObjDestroy 通道原语：垫片拆除三件套（条目移除 →
      *        OnFinalRelease → GCHandle.Free）。
      *
-     * 正常生命周期由 CsRef 归零路径独占调用；本原语的直接调用属于
-     * 协议测试面（陈旧句柄验证）。坏句柄/已失效句柄返回专用错误码。
+     * 正常生命周期由 CsRef 归零路径独占；本原语的直接调用属于协议测试
+     * 面（陈旧句柄验证）。坏句柄/已失效句柄返回专用错误码。
      */
-    auto obj_destroy(Face face, std::int32_t token) -> std::int32_t;
+    [[nodiscard]]
+    auto obj_destroy(Face face, std::int32_t token) -> std::int32_t
+    {
+        return detail::destroy_object(face, token);
+    }
 
-} // namespace cg::util::cshost
+} // namespace cg::util::cshost::protocol_test
 
 // ---------------------------------------------------------------------------
-// CsRef 成员定义（平台无关：只操作句柄盒与 obj_* 原语；拆除动作经
-// drop_handle_last 分支供给）。
+// CsRef 成员定义（平台无关：只操作句柄盒与不导出的协议实现函数；拆除
+// 动作经 drop_handle_last 分支供给）。
 // ---------------------------------------------------------------------------
 namespace cg::util::cshost
 {
 
-    /** 句柄接管的模块内部工厂（CsRef 的友元面：open_* 经它把裸句柄
+    /** 句柄接管的模块内部工厂（CsRef 的友元面：open_* 经它把新建的句柄
      *  装进 CsRef；私有构造不落进导出面）。 */
     struct CsRefFactory
     {
-        static auto adopt(HandleBox* box) -> CsRef { return CsRef{box}; }
+        /**
+         * @brief 接管一个刚建成的句柄盒：计数从此归句柄引用计数所有。
+         *
+         * @internal 显式交出所有权：盒子的生死改由计数决定（归零时
+         * drop_handle_last 回收），调用方手里的唯一指针就此放手。
+         */
+        static auto adopt(std::unique_ptr<HandleBox> box) -> CsRef
+        {
+            return CsRef{box.release()};
+        }
     };
 
     CsRef::CsRef(const CsRef& other) noexcept : box_{other.box_}
@@ -486,7 +568,12 @@ namespace cg::util::cshost
                 .rc = static_cast<std::int32_t>(ObjErr::StaleHandle),
                 .payload = "session abandoned (watchdog short-circuit)"};
         }
-        return obj_call(box_->face, box_->cls, box_->token, method, args);
+        return detail::call_object(
+            box_->face,
+            box_->cls,
+            box_->token,
+            method,
+            args);
     }
 
 } // namespace cg::util::cshost
@@ -675,6 +762,39 @@ namespace cg::util::cshost
 
         constexpr int HDT_LOAD_ASSEMBLY_AND_GET_FUNCTION_POINTER = 5;
 
+        // 拥有型别名：动态库句柄、组件对象接口指针、共享内存视图、跨语言
+        // 接口交回的内存。取到即接管，释放调用只在删除器的函数体里。模块
+        // 句柄本身就是指针，拥有型指针按它指向的类型建，所以先取出该类型。
+        using ModulePointee = std::remove_pointer_t<HMODULE>;
+        using Module = handle::OwnedPtr<ModulePointee, handle::ModuleDeleter>;
+        using MapView = handle::OwnedPtr<void, handle::ViewDeleter>;
+        using CoTaskMem = handle::OwnedPtr<void, handle::CoTaskMemDeleter>;
+        template <typename Interface>
+        using ComPtr = handle::OwnedPtr<Interface, handle::ComReleaser>;
+
+        /**
+         * @brief hostfxr 运行时上下文的删除器：连同关闭它的函数一起记下。
+         *
+         * @internal
+         * 上下文与它的关闭函数出自同一个库，必须成对持有。hostfxr 的契约
+         * 是委托取出之后上下文就可以关闭（委托指向已加载程序集里的代
+         * 码），所以成功与失败两条路径都由拥有者析构关闭。关闭函数就是
+         * hostfxr 库的 hostfxr_close 导出，成员名带上它，按名字检索释放
+         * 调用时找得到删除器里的那一行。
+         */
+        struct HostfxrContextDeleter
+        {
+            HxCloseFn hostfxr_close = nullptr;
+
+            auto operator()(void* context) const noexcept -> void
+            {
+                static_cast<void>(hostfxr_close(context));
+            }
+        };
+
+        /** @brief hostfxr 运行时上下文的拥有者：析构时关闭上下文。 */
+        using HostfxrContext = handle::OwnedPtr<void, HostfxrContextDeleter>;
+
         /// UNMANAGEDCALLERSONLY_METHOD 哨兵（coreclr_delegates.h 定义为
         /// (const char_t*)-1）。指针整转不可用于常量表达式，经函数取值。
         [[nodiscard]]
@@ -734,13 +854,27 @@ namespace cg::util::cshost
         /// 进程级引擎状态：一次性解析（成功与失败都记账，绝不重试慢路径）。
         /// Select-String 面与求值面各持一个实例（择线策略不同：前者四候选
         /// 降级链、后者钉 51 线），同进程内两面的 CLR/hostfxr 装载互不干扰。
+        ///
+        /// 按设计常驻、直到进程退出都不释放的资源在此集中登记。它们由装
+        /// 载函数在全部步骤成功之后显式交出所有权，以裸句柄记在这里，退
+        /// 出时由系统一并回收：
+        /// - library：本面最近一次装载成功的动态库。7 线是 hostfxr.dll，
+        ///   5.1 线是 mscoree.dll。两者拉起的运行时在进程里活到进程结束，
+        ///   卸载它们是否安全没有验证过，所以沿用装载之后从不卸载的既有
+        ///   行为。装载失败的库（导出没取齐、接口没拿到）不在此列，由装
+        ///   载路径上的拥有者析构卸载。只有测试钩子会复位后换一条路线，
+        ///   那时先前登记的库同样留在进程里。
+        /// - clr：5.1 线的运行时宿主接口指针。它启动的运行时不可卸载，
+        ///   垫片的每次调用都经它转进去，接口指针必须一直有效。
+        /// - create7、call7、destroy7：7 线对象协议三件的函数指针。它们
+        ///   指向已加载程序集里的代码，运行时上下文关闭之后仍然有效。
         struct EngineState
         {
             std::mutex  mutex;
             bool        resolved = false;
             Route       route = Route::None;
             std::string detail;
-            // 5.1 路线句柄（加载后不卸载：CLR 不可卸载，钩子进程短命无妨）。
+            // 5.1 路线的运行时宿主接口指针：装载成功时交出所有权，此后常驻。
             IMyICLRRuntimeHost* clr = nullptr;
             std::wstring        shim51_path;
             // 7 路线对象协议三件的函数指针（hostfxr 委托，进程级不卸载）。
@@ -748,6 +882,7 @@ namespace cg::util::cshost
             ObjFn7                     call7 = nullptr;
             ObjFn7                     destroy7 = nullptr;
             std::atomic<std::uint64_t> map_seq{0};
+            HMODULE                    library = nullptr;
         };
 
         auto shell_state() -> EngineState&
@@ -1059,26 +1194,27 @@ namespace cg::util::cshost
             const std::filesystem::path& path,
             std::string_view             content) -> bool
         {
-            HANDLE file = CreateFileW(
+            // 文件句柄一取到就交给拥有者：打开失败交回的无效值句柄被接管
+            // 成空对象，随后的写入不做，析构也不去关它。
+            const handle::Owned file = handle::Owned::adopt_file(CreateFileW(
                 path.c_str(),
                 GENERIC_WRITE,
                 0,
                 nullptr,
                 CREATE_ALWAYS,
                 FILE_ATTRIBUTE_NORMAL,
-                nullptr);
-            if (file == INVALID_HANDLE_VALUE)
+                nullptr));
+            if (!file.valid())
             {
                 return false;
             }
             DWORD      written = 0;
             const BOOL ok = WriteFile(
-                file,
+                file.get(),
                 content.data(),
                 static_cast<DWORD>(content.size()),
                 &written,
                 nullptr);
-            CloseHandle(file);
             return ok && written == content.size();
         }
 
@@ -1140,15 +1276,16 @@ namespace cg::util::cshost
         auto resolve_appexec_link(const std::filesystem::path& alias)
             -> std::optional<std::filesystem::path>
         {
-            HANDLE file = CreateFileW(
+            // 别名文件的句柄一取到就交给拥有者，随本函数返回关闭。
+            const handle::Owned file = handle::Owned::adopt_file(CreateFileW(
                 alias.c_str(),
                 GENERIC_READ,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 nullptr,
                 OPEN_EXISTING,
                 FILE_FLAG_OPEN_REPARSE_POINT,
-                nullptr);
-            if (file == INVALID_HANDLE_VALUE)
+                nullptr));
+            if (!file.valid())
             {
                 return std::nullopt;
             }
@@ -1156,7 +1293,7 @@ namespace cg::util::cshost
                 4096 + offsetof(CcgReparseDataBuffer, GenericReparseBuffer));
             DWORD      returned = 0;
             const BOOL ok = DeviceIoControl(
-                file,
+                file.get(),
                 FSCTL_GET_REPARSE_POINT,
                 nullptr,
                 0,
@@ -1164,7 +1301,6 @@ namespace cg::util::cshost
                 static_cast<DWORD>(buffer.size()),
                 &returned,
                 nullptr);
-            CloseHandle(file);
             if (!ok || returned < sizeof(CcgReparseDataBuffer))
             {
                 return std::nullopt;
@@ -1227,20 +1363,20 @@ namespace cg::util::cshost
             {
                 return;
             }
-            const HANDLE file = CreateFileW(
+            // 目标文件的句柄一取到就交给拥有者，随本函数返回关闭。
+            const handle::Owned file = handle::Owned::adopt_file(CreateFileW(
                 dst.c_str(),
                 FILE_WRITE_ATTRIBUTES,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 nullptr,
                 OPEN_EXISTING,
                 FILE_ATTRIBUTE_NORMAL,
-                nullptr);
-            if (file == INVALID_HANDLE_VALUE)
+                nullptr));
+            if (!file.valid())
             {
                 return;
             }
-            SetFileTime(file, nullptr, nullptr, &from.ftLastWriteTime);
-            CloseHandle(file);
+            SetFileTime(file.get(), nullptr, nullptr, &from.ftLastWriteTime);
         }
 
         /// 递归物化目录树：优先硬链接（同卷，省 284MB 级复制），失败回退
@@ -1444,39 +1580,45 @@ namespace cg::util::cshost
                 note_shim_missing(state, L"ccg-cshost7");
                 return false;
             }
-            HMODULE lib = LoadLibraryW(plan.hostfxr.c_str());
-            if (lib == nullptr)
+            // 库一取到就交给拥有者：下面任何一步失败，都由它的析构卸载。
+            Module library = Module::adopt(LoadLibraryW(plan.hostfxr.c_str()));
+            if (!library)
             {
                 return false;
             }
-            const auto init = reinterpret_cast<HxInitFn>(
-                GetProcAddress(lib, "hostfxr_initialize_for_runtime_config"));
+            const auto init = reinterpret_cast<HxInitFn>(GetProcAddress(
+                library.get(),
+                "hostfxr_initialize_for_runtime_config"));
             const auto get_delegate = reinterpret_cast<HxDelegateFn>(
-                GetProcAddress(lib, "hostfxr_get_runtime_delegate"));
-            const auto close = reinterpret_cast<HxCloseFn>(
-                GetProcAddress(lib, "hostfxr_close"));
-            if (init == nullptr || get_delegate == nullptr || close == nullptr)
+                GetProcAddress(library.get(), "hostfxr_get_runtime_delegate"));
+            // 关闭函数按它在本库里的导出名命名：按名字检索释放调用时找得
+            // 到它。它的调用只出现在运行时上下文拥有者的析构里。
+            const auto hostfxr_close = reinterpret_cast<HxCloseFn>(
+                GetProcAddress(library.get(), "hostfxr_close"));
+            if (init == nullptr || get_delegate == nullptr
+                || hostfxr_close == nullptr)
             {
                 return false;
             }
             // shim 的 AssemblyResolve 按 CCG_PSHOME 找 SMA 全家桶。
             SetEnvironmentVariableW(L"CCG_PSHOME", plan.pshome.c_str());
 
-            HxHandle context = nullptr;
-            if (init(plan.rtconfig.c_str(), nullptr, &context) != 0
-                || context == nullptr)
+            // 上下文直接由拥有者接住，连同关闭它的函数：取委托失败、三件
+            // 没取齐、以及成功之后的收尾，都由它的析构关闭上下文。
+            HostfxrContext context_owner{HostfxrContextDeleter{hostfxr_close}};
+            if (init(plan.rtconfig.c_str(), nullptr, &context_owner) != 0
+                || !context_owner)
             {
                 return false;
             }
             void* loader = nullptr;
             if (get_delegate(
-                    context,
+                    context_owner.get(),
                     HDT_LOAD_ASSEMBLY_AND_GET_FUNCTION_POINTER,
                     &loader)
                     != 0
                 || loader == nullptr)
             {
-                close(context);
                 return false;
             }
             const auto load = reinterpret_cast<HxLoadAssemblyFn>(loader);
@@ -1513,14 +1655,16 @@ namespace cg::util::cshost
                        != 0
                 || destroy == nullptr)
             {
-                close(context);
                 return false;
             }
-            close(context); // 委托已取出，上下文可关（hostfxr 契约）
             state.create7 = reinterpret_cast<ObjFn7>(create);
             state.call7 = reinterpret_cast<ObjFn7>(call);
             state.destroy7 = reinterpret_cast<ObjFn7>(destroy);
             state.route = route;
+            // 显式交出所有权：hostfxr 库按设计常驻到进程退出，理由见
+            // EngineState 的登记。此后它由引擎状态以裸句柄持有，本函数的
+            // 拥有者析构时不再卸载它。
+            state.library = library.release();
             return true;
         }
 
@@ -1538,8 +1682,9 @@ namespace cg::util::cshost
                 note_shim_missing(state, L"ccg-cshost51");
                 return false;
             }
-            HMODULE mscoree = LoadLibraryW(L"mscoree.dll");
-            if (mscoree == nullptr)
+            // 库一取到就交给拥有者：下面任何一步失败，都由它的析构卸载。
+            Module mscoree = Module::adopt(LoadLibraryW(L"mscoree.dll"));
+            if (!mscoree)
             {
                 const DWORD gle = GetLastError();
                 append_detail(
@@ -1553,7 +1698,7 @@ namespace cg::util::cshost
             using CreateInstanceFn =
                 HRESULT(__stdcall*)(REFCLSID, REFIID, LPVOID*);
             const auto create_instance = reinterpret_cast<CreateInstanceFn>(
-                GetProcAddress(mscoree, "CLRCreateInstance"));
+                GetProcAddress(mscoree.get(), "CLRCreateInstance"));
             if (create_instance == nullptr)
             {
                 const DWORD gle = GetLastError();
@@ -1565,8 +1710,10 @@ namespace cg::util::cshost
                         static_cast<unsigned>(gle)));
                 return false;
             }
-            IMyICLRMetaHost* meta = nullptr;
-            const HRESULT    hr_meta = create_instance(
+            // 接口指针直接由拥有者接住：后面的步骤失败时，它们随本函数返
+            // 回放手；成功时运行时宿主接口指针显式交给引擎状态。
+            ComPtr<IMyICLRMetaHost> meta;
+            const HRESULT           hr_meta = create_instance(
                 CLSID_CLR_META_HOST,
                 IID_CLR_META_HOST,
                 reinterpret_cast<LPVOID*>(&meta));
@@ -1579,8 +1726,8 @@ namespace cg::util::cshost
                         static_cast<unsigned>(hr_meta)));
                 return false;
             }
-            IMyICLRRuntimeInfo* info = nullptr;
-            const HRESULT       hr_runtime = meta->GetRuntime(
+            ComPtr<IMyICLRRuntimeInfo> info;
+            const HRESULT              hr_runtime = meta->GetRuntime(
                 L"v4.0.30319",
                 IID_CLR_RUNTIME_INFO,
                 reinterpret_cast<LPVOID*>(&info));
@@ -1593,8 +1740,8 @@ namespace cg::util::cshost
                         static_cast<unsigned>(hr_runtime)));
                 return false;
             }
-            IMyICLRRuntimeHost* host = nullptr;
-            const HRESULT       hr_host = info->GetInterface(
+            ComPtr<IMyICLRRuntimeHost> host;
+            const HRESULT              hr_host = info->GetInterface(
                 CLSID_CLR_RUNTIME_HOST,
                 IID_CLR_RUNTIME_HOST,
                 reinterpret_cast<LPVOID*>(&host));
@@ -1618,9 +1765,15 @@ namespace cg::util::cshost
                         static_cast<unsigned>(hr_start)));
                 return false;
             }
-            state.clr = host;
-            state.shim51_path = shim->wstring();
+            // 垫片路径先拷好：拷贝可能抛出，抛出时引擎状态还没有被动过。
+            std::wstring shim_path = shim->wstring();
+            state.shim51_path = std::move(shim_path);
             state.route = Route::Clr51;
+            // 显式交出所有权：运行时宿主接口指针与 mscoree 库按设计常驻到
+            // 进程退出，理由见 EngineState 的登记。元宿主与运行时信息两个
+            // 接口指针只用来取得宿主接口，取得之后随本函数返回放手。
+            state.clr = host.release();
+            state.library = mscoree.release();
             return true;
         }
 
@@ -1757,32 +1910,34 @@ namespace cg::util::cshost
             const std::uint64_t seq = state.map_seq.fetch_add(1);
             const std::wstring  map_name =
                 std::format(L"Local\\ccgcs_{}_{}", GetCurrentProcessId(), seq);
-            HANDLE map = CreateFileMappingW(
+            // 映射句柄与视图一取到就交给拥有者：视图先于句柄销毁，函数从
+            // 任何一处返回都解除映射并关闭句柄。
+            const handle::Owned map = handle::Owned::adopt(CreateFileMappingW(
                 INVALID_HANDLE_VALUE,
                 nullptr,
                 PAGE_READWRITE,
                 0,
                 static_cast<DWORD>(layout.view_bytes),
-                map_name.c_str());
-            if (map == nullptr)
+                map_name.c_str()));
+            if (!map.valid())
             {
                 return ObjOutcome{
                     .rc = static_cast<std::int32_t>(ObjErr::Channel)};
             }
-            void* view = MapViewOfFile(map, FILE_MAP_ALL_ACCESS, 0, 0, 0);
-            if (view == nullptr)
+            const MapView view = MapView::adopt(
+                MapViewOfFile(map.get(), FILE_MAP_ALL_ACCESS, 0, 0, 0));
+            if (!view)
             {
-                CloseHandle(map);
                 return ObjOutcome{
                     .rc = static_cast<std::int32_t>(ObjErr::Channel)};
             }
             ObjOutcome outcome;
-            *static_cast<std::int32_t*>(view) =
+            *static_cast<std::int32_t*>(view.get()) =
                 static_cast<std::int32_t>(command_wide.size());
             if (!command_wide.empty())
             {
                 memcpy(
-                    static_cast<char*>(view) + CMD_OFF,
+                    static_cast<char*>(view.get()) + CMD_OFF,
                     command_wide.data(),
                     command_wide.size() * sizeof(wchar_t));
             }
@@ -1799,11 +1954,11 @@ namespace cg::util::cshost
                 // 结果区在成功与失败两种形态都有产出（失败为诊断文本，
                 // 溢出路径垫片不写头部、len 保持 0）。
                 const std::int32_t len =
-                    *(reinterpret_cast<const std::int32_t*>(view) + 1);
+                    *(reinterpret_cast<const std::int32_t*>(view.get()) + 1);
                 if (len >= 0 && static_cast<std::size_t>(len) <= layout.res_cap)
                 {
                     const char* begin =
-                        static_cast<const char*>(view) + layout.res_off;
+                        static_cast<const char*>(view.get()) + layout.res_off;
                     outcome.payload.assign(
                         begin,
                         static_cast<std::size_t>(len));
@@ -1817,8 +1972,6 @@ namespace cg::util::cshost
             {
                 outcome.rc = static_cast<std::int32_t>(ObjErr::Channel);
             }
-            UnmapViewOfFile(view);
-            CloseHandle(map);
             return outcome;
         }
 
@@ -1846,7 +1999,7 @@ namespace cg::util::cshost
 
         /**
          * @brief 7 线结构体桥通道：载荷指针 + 字节数进出，出参槽就地
-         *        写回结果指针（宿主读后 CoTaskMemFree）。
+         *        写回结果指针（宿主读后经拥有者交还）。
          */
         auto invoke_7(ObjFn7 fn, std::string_view payload_utf8) -> ObjOutcome
         {
@@ -1857,10 +2010,12 @@ namespace cg::util::cshost
             call.cmd_len = payload_utf8.size();
             ObjOutcome outcome;
             outcome.rc = fn(&call, static_cast<int>(sizeof(NativeCallV1)));
-            if (call.out_slot != nullptr)
+            // 出参槽里的结果串一取到就交给拥有者：下面拷贝文本抛出时，它
+            // 也随本函数交还。
+            const CoTaskMem result = CoTaskMem::adopt(call.out_slot);
+            if (result)
             {
-                outcome.payload.assign(static_cast<const char*>(call.out_slot));
-                CoTaskMemFree(call.out_slot);
+                outcome.payload.assign(static_cast<const char*>(result.get()));
             }
             return outcome;
         }
@@ -1964,122 +2119,152 @@ namespace cg::util::cshost
             return cls == ObjClass::MsbuildEval ? large_view : small_view;
         }
 
+        /// 建一个装着刚建成的垫片句柄的计数盒（计数 1）。开门函数经工厂
+        /// 把它接管成 CsRef。
+        [[nodiscard]]
+        auto make_box(Face face, ObjClass cls, std::int32_t token)
+            -> std::unique_ptr<HandleBox>
+        {
+            auto box = std::make_unique<HandleBox>();
+            box->face = face;
+            box->cls = cls;
+            box->token = token;
+            return box;
+        }
+
     } // namespace
 
-    auto obj_create(Face face, ObjClass cls, std::wstring_view assembly_dir)
-        -> std::int32_t
+    namespace detail
     {
-        EngineState* state = ensure_face(face);
-        if (state == nullptr)
-        {
-            return static_cast<std::int32_t>(ObjErr::LineUnavailable);
-        }
-        const std::string payload = build_create_payload(cls, assembly_dir);
-        ObjOutcome        outcome;
-        if (state->route == Route::Clr51)
-        {
-            outcome = invoke_51(
-                *state,
-                small_view, // 构造载荷短（类名 + 目录），恒小档
-                L"ObjCreate",
-                cg::util::platform::widen_utf8(payload));
-        }
-        else
-        {
-            outcome = invoke_7(state->create7, payload);
-        }
-        if (outcome.rc > 0)
-        {
-            return outcome.rc; // 正数即句柄 token
-        }
-        return outcome.rc == 0 ? static_cast<std::int32_t>(ObjErr::Channel)
-                               : outcome.rc;
-    }
 
-    auto obj_call(
-        Face                    face,
-        ObjClass                cls,
-        std::int32_t            token,
-        std::string_view        method,
-        std::span<const ObjArg> args) -> ObjOutcome
-    {
-        EngineState* state = ensure_face(face);
-        if (state == nullptr)
+        auto create_object(
+            Face              face,
+            ObjClass          cls,
+            std::wstring_view assembly_dir) -> std::int32_t
         {
-            return ObjOutcome{
-                .rc = static_cast<std::int32_t>(ObjErr::LineUnavailable)};
+            EngineState* state = ensure_face(face);
+            if (state == nullptr)
+            {
+                return static_cast<std::int32_t>(ObjErr::LineUnavailable);
+            }
+            const std::string payload = build_create_payload(cls, assembly_dir);
+            ObjOutcome        outcome;
+            if (state->route == Route::Clr51)
+            {
+                outcome = invoke_51(
+                    *state,
+                    small_view, // 构造载荷短（类名 + 目录），恒小档
+                    L"ObjCreate",
+                    cg::util::platform::widen_utf8(payload));
+            }
+            else
+            {
+                outcome = invoke_7(state->create7, payload);
+            }
+            if (outcome.rc > 0)
+            {
+                return outcome.rc; // 正数即句柄 token
+            }
+            return outcome.rc == 0 ? static_cast<std::int32_t>(ObjErr::Channel)
+                                   : outcome.rc;
         }
-        const std::string payload = build_call_payload(token, method, args);
-        if (state->route == Route::Clr51)
-        {
-            return invoke_51(
-                *state,
-                layout_of(cls),
-                L"ObjCall",
-                cg::util::platform::widen_utf8(payload));
-        }
-        return invoke_7(state->call7, payload);
-    }
 
-    auto obj_destroy(Face face, std::int32_t token) -> std::int32_t
-    {
-        EngineState* state = ensure_face(face);
-        if (state == nullptr)
+        auto call_object(
+            Face                    face,
+            ObjClass                cls,
+            std::int32_t            token,
+            std::string_view        method,
+            std::span<const ObjArg> args) -> ObjOutcome
         {
-            return static_cast<std::int32_t>(ObjErr::LineUnavailable);
+            EngineState* state = ensure_face(face);
+            if (state == nullptr)
+            {
+                return ObjOutcome{
+                    .rc = static_cast<std::int32_t>(ObjErr::LineUnavailable)};
+            }
+            const std::string payload = build_call_payload(token, method, args);
+            if (state->route == Route::Clr51)
+            {
+                return invoke_51(
+                    *state,
+                    layout_of(cls),
+                    L"ObjCall",
+                    cg::util::platform::widen_utf8(payload));
+            }
+            return invoke_7(state->call7, payload);
         }
-        if (state->route == Route::Clr51)
+
+        auto destroy_object(Face face, std::int32_t token) -> std::int32_t
         {
-            return invoke_destroy_51(*state, token);
+            EngineState* state = ensure_face(face);
+            if (state == nullptr)
+            {
+                return static_cast<std::int32_t>(ObjErr::LineUnavailable);
+            }
+            if (state->route == Route::Clr51)
+            {
+                return invoke_destroy_51(*state, token);
+            }
+            const std::string token_text = std::format("{}", token);
+            return invoke_7(state->destroy7, token_text).rc;
         }
-        const std::string token_text = std::format("{}", token);
-        return invoke_7(state->destroy7, token_text).rc;
-    }
+
+    } // namespace detail
 
     auto open_select_string() -> std::optional<CsRef>
     {
-        const std::int32_t token =
-            obj_create(Face::SelectString, ObjClass::SelectStringCore, {});
+        const std::int32_t token = detail::create_object(
+            Face::SelectString,
+            ObjClass::SelectStringCore,
+            {});
         if (token <= 0)
         {
             return std::nullopt;
         }
-        HandleBox* box = new HandleBox{};
-        box->face = Face::SelectString;
-        box->cls = ObjClass::SelectStringCore;
-        box->token = token;
-        return CsRefFactory::adopt(box);
+        return CsRefFactory::adopt(
+            make_box(Face::SelectString, ObjClass::SelectStringCore, token));
     }
 
-    auto open_msbuild_eval(std::wstring_view assembly_dir)
-        -> std::optional<CsRef>
+    auto try_open_msbuild_eval(std::wstring_view assembly_dir)
+        -> std::expected<CsRef, std::int32_t>
     {
-        const std::int32_t token =
-            obj_create(Face::Evaluation, ObjClass::MsbuildEval, assembly_dir);
+        const std::int32_t token = detail::create_object(
+            Face::Evaluation,
+            ObjClass::MsbuildEval,
+            assembly_dir);
         if (token <= 0)
         {
-            return std::nullopt;
+            return std::unexpected{token};
         }
-        HandleBox* box = new HandleBox{};
-        box->face = Face::Evaluation;
-        box->cls = ObjClass::MsbuildEval;
-        box->token = token;
-        return CsRefFactory::adopt(box);
+        return CsRefFactory::adopt(
+            make_box(Face::Evaluation, ObjClass::MsbuildEval, token));
     }
 
     void drop_handle_last(HandleBox* box)
     {
-        if (!box->stale.load(std::memory_order_seq_cst))
+        // 计数盒由唯一指针持有：拆除动作抛出也照样回收。
+        const std::unique_ptr<HandleBox> owner{box};
+        // 看门狗短路路径（stale 闩）：只弃计数、不拆除——垫片孤儿线程仍
+        // 在使用对象，拆除等于对托管对象的 use-after-free；对象与孤儿线
+        // 程一起活到进程退出。
+        if (box->stale.load(std::memory_order_seq_cst))
         {
-            // 归零拆除：垫片三件套（条目移除 → OnFinalRelease →
-            // GCHandle.Free）。失败（垫片侧已先行失效等）不再有重试
-            // 语义——token 已在垫片侧死亡，计数盒就地回收。
-            static_cast<void>(obj_destroy(box->face, box->token));
+            return;
         }
-        // 看门狗短路路径（stale 闩）：只弃计数、不拆除——垫片孤儿
-        // 线程仍在使用对象，拆除等于对托管对象的 use-after-free；
-        // 对象与孤儿线程一起活到进程退出。
-        delete box;
+        // 归零拆除：垫片三件套（条目移除 → OnFinalRelease → GCHandle.Free）。
+        // 失败（垫片侧已先行失效等）不再有重试语义——token 已在垫片侧死
+        // 亡，计数盒就地回收。
+        //
+        // 本函数在析构链里运行，而这次跨语言调用内部会分配内存、可能抛
+        // 出；异常不得从析构逃逸（逃逸等于终止进程），就地吞掉。吞掉之后
+        // 拆除没有做成，垫片侧的条目随进程退出回收。
+        try
+        {
+            static_cast<void>(detail::destroy_object(box->face, box->token));
+        }
+        catch (...)
+        {
+        }
     }
 
     auto parse_via_engine(std::string_view ps_script_utf8)
@@ -2137,8 +2322,9 @@ namespace cg::util::cshost
 
     void drop_handle_last(HandleBox* box)
     {
-        // 无垫片可拆，只回收计数盒（stale 闩语义同 Windows：不拆除）。
-        delete box;
+        // 无垫片可拆：计数盒由唯一指针持有，随本函数返回回收（stale 闩的
+        // 语义同 Windows：不拆除）。
+        const std::unique_ptr<HandleBox> owner{box};
     }
 
     auto parse_via_engine(std::string_view /*ps_script_utf8*/)
@@ -2157,35 +2343,42 @@ namespace cg::util::cshost
 
     auto open_select_string() -> std::optional<CsRef> { return std::nullopt; }
 
-    auto open_msbuild_eval(std::wstring_view /*assembly_dir*/)
-        -> std::optional<CsRef>
+    auto try_open_msbuild_eval(std::wstring_view /*assembly_dir*/)
+        -> std::expected<CsRef, std::int32_t>
     {
-        return std::nullopt;
+        return std::unexpected{
+            static_cast<std::int32_t>(ObjErr::LineUnavailable)};
     }
 
-    auto obj_create(
-        Face /*face*/,
-        ObjClass /*cls*/,
-        std::wstring_view /*assembly_dir*/) -> std::int32_t
+    namespace detail
     {
-        return static_cast<std::int32_t>(ObjErr::LineUnavailable);
-    }
 
-    auto obj_call(
-        Face /*face*/,
-        ObjClass /*cls*/,
-        std::int32_t /*token*/,
-        std::string_view /*method*/,
-        std::span<const ObjArg> /*args*/) -> ObjOutcome
-    {
-        return ObjOutcome{
-            .rc = static_cast<std::int32_t>(ObjErr::LineUnavailable)};
-    }
+        auto create_object(
+            Face /*face*/,
+            ObjClass /*cls*/,
+            std::wstring_view /*assembly_dir*/) -> std::int32_t
+        {
+            return static_cast<std::int32_t>(ObjErr::LineUnavailable);
+        }
 
-    auto obj_destroy(Face /*face*/, std::int32_t /*token*/) -> std::int32_t
-    {
-        return static_cast<std::int32_t>(ObjErr::LineUnavailable);
-    }
+        auto call_object(
+            Face /*face*/,
+            ObjClass /*cls*/,
+            std::int32_t /*token*/,
+            std::string_view /*method*/,
+            std::span<const ObjArg> /*args*/) -> ObjOutcome
+        {
+            return ObjOutcome{
+                .rc = static_cast<std::int32_t>(ObjErr::LineUnavailable)};
+        }
+
+        auto destroy_object(Face /*face*/, std::int32_t /*token*/)
+            -> std::int32_t
+        {
+            return static_cast<std::int32_t>(ObjErr::LineUnavailable);
+        }
+
+    } // namespace detail
 
 } // namespace cg::util::cshost
 

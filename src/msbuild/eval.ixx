@@ -14,7 +14,8 @@ module;
  *        看门狗限时与失败语义）。
  *
  * 求值面钉 51 线（VS 自带 Microsoft.Build.dll 是 net472 程序集，只有
- * CLR4 家族装得下）：会话经 cshost::open_msbuild_eval 建立，不走 Select-String
+ * CLR4 家族装得下）：会话经 cshost::try_open_msbuild_eval 建立（失败时
+ * 带回错误码，供重试与诊断），不走 Select-String
  * 面的四候选降级链；51 线不可用（垫片缺席 / CLR 起不来）时 evaluate 以
  * 指引性诊断失败（装载失败形态），调用方按失败保旧处理。
  *
@@ -802,60 +803,40 @@ namespace cg::msbuild::eval
                     "(Windows only)";
         return out;
 #else
-        std::optional<cshost::CsRef> session =
-            cshost::open_msbuild_eval(plat::widen_utf8(request.assembly_dir));
-        if (!session.has_value())
-        {
-            // 通道原语补一次探针取真实 rc（open_* 吞码；探针成功则
-            // 收掉并重试一次 open——首次 CLR/引擎装配的暂时性失败
-            // 自愈，探针仍失败则 rc 进诊断）。
-            const std::int32_t probe = cshost::obj_create(
-                cshost::Face::Evaluation,
-                cshost::ObjClass::MsbuildEval,
+        std::expected<cshost::CsRef, std::int32_t> opened =
+            cshost::try_open_msbuild_eval(
                 plat::widen_utf8(request.assembly_dir));
-            if (probe > 0)
-            {
-                static_cast<void>(
-                    cshost::obj_destroy(cshost::Face::Evaluation, probe));
-                session = cshost::open_msbuild_eval(
-                    plat::widen_utf8(request.assembly_dir));
-            }
+        if (!opened)
+        {
+            // 开门失败带着真实错误码回来。失败后重试一次：首次装载
+            // CLR 与引擎装配的暂时性失败会自愈；仍失败则错误码进诊断。
+            opened = cshost::try_open_msbuild_eval(
+                plat::widen_utf8(request.assembly_dir));
         }
-        if (!session.has_value())
+        if (!opened)
         {
-            const std::int32_t probe = cshost::obj_create(
-                cshost::Face::Evaluation,
-                cshost::ObjClass::MsbuildEval,
-                plat::widen_utf8(request.assembly_dir));
-            std::string extra;
-            if (probe > 0)
-            {
-                static_cast<void>(
-                    cshost::obj_destroy(cshost::Face::Evaluation, probe));
-                extra = "（探针会话可建：open 前段竞态）";
-            }
             out.error = std::format(
-                "MsbuildEval session open failed, probe rc={} {} detail={}",
-                probe,
-                extra,
+                "MsbuildEval session open failed, rc={} detail={}",
+                opened.error(),
                 std::string_view{
                     cshost::face_detail(cshost::Face::Evaluation)});
             return out;
         }
+        cshost::CsRef session = std::move(*opened);
 
         const auto deadline =
             std::chrono::steady_clock::now() + timeout_budget();
 
         const std::string begin_json = build_begin_payload(request);
         CallPack          begin_pack;
-        begin_pack.session = *session;
+        begin_pack.session = session;
         begin_pack.method = "Begin";
         begin_pack.args.emplace_back("request", begin_json);
         std::optional<cshost::ObjOutcome> begin =
             watched_call(std::move(begin_pack), deadline);
         if (!begin.has_value())
         {
-            session->abandon();
+            session.abandon();
             out.timed_out = true;
             out.error = "eval session timed out in Begin "
                         "(watchdog abandoned; CCG_EVAL_TIMEOUT_MS)";
@@ -874,20 +855,20 @@ namespace cg::msbuild::eval
         {
             if (std::chrono::steady_clock::now() >= deadline)
             {
-                session->abandon();
+                session.abandon();
                 out.timed_out = true;
                 out.error = "eval session timed out (watchdog abandoned; "
                             "CCG_EVAL_TIMEOUT_MS)";
                 return out;
             }
             CallPack pack;
-            pack.session = *session;
+            pack.session = session;
             pack.method = "NextEvent";
             std::optional<cshost::ObjOutcome> event =
                 watched_call(std::move(pack), deadline);
             if (!event.has_value())
             {
-                session->abandon();
+                session.abandon();
                 out.timed_out = true;
                 out.error = "eval session timed out in NextEvent "
                             "(watchdog abandoned; CCG_EVAL_TIMEOUT_MS)";

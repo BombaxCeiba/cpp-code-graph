@@ -17,18 +17,20 @@ module;
  *        一律经由本模块，不再直接触碰 std::getenv / std::gmtime。
  *
  * @internal
- * 微软侧走安全变体：_dupenv_s（把值拷进自有缓冲，读毕 free）与
- * gmtime_s；非微软侧保留 std::getenv / std::gmtime 原样（无弃用
- * 告警）。语义统一为值返回：get_env 用 optional 区分“未设置”与
- * “空串”；gmtime_utc 返回 std::tm 值，调用方不再持有指向运行库
- * 静态缓冲的指针。实测（MSVC 14.51）这两个扩展名不随 import std
- * 可达（C3861），故微软分支在全局模块片段回退 include（见文件头）。
+ * 微软侧走安全变体：_dupenv_s（把值拷进运行库堆上的自有缓冲，缓冲由
+ * 带删除器的拥有型指针持有、随作用域交还）与 gmtime_s；非微软侧保留
+ * std::getenv / std::gmtime 原样（无弃用告警）。语义统一为值返回：
+ * get_env 用 optional 区分“未设置”与“空串”；gmtime_utc 返回 std::tm
+ * 值，调用方不再持有指向运行库静态缓冲的指针。实测（MSVC 14.51）这
+ * 两个扩展名不随 import std 可达（C3861），故微软分支在全局模块片段
+ * 回退 include（见文件头）。删除器取自 cg.util.handle（同为封装单元）。
  * 与 cg.util.platform 的分工：那边是操作系统探针，这边是 C 运行库差异。
  * 现有站点全部是启动期一次性读取，无线程顾虑。
  */
 export module cg.util.cstd;
 
 import std;
+import cg.util.handle;
 
 export namespace cg::util::cstd
 {
@@ -40,16 +42,16 @@ export namespace cg::util::cstd
     inline auto get_env(const char* name) -> std::optional<std::string>
     {
 #ifdef _MSC_VER
-        char*       raw = nullptr;
         std::size_t len = 0;
-        _dupenv_s(&raw, &len, name);
-        if (raw == nullptr)
+        // 缓冲直接由拥有者接住：下面拷贝成字符串若抛出，缓冲也随作用域
+        // 交还。
+        handle::OwnedPtr<char, handle::HeapDeleter> buffer;
+        _dupenv_s(&buffer, &len, name);
+        if (!buffer)
         {
             return std::nullopt;
         }
-        std::string value{raw};
-        std::free(raw);
-        return value;
+        return std::string{buffer.get()};
 #else
         const char* raw = std::getenv(name);
         if (raw == nullptr)

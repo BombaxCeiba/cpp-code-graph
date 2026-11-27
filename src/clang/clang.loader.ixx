@@ -19,7 +19,9 @@ module;
  *
  * 本模块持有动态库加载的全部平台 API 与引擎 PATH 解析链；cg.clang.capi
  * 持有由本模块填充的 clang-c 符号表。项目中其他任何地方不得接触加载器
- * 平台 API。
+ * 平台 API。打开的库一律由 Library 对象持有，卸载只经 cg.util.handle 的
+ * 动态库删除器发生；取库失败时系统分配的错误消息缓冲由带删除器的
+ * 拥有型指针持有。
  *
  * @internal
  * 解析优先级（既定设计）：数据库的 llvm-path 配置，其次 $CCG_LLVM_ROOT，
@@ -28,9 +30,10 @@ module;
  * 显式根可以是库文件本身，或直接持有它、持于 bin/ 下、持于 lib/ 下的
  * 前缀。解析不到东西的根是可行动的硬错误，绝不静默落到另一个引擎。
  * 全局模块片段说明：Windows 用
- * LoadLibraryExW/GetProcAddress/FreeLibrary，POSIX 用 dlopen/dlsym/
- * dlclose；两分支都已实现（跨平台要求），宏与 C 声明绝不穿越模块边界，
- * 故 include 置于全局模块片段。
+ * LoadLibraryExW/GetProcAddress，POSIX 用 dlopen/dlsym；卸载库的调用
+ * （FreeLibrary/dlclose）只出现在 cg.util.handle 的删除器里。两分支都已
+ * 实现（跨平台要求），宏与 C 声明绝不穿越模块边界，故 include 置于全局
+ * 模块片段。
  */
 export module cg.clang.loader;
 
@@ -42,6 +45,77 @@ export namespace cg::clang::dylib
 {
 
     /**
+     * @brief 一个已打开的动态库句柄的拥有者：析构时卸载库。
+     *
+     * @internal
+     * 只能移动，移动构造、移动赋值与析构都由成员（带删除器的拥有型指针）
+     * 给出：被移动走的对象不持有库，析构不做任何事，所以三者都不抛。
+     * 移动赋值先卸载自己原有的库再接管对方的，自己赋给自己保持原样。
+     * 卸载库的平台调用只出现在通用句柄单元的删除器里，本类不直接调它。
+     * 系统接口经出参交回库句柄时（按模块名取已装载库的句柄），先默认
+     * 构造出空的拥有者，再把 release_and_get_address_of 交出的地址交给
+     * 它。按设计要常驻到进程退出的库，在装载成功之后经 release 交出去
+     * （见 cg.clang.capi.api 的引擎状态），此后本对象不再管它。
+     */
+    class Library
+    {
+    public:
+        /** @brief 不持有库。 */
+        Library() = default;
+
+        Library(const Library&) = delete;
+        auto operator=(const Library&) -> Library& = delete;
+        Library(Library&&) noexcept = default;
+        auto operator=(Library&&) noexcept -> Library& = default;
+        ~Library() = default;
+
+        /** @brief 接管一个已经打开的库；空指针表示没有库，对象保持为空。 */
+        [[nodiscard]]
+        static auto adopt(void* library) noexcept -> Library
+        {
+            return Library{Handle::adopt(library)};
+        }
+
+        /** @brief 库句柄的原生值，只供传给符号解析；不持有库时是空值。 */
+        [[nodiscard]]
+        auto get() const noexcept -> void*
+        {
+            return library_.get();
+        }
+
+        /**
+         * @brief 交出所有权：返回库句柄的原生值，此后本对象不再持有它，
+         *        析构也不会卸载它。
+         */
+        [[nodiscard]]
+        auto release() noexcept -> void*
+        {
+            return library_.release();
+        }
+
+        /**
+         * @brief 交出内部指针的地址，供系统接口把库句柄写进来；先卸载
+         *        已持有的库。
+         */
+        [[nodiscard]]
+        auto release_and_get_address_of() noexcept -> void**
+        {
+            return library_.release_and_get_address_of();
+        }
+
+    private:
+        /** @brief 库句柄的拥有者；卸载库的调用只在它的删除器里。 */
+        using Handle =
+            cg::util::handle::OwnedPtr<void, cg::util::handle::ModuleDeleter>;
+
+        explicit Library(Handle library) noexcept : library_{std::move(library)}
+        {
+        }
+
+        Handle library_;
+    };
+
+    /**
      * @brief 打开 path 处的共享库。
      *
      * @internal
@@ -51,7 +125,7 @@ export namespace cg::clang::dylib
      * 文本的 std::runtime_error。
      */
     [[nodiscard]]
-    auto open(const std::string& path) -> void*
+    auto open(const std::string& path) -> Library
     {
 #if defined(_WIN32)
         const std::wstring wide = std::filesystem::path{path}.wstring();
@@ -62,20 +136,24 @@ export namespace cg::clang::dylib
         if (library == nullptr)
         {
             const DWORD err = GetLastError();
-            LPWSTR      buf = nullptr;
+            namespace handle = cg::util::handle;
+            handle::OwnedPtr<wchar_t, handle::LocalDeleter> message;
+            // 系统分配的错误消息缓冲直接由拥有者接住：下面拼接错误文本
+            // 的语句会分配内存，抛出时缓冲也随本作用域交还。
             const DWORD n = FormatMessageW(
                 FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM
                     | FORMAT_MESSAGE_IGNORE_INSERTS,
                 nullptr,
                 err,
                 0,
-                reinterpret_cast<LPWSTR>(&buf),
+                reinterpret_cast<LPWSTR>(&message),
                 0,
                 nullptr);
             std::string text = std::format("Windows error {}", err);
-            if (n != 0 && buf != nullptr)
+            if (n != 0 && message)
             {
-                std::string decoded = std::filesystem::path{buf}.string();
+                std::string decoded =
+                    std::filesystem::path{message.get()}.string();
                 while (!decoded.empty()
                        && (decoded.back() == '\r' || decoded.back() == '\n'
                            || decoded.back() == ' '))
@@ -87,14 +165,10 @@ export namespace cg::clang::dylib
                     text = std::format("{} ({})", decoded, err);
                 }
             }
-            if (buf != nullptr)
-            {
-                LocalFree(buf);
-            }
             throw std::runtime_error(
                 std::format("cannot load LLVM engine '{}': {}", path, text));
         }
-        return reinterpret_cast<void*>(library);
+        return Library::adopt(reinterpret_cast<void*>(library));
 #else
         void* library = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (library == nullptr)
@@ -107,38 +181,21 @@ export namespace cg::clang::dylib
                     err != nullptr ? std::string{err}
                                    : std::string{"unknown"}));
         }
-        return library;
+        return Library::adopt(library);
 #endif
     }
 
-    /** @brief 解析一个符号；库未导出该符号时返回 nullptr。 */
+    /** @brief 解析 library 里的一个符号；库未导出该符号时返回 nullptr。 */
     [[nodiscard]]
-    auto symbol(void* library, const char* name) -> void*
+    auto symbol(const Library& library, const char* name) -> void*
     {
+        void* handle = library.get();
 #if defined(_WIN32)
         return reinterpret_cast<void*>(
-            GetProcAddress(reinterpret_cast<HMODULE>(library), name));
+            GetProcAddress(reinterpret_cast<HMODULE>(handle), name));
 #else
         (void)dlerror(); // 清掉陈旧状态，使命中可辨别
-        return dlsym(library, name);
-#endif
-    }
-
-    /**
-     * @brief 释放 open() 返回的句柄。
-     *
-     * @internal 契约上 noexcept：卸载会从析构函数中运行。
-     */
-    void close(void* library) noexcept
-    {
-        if (library == nullptr)
-        {
-            return;
-        }
-#if defined(_WIN32)
-        FreeLibrary(reinterpret_cast<HMODULE>(library));
-#else
-        dlclose(library);
+        return dlsym(handle, name);
 #endif
     }
 

@@ -398,9 +398,10 @@ scan. `--full-build` costs a real `-t:Rebuild`.
 
 The MSBuild feature is Windows-only BY DESIGN. The translator, the
 registry format, and the CLI parsing are platform-neutral and compile
-everywhere; ALL Windows APIs (CreateProcessW, GetCommandLineW,
-vswhere/registry access) live inside `src/msbuild/` behind `_WIN32`
-guards with the non-Windows path returning the unsupported error. On a
+everywhere; ALL Windows APIs (vswhere and registry access) live inside
+`src/msbuild/` behind `_WIN32` guards (spawning child processes and reading
+the command line go through the platform unit) with the
+non-Windows path returning the unsupported error. On a
 non-Windows machine, `ccg msbuild --list` (a pure registry read) works and
 every extracting invocation fails cleanly with
 `ccg msbuild: not supported on this platform` (exit 1) — never a compile
@@ -550,7 +551,7 @@ to splitting the stem at the last `-`.
 The evaluate-channel failure row above aborts with `evaluation failed
 for <config>: <error>`, and that `<error>` can carry bare numbers —
 `Begin failed rc=-13 payload=...`, `NextEvent failed rc=-14 payload=...`,
-`MsbuildEval session open failed, probe rc=-30 ... detail=...`. Those
+`MsbuildEval session open failed, rc=-30 detail=...`. Those
 `rc` values come from the C# host channel that carries the evaluation
 session (`ccg-cshost51.dll` on the CLR 4 line): `0` is success, a
 positive value is a handle token, and every negative value is one of

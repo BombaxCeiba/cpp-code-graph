@@ -66,7 +66,7 @@ namespace
     {
         PureBase();
         virtual void hook() = 0;
-        void poke() { hook(); }
+        void         poke() { hook(); }
     };
     // 此刻 vptr 仍指向基类——hook 槽位是纯虚桩
     PureBase::PureBase() { poke(); }
@@ -77,8 +77,7 @@ namespace
 
     DWORD WINAPI crash_worker(LPVOID)
     {
-        volatile int* target =
-            reinterpret_cast<volatile int*>(0x5678);
+        volatile int* target = reinterpret_cast<volatile int*>(0x5678);
         *target = 1;
         return 0;
     }
@@ -91,10 +90,11 @@ export int main(int argc, char* const* argv)
 {
     if (argc < 2)
     {
-        std::fputs("usage: ccg_crashprobe "
-                   "<av|so|abort|terminate|purecall|heapcor|multiav|"
-                   "fastfail|invarg>\n",
-                   stderr);
+        std::fputs(
+            "usage: ccg_crashprobe "
+            "<av|so|abort|terminate|purecall|heapcor|multiav|"
+            "fastfail|invarg>\n",
+            stderr);
         return 2;
     }
     cg::util::crashdump::install_from_env();
@@ -102,26 +102,23 @@ export int main(int argc, char* const* argv)
 
     if (form == "multiav")
     {
+        // 两个线程句柄不设拥有者：本形态紧接着让进程崩溃，句柄随进程
+        // 终止回收。
         HANDLE workers[2] = {
-            CreateThread(nullptr, 0, &crash_worker, nullptr, 0,
-                         nullptr),
-            CreateThread(nullptr, 0, &crash_worker, nullptr, 0,
-                         nullptr)};
+            CreateThread(nullptr, 0, &crash_worker, nullptr, 0, nullptr),
+            CreateThread(nullptr, 0, &crash_worker, nullptr, 0, nullptr)};
         Sleep(50);
-        volatile int* target =
-            reinterpret_cast<volatile int*>(0x1234);
+        volatile int* target = reinterpret_cast<volatile int*>(0x1234);
         *target = 42;
         WaitForMultipleObjects(2, workers, TRUE, 5000);
     }
     else if (form == "heapcor")
     {
-        RaiseException(0xC0000374L, EXCEPTION_NONCONTINUABLE, 0,
-                       nullptr);
+        RaiseException(0xC0000374L, EXCEPTION_NONCONTINUABLE, 0, nullptr);
     }
     else if (form == "av")
     {
-        volatile int* target =
-            reinterpret_cast<volatile int*>(0x1234);
+        volatile int* target = reinterpret_cast<volatile int*>(0x1234);
         *target = 42;
     }
     else if (form == "so")
@@ -144,7 +141,9 @@ export int main(int argc, char* const* argv)
     else if (form == "fastfail")
     {
         RaiseFailFastException(
-            nullptr, nullptr, FAIL_FAST_GENERATE_EXCEPTION_ADDRESS);
+            nullptr,
+            nullptr,
+            FAIL_FAST_GENERATE_EXCEPTION_ADDRESS);
     }
     else if (form == "invarg")
     {
@@ -158,7 +157,6 @@ export int main(int argc, char* const* argv)
         std::fputs("ccg_crashprobe: unknown form\n", stderr);
         return 2;
     }
-    std::fputs("ccg_crashprobe: form returned without crashing\n",
-               stderr);
+    std::fputs("ccg_crashprobe: form returned without crashing\n", stderr);
     return 0;
 }

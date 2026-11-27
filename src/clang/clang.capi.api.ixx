@@ -5,7 +5,8 @@ module;
  * @module cg.clang.capi.api
  *
  * @brief libclang 分发表与引擎装载域：Api
- * 函数指针表、符号解析、进程生命期的引擎装载/获取/引用计数。
+ * 函数指针表、符号解析、进程生命期的引擎装载/获取/引用计数，以及
+ * CXString 的拥有者 Str。
  */
 export module cg.clang.capi.api;
 
@@ -144,8 +145,10 @@ export namespace cg::clang
          * CXIndex/CXTranslationUnit）。table 是每个门面调用解引用的无锁读侧。
          *
          * @internal
-         * 生命周期：一经加载，引擎库保持映射到进程退出——刻意不调用
-         * dylib::close。libclang 的静态初始化器安装进程级崩溃恢复机制
+         * 生命周期：一经加载，引擎库保持映射到进程退出——装载函数在全部
+         * 步骤成功之后把库句柄的所有权显式交给本状态（见 load_locked），
+         * 此后从不卸载；中途失败的库由装载路径上的拥有者析构卸载。
+         * libclang 的静态初始化器安装进程级崩溃恢复机制
          * （Windows 上是向量化 SEH handler），FreeLibrary/dlclose 不收回它；
          * 陈旧的 handler 表项在卸载后存活，重载后的下一次解析会经它派发进
          * 未映射内存。在本工具链实测（MSYS2 clang 23.1.3）：加载/卸载/重载
@@ -154,13 +157,18 @@ export namespace cg::clang
          * 皆绿。因此引擎切换保留旧句柄映射（其 handler 表项仍指向已映射
          * 代码，多份无害）；短命 CLI 进程实际至多切换一次，保留映射不耗
          * 任何真实成本。
+         *
+         * 按设计常驻、直到进程退出都不释放的资源在此集中登记：
+         * - library：当前引擎库的句柄，以及被它替换下来的旧引擎库的映射
+         *   （切换时不卸载，理由同上）。进程退出时由系统一并回收。
          */
         struct EngineState
         {
-            std::mutex  mutex;
-            int         refs = 0;
-            void*       library = nullptr; // cg.clang::dylib 句柄
-            std::string path;              // 已加载库路径（未加载时为 ""）
+            std::mutex mutex;
+            int        refs = 0;
+            // 按设计常驻的引擎库句柄：装载函数交出所有权后登记在此。
+            void*       library = nullptr;
+            std::string path;    // 已加载库路径（未加载时为 ""）
             std::string version; // 加载时捕获的 clang_getClangVersion()
             Api         api{};
             std::atomic<const Api*> table{nullptr};
@@ -179,7 +187,7 @@ export namespace cg::clang
          */
         template <typename Fn>
         [[nodiscard]]
-        auto symbol_as(void* library, const char* name) -> Fn
+        auto symbol_as(const dylib::Library& library, const char* name) -> Fn
         {
             void* raw = dylib::symbol(library, name);
             if (raw == nullptr)
@@ -194,11 +202,11 @@ export namespace cg::clang
         /**
          * @brief 从 library 填充 a。
          *
-         * @internal 失败时保持调用方状态原样未动（调用方关闭一个从未运行过
-         * 任何 clang 调用的库——见 EngineState 的生命周期注记，解释为何该
-         * 关闭安全而退役引擎的关闭不安全）。
+         * @internal 失败时保持调用方状态原样未动（调用方卸载一个从未运行
+         * 过任何 clang 调用的库——见 EngineState 的生命周期注记，解释为何
+         * 这次卸载安全而退役引擎的卸载不安全）。
          */
-        void resolve_api_into(Api& a, void* library)
+        void resolve_api_into(Api& a, const dylib::Library& library)
         {
             a.clang_createIndex = symbol_as<decltype(a.clang_createIndex)>(
                 library,
@@ -479,10 +487,86 @@ export namespace cg::clang
         }
 
         /**
+         * @brief 每个门面调用解引用的唯一访问器。
+         *
+         * @internal 无锁；原子指针仅在状态互斥锁内的加载中从 null 摆向已
+         * 填充的表。
+         */
+        [[nodiscard]]
+        auto api() -> const Api&
+        {
+            const Api* t = engine_state().table.load(std::memory_order_acquire);
+            if (t == nullptr)
+            {
+                throw std::runtime_error(
+                    "ccg internal error: the libclang engine is not loaded "
+                    "(every clang call needs a live Index - file a bug if you "
+                    "see this)");
+            }
+            return *t;
+        }
+
+    } // namespace detail
+
+    /**
+     * @brief 拥有一个 CXString；转换为 C 串 / 视图 / std::string。
+     *
+     * @internal
+     * 释放与取串都经构造时记下的那张分发表，析构不再去取已发布的表，所
+     * 以析构不抛。常用的那个构造取已发布的表：引擎没有装载时它在构造处
+     * 抛出，而不是等到析构。装载路径上分发表还没有发布（它要到装载函数
+     * 末尾才发布），那里用带分发表引用的构造，把刚填好的表直接交给它。
+     * 这个类住在分发表所在的单元，装载函数才用得到它。因用户声明的析构
+     * 抑制隐式移动构造而逐字写出（删除拷贝与移动）。
+     */
+    class Str
+    {
+    public:
+        /** @brief 按已发布的分发表持有 s；引擎没有装载时抛出。 */
+        explicit Str(CXString s) : Str{s, detail::api()} {}
+
+        /** @brief 按给定的分发表持有 s；分发表必须在本次构造之后一直有效。 */
+        explicit Str(CXString s, const detail::Api& api) noexcept
+            : s_{s}, api_{&api}
+        {
+        }
+
+        ~Str() { api_->clang_disposeString(s_); }
+        Str(const Str&) = delete;
+        Str& operator=(const Str&) = delete;
+        Str(Str&&) = delete;
+        Str& operator=(Str&&) = delete;
+
+        [[nodiscard]]
+        const char* c_str() const noexcept
+        {
+            const char* p = api_->clang_getCString(s_);
+            return p != nullptr ? p : "";
+        }
+        [[nodiscard]]
+        std::string_view view() const noexcept
+        {
+            return c_str();
+        }
+        [[nodiscard]]
+        std::string std_str() const
+        {
+            return c_str();
+        }
+
+    private:
+        CXString           s_;
+        const detail::Api* api_;
+    };
+
+    namespace detail
+    {
+
+        /**
          * @brief 把 path 加载进 e（互斥锁由调用方持有）。
          *
          * @internal
-         * 任何失败时状态与调用前完全一致。解析失败的库可以再关闭：还没有
+         * 任何失败时状态与调用前完全一致。解析失败的库可以再卸载：还没有
          * 任何 clang 调用运行过、未安装 handler 状态（见 EngineState 的
          * 生命周期注记）。在设置分发表的同时捕获版本串——它是新鲜度校验
          * （数据库 meta 的 llvm_version）的引擎身份一半。崩溃恢复刻意开启：
@@ -497,45 +581,25 @@ export namespace cg::clang
          */
         void load_locked(EngineState& e, const std::string& path)
         {
-            void* library = dylib::open(path);
-            Api   api{};
-            try
-            {
-                resolve_api_into(api, library);
-            }
-            catch (...)
-            {
-                dylib::close(library);
-                throw;
-            }
-            e.library = library;
+            // 库一取到就交给拥有者：后面任何一步抛出，都由它的析构卸载。
+            dylib::Library library = dylib::open(path);
+            Api            api{};
+            resolve_api_into(api, library);
+            // 分发表要到本函数末尾才发布，版本串因此按刚填好的这张表持有。
+            const Str version{api.clang_getClangVersion(), api};
+            // 两份文本先拷好再落位：拷贝可能抛出，抛出时引擎状态还没有
+            // 被动过；之后的赋值都是不抛的移动或逐值复制。
+            std::string version_text = version.std_str();
+            std::string path_text{path};
+            e.version = std::move(version_text);
+            e.path = std::move(path_text);
             e.api = api;
-            e.path = path;
-            const CXString raw = e.api.clang_getClangVersion();
-            const char*    text = e.api.clang_getCString(raw);
-            e.version = text != nullptr ? text : "";
-            e.api.clang_disposeString(raw);
             e.api.clang_toggleCrashRecovery(1);
             e.table.store(&e.api, std::memory_order_release);
-        }
-
-        /**
-         * @brief 每个门面调用解引用的唯一访问器。
-         *
-         * @internal 无锁；原子指针仅在状态互斥锁内的加载中从 null 摆向已
-         * 填充的表。
-         */
-        [[nodiscard]]
-        auto api() -> const Api&
-        {
-            const Api* t = engine_state().table.load(std::memory_order_acquire);
-            if (t == nullptr)
-            {
-                throw std::runtime_error(
-                    "ccg internal error: the libclang engine is not loaded (every "
-                    "clang call needs a live Index - file a bug if you see this)");
-            }
-            return *t;
+            // 显式交出所有权：引擎库按设计常驻到进程退出，理由见 EngineState
+            // 的生命周期注记。此后它由引擎状态以裸句柄登记持有，本函数的
+            // 拥有者析构时不再卸载它。
+            e.library = library.release();
         }
 
         /**

@@ -56,18 +56,21 @@ the units that use them import them directly: in the database layer the four
 `cg.db.tables` submodules, `cg.db.store` and the five `cg.db.query`
 submodules; in the `cg.msbuild` layer `cg.msbuild.tables`, `cg.msbuild.wrap`
 and `cg.msbuild.pipeline.wraplog`; plus `cg.analysis.external` (one delete
-statement on the connection). `sqlite3.h` is included in the global module
-fragments of `cg.db.store`, `cg.msbuild.wrap` and
-`cg.msbuild.pipeline.wraplog` (and of the schema-mirror test unit).
+statement on the connection) and the two test units `tests/handle.test.ixx`
+and `tests/schema-mirror.test.ixx` (they import `sqlpp23.sqlite3` only, for
+its connection classes). `sqlite3.h` is included in the global module
+fragments of `cg.db.store`, `cg.db.native`, `cg.msbuild.wrap` and
+`cg.msbuild.pipeline.wraplog` (and of the handle and schema-mirror test units
+and the plain-C smoke test `sqlite_smoke.c`).
 
 | Module | File(s) | Imports (project) | GMF third-party includes | Responsibility |
 |---|---|---|---|---|
-| `cg.util` | `src/util/util.ixx` (+ `cg.util.json` = `src/util/util.json.ixx`, `cg.util.platform` = `src/util/util.platform.ixx`, re-exported by the umbrella) | — | `cpp_yyjson.hpp` (in `cg.util.json` only, with the assert shim of §10.2); platform headers (`io.h`/`windows.h` or `unistd.h`, in `cg.util.platform` only) | version string; FNV-1a 64; qualified-name split/join; path normalization (forward slashes, lowercase drive); `PathCaseCache` + on-disk case re-spelling; in-memory `Interner` cache; minimal JSON read/write facade over yyjson-cpp; `cg.util.platform` console-vs-pipe stdin probe (the one place OS APIs may appear) |
+| `cg.util` | `src/util/util.ixx` (+ `cg.util.json` = `src/util/util.json.ixx`, `cg.util.platform` = `src/util/util.platform.ixx`, `cg.util.handle` = `src/util/util.handle.ixx`, `cg.util.ownedptr` = `src/util/util.ownedptr.ixx`, re-exported by the umbrella) | — | `cpp_yyjson.hpp` (in `cg.util.json` only, with the assert shim of §10.2); platform headers (`io.h`/`windows.h`/`objbase.h` or `unistd.h`/`dirent.h`/`dlfcn.h`/`sys/mman.h`; in the units of the wrapper-unit list, plus a few units that make system calls involving no resource) | version string; FNV-1a 64; qualified-name split/join; path normalization (forward slashes, lowercase drive); `PathCaseCache` + on-disk case re-spelling; in-memory `Interner` cache; minimal JSON read/write facade over yyjson-cpp; owning handles and deleters of `cg.util.handle`, the owning pointer with a deleter of `cg.util.ownedptr`, console-vs-pipe stdin probe of `cg.util.platform` (the list of units that take or release OS resources directly is in “C-interface resources: ownership rule and wrapper units” below) |
 | `cg.util.pcre2`, `cg.util.regex` | `src/util/util.pcre2.ixx`, `src/util/util.regex.ixx` (not re-exported by the umbrella `cg.util`) | `cg.util.regex` imports `cg.util.pcre2` | `pcre2.h` (in `cg.util.pcre2` only, 8-bit code unit width) | `cg.util.pcre2` is a pure re-export of the PCRE2 C interface (functions, opaque types, option and return-value constants; no wrapper class, no implementation); `cg.util.regex` is the matching layer of the hook's restricted regex path: one compiled pattern owning the match data block and match context, three queries (full-name matching through the start and end anchoring options, partial matching without option bits, and whether the pattern matches the empty string — one partial-match probe on an empty subject), an explicit per-match step limit, and a three-way outcome (hit / miss / aborted; the scan layer treats the last as a miss, counts it, and hands the count to the exits for disclosure) |
 | `cg.cli.scan.names` | `src/cli/cli.scan.names.ixx` (not re-exported by the umbrella `cg.cli`) | `cg.util.regex`, `cg.db.schema`, `cg.db.store`, `cg.db.query.dumpkeys`; `cg.cli.hook` imports it | — | symbol-name-table scan of the hook's restricted regex path: materializes names segment by segment and matches each one, first with full-match semantics, then — when nothing matched and the pattern cannot match the empty string — again with partial-match semantics; returns the matched names and the number of names cut off by the step limit (those of the pass that produced the hits); the deadline probes between segments and inside the loop are callables injected by the caller, and a triggered probe abandons the whole query. Reads no environment variable, no clock, and decides nothing about the exits after a hit |
 | `cg.cli.lookup.name` | `src/cli/cli.lookup.name.ixx` (not re-exported by the umbrella `cg.cli`) | imports the standard library only; `cg.cli.hook` imports it | — | two shape decisions the hook's lookup path makes about a symbol name: where the qualified chain is split (the last double colon outside angle brackets — a double colon inside template arguments is not a separator) and whether the name resolves again when re-queried verbatim as a pattern (a bare identifier is not bound by the length limit; any other shape must stay within the pattern length limit, carry no regex metacharacter or control character, and have no double colon outside angle brackets; noise words are excluded by the caller against its word list). Pure string logic, touches no database |
 | `cg.cli.render.disclose` | `src/cli/cli.render.disclose.ixx` (not re-exported by the umbrella `cg.cli`) | `cg.util`; `cg.cli.hook` imports it | — | pure string assembly for the hook's injected text: the UTF-8 sequence safe prefix under a byte cap, display clipping, the budget fuse, the graded over-limit envelope (hit total, the lexicographically smallest re-queryable names, one narrowing hint, and the undetermined count right after the total when non-zero), the step-limit disclosure line, and its budgeted attachment behind a body. Touches no database and no deadline probe |
-| `cg.db` | `src/db/db.ixx` + `cg.db.schema` (`db.schema.ixx`), `cg.db.store` (`db.store.ixx`), `cg.db.query` (`db.query.ixx`) | — | `sqlite3.h` | SQLite via sqlpp23: open/PRAGMAs/DDL, string interning table, upserts (files/symbols/edges/includes/imports), per-file purge, all lookups and traversal-shaped queries, stats. Knows nothing of libclang |
+| `cg.db` | `src/db/db.ixx` + `cg.db.schema` (`db.schema.ixx`), `cg.db.store` (`db.store.ixx`), `cg.db.query` (`db.query.ixx`); plus `cg.db.native` (`db.native.ixx`, not re-exported by the umbrella `cg.db`) | — | `sqlite3.h` | SQLite via sqlpp23: open/PRAGMAs/DDL, string interning table, upserts (files/symbols/edges/includes/imports), per-file purge, all lookups and traversal-shaped queries, stats. `cg.db.native` is the owning wrapper over the raw SQLite interface (`NativeStatement`, `NativeText`, `exec_native`): the bootstrap steps of the capture database go through its statement objects and execution helper, while the three bypass tables of the graph store hold their statements with the graph store's own owning pointers and take only the owner of library-allocated text from here. Knows nothing of libclang |
 | `cg.db.tables` | `src/db/db.tables.ixx` (entry point; declares nothing itself and only re-exports the four submodules below; not re-exported by the umbrella `cg.db`) + `cg.db.tables.core` (`db.tables.core.ixx`), `cg.db.tables.graph` (`db.tables.graph.ixx`), `cg.db.tables.sites` (`db.tables.sites.ixx`), `cg.db.tables.analysis` (`db.tables.analysis.ixx`) | — | `sqlpp23/core/name/create_name_tag.h` (macro-only) | sqlpp23 table models (namespace `cg::db::tab`), hand-written shape, tables do not reference each other: `core` holds metadata and strings, the kind/edge-type dictionaries, a read-only model of the sqlite catalog table, file registry, fingerprints, failure entries and realtime coordination, plus every alias tag used for aggregates and joins; `graph` holds the symbols/edges/includes/imports tables; `sites` holds type hints and call sites; `analysis` holds propagation slots, passthrough wrappers, external parameter args and external invokes, and symbol contributions. Units that name a table model `import cg.db.tables;` themselves |
 | `cg.clang` | `src/clang/clang.ixx` + `cg.clang.loader`, `cg.clang.capi` (`clang.capi.ixx`), `cg.clang.driver`, `cg.clang.tu` (`clang.tu.ixx`), `cg.clang.compile_db` (`clang.compile_db.ixx`), `cg.clang.bmi` | `cg.util` | `clang-c/Index.h` (in `cg.clang.capi` only) | `cg.clang.capi` re-exports CX types + RAII (`Str`, `Index`, `Tu`) + thin cursor facade (kind/spelling/location/children/…); `cg.clang.tu` parse + diagnostics; `cg.clang.compile_db` reads compile_commands.json, tokenizes command strings, builds per-TU argv |
 | `cg.extract` | `src/extract/extract.ixx` + `cg.extract.model` (`extract.model.ixx`), `cg.extract.visitor` (`extract.visitor.ixx`) | `cg.clang`, `cg.util` | — | `cg.extract.model` plain record types (`SymbolRec`, `EdgeRec`, `IncludeRec`, `ImportRec`, `TuExtract`) + THE `unique_key` builder (single source of truth, §4); `cg.extract.visitor` walks one TU cursor tree and produces records (named-module imports from `CXCursor_ModuleImportDecl`, main-file filter). Pure: no DB, no I/O |
@@ -83,6 +86,102 @@ file re-exports submodules with `export import cg.util.json;` and declares
 nothing bulky itself. (Historically these were module partitions; the
 dotted-name module refactor dissolved the partition syntax into plain
 dotted-name modules, so the umbrella `import cg.util;` surface is unchanged.)
+
+### C-interface resources: ownership rule and wrapper units
+
+Resources handed out by C libraries and OS interfaces — dynamic-library
+handles, file and process handles, shared-memory handles and views,
+prepared statements, strings and arrays owned by the engine, interface
+pointers, runtime contexts — are always managed by the object that owns
+them. Such an object is called an owning object here: it may be an owning
+pointer with a deleter (`OwnedPtr` of `cg.util.handle`) or a dedicated
+class; its destructor hands the resource back. Six rules:
+
+1. **Take over on acquisition.** Calls that take a resource straight from a
+   C interface appear only in the wrapper unit for that kind of resource,
+   and the resource is handed to an owning object at once; no raw pointer
+   waits for a manually paired release.
+2. **Release calls live only in the owner's lifetime functions.** That is
+   the owner's destructor, move assignment, release function, the rollback
+   of a failed constructor, and the bodies of deleters or bridge release
+   functions called only from those places. Even inside wrapper units no
+   ordinary function pairs a take and a release by hand.
+3. **Business code does neither.** Units outside the wrapper units write no
+   release calls and take no resources straight from C interfaces; they
+   only use the wrapper classes and facade functions.
+4. **Process-level resources that are never released by design are handed
+   over explicitly and registered in one place.** After a successful load
+   or creation the owning object's `release`-style member hands ownership
+   to the process-level state explicitly, which records it together with
+   the reason it stays; releasing it at process exit is not required. Paths
+   that fail on the way are still released by the owning object's
+   destructor.
+5. **Tests may call a C interface directly in two situations only**: the
+   subject under test is the primitive itself (a protocol test), or the
+   subject is the wrapper class compared against the raw library. Such test
+   files are registered one by one with their reason; even they do not
+   hand-write releases — resources are held by owning objects inside the
+   test.
+6. **Exception.** Crash protection runs no destructors while recovering
+   from a hardware fault (see `cg.util.guard`); the rule does not apply to
+   resources inside a guarded point. The existing convention — only leaf
+   work that can be discarded as a whole runs under the guard — is kept as
+   is.
+
+```mermaid
+flowchart LR
+    B["business units<br/>cli, graph, analysis, msbuild, ..."] -->|"wrapper classes and facade functions only"| W["wrapper units<br/>see the list below"]
+    W -->|"take resources"| C["C libraries and OS interfaces"]
+    W -->|"handed over at once"| O["owning object<br/>destructor, move assignment, release function, deleter"]
+    O -->|"release calls only in these places"| C
+    O -.->|"resident by design:<br/>ownership handed over explicitly"| P["process-level state<br/>registered with the reason"]
+```
+
+Wrapper units: each kind of interface appears directly only in the units
+below; every unit outside the list is business code.
+
+| Resource family | Wrapper units | Notes |
+|---|---|---|
+| OS handles, system buffers, dynamic-library handles, mapped views, interface pointers | `cg.util.handle` (`src/util/util.handle.ixx`), `cg.util.platform` (`src/util/util.platform.ixx`) | `cg.util.handle` provides the generic owning handle `Owned` and a set of deleters, and `cg.util.ownedptr` provides `OwnedPtr`, the owning pointer with a deleter that takes a pointer handed back by a C interface through an out parameter straight into the owner; neither allocates on the heap, so both may sit on the hook and child-process spawn paths; the functions of `cg.util.platform` take over a handle the moment they get one. System calls on the crash path belong to `cg.util.crashdump` (`src/util/util.crashdump.ixx`), C runtime differences to `cg.util.cstd` (`src/util/util.cstd.ixx`) |
+| Loading the LLVM engine library | `cg.clang.loader` (`src/clang/clang.loader.ixx`), `cg.clang.capi.api` (`src/clang/clang.capi.api.ixx`) | `Library` owns the dynamic-library handle and unloads it in its destructor; after a successful load it hands over ownership, and the engine library stays resident until process exit by design (§9) |
+| Strings, translation units, indexes, diagnostics, token arrays and overridden-cursor arrays handed out by libclang | `cg.clang.capi.api`, `cg.clang.capi.model`, `cg.clang.capi.cursor`, `cg.clang.capi.type` (`src/clang/clang.capi*.ixx`) | `Str`, `Tu`, `Index`, plus three owners in the `detail` namespaces of the model and cursor facade units (single diagnostics, token arrays, overridden-cursor arrays); taking and handing back happen only inside the facade |
+| Raw SQLite interface | `cg.db.store` (`src/db/db.store.ixx`), `cg.db.native` (`src/db/db.native.ixx`) | The lazily prepared native statements of the three bypass tables (the coordination audit table and the two head-cache tables) are held by owning pointers; `NativeStatement`, `NativeText` and `exec_native` serve units that need hand-written statements. The connection and prepared-statement classes of the typed query library sqlpp23 are the owners themselves |
+| JSON (yyjson) | `cg.util.json` (`src/util/util.json.ixx`) and its bridge `src/util/util.json.bridge.cpp` | The facade's destructors and deleters each release exactly once through the paired bridge release function |
+| Syntax parsing (tree-sitter) | `cg.util.treesit` (`src/util/util.treesit.ixx`) | `Tree`, `Parser` |
+| Regular expressions (PCRE2) | `cg.util.regex` (`src/util/util.regex.ixx`); `cg.util.pcre2` is a pure re-export | `Pattern` owns the compiled pattern, the match data block and the match context |
+| The C# object host (hostfxr, COM, the object protocol) | `cg.util.cshost` (`src/util/util.cshost.ixx`) | `CsRef` holds the shim-side object by reference count; the dynamic library, the runtime context, interface pointers, shared-memory handles and views, and result strings are taken over on acquisition; the three object-protocol primitives are exported for protocol tests only (the `protocol_test` namespace) |
+
+Test files registered as calling interfaces directly (the registered
+exceptions of rule 5):
+
+- `tests/shellscan.test.ixx`: the object-protocol test; its subject is the
+  primitive itself, so it calls the three primitives through the protocol
+  test face; file handles are held by `Owned`, and the shim-side objects it
+  creates are held by an owning object inside the test, the destroy results
+  still being checked by assertions.
+- `tests/regex.test.ixx`: compares against the engine's raw return codes;
+  the three engine resources are held by an owning object inside the test.
+- `tests/cli.test.ixx`: the descriptor owner carried by the file-descriptor
+  redirect fixture; the close call appears in its reset function only. A C
+  runtime file descriptor is not a kernel handle, so the generic owning
+  handle cannot manage it.
+- `tests/handle.test.ixx`: the subject is the wrapper class compared with the
+  raw interface; the resource-count probes have to make their own handles,
+  and every release goes through an owner.
+- `tests/clang.test.ixx`: the dynamic-library owner compared with the raw
+  interface; the engine-switch case has to take the copy engine's handle by
+  module name, and the handle is handed to `Library`, which unloads it.
+- `tests/sqlite_smoke.c`: a plain-C smoke test, treated as test data.
+- `tests/crashdump.probe.ixx`: the probe of the crash-dump matrix, treated
+  as test data. In its multi-thread crash form the two worker-thread
+  handles get no owner: the process crashes right away, and the handles
+  are reclaimed when it terminates.
+
+A few more units include the platform headers than the two lists above:
+some units make system calls that involve no resource (reading the current
+directory, reading environment variables, probing file attributes, getting
+the module file name) and include the headers for that; taking and
+releasing resources happens only in the wrapper units.
 
 ### CMake target structure
 
@@ -618,7 +717,11 @@ table of every exe verifies the absence).
   db has no recorded identity — unknown engine — so the first run after
   the upgrade re-parses once, then records.
 - Lifecycle: the first `cg.clang::Index` (or the explicit CLI load)
-  resolves + loads; the handle stays mapped for the PROCESS lifetime —
+  resolves + loads. The library handle is first owned by the `Library`
+  object on the load path and hands over ownership explicitly — into the
+  engine state — only after every step succeeded; a load that fails on the
+  way is unloaded by that object's destructor. From then on the handle
+  stays mapped for the PROCESS lifetime —
   deliberately never freed, because libclang's static initializers
   install process-global crash-recovery state (a vectored SEH handler on
   Windows) that FreeLibrary/dlclose does not retract: a measured

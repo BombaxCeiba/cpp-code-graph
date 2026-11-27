@@ -5,13 +5,14 @@
  *        命令串分词、字符串驻留、解析状态枚举。
  *
  * 核心刻意保持零依赖（仅 `import std;`），使其他每个模块都能建于其上
- * （分层最底层）。cg.util.json（yyjson 门面）、
- * cg.util.platform（OS 探针）、cg.util.guard（硬件故障防护）、
- * cg.util.pool（通用工人池）、cg.util.treesit（tree-sitter 门面）、
- * cg.util.cshost（C# 对象宿主：Select-String 引擎面与 MSBuild 求值
- * 面）、cg.util.msvcswitch（MSVC 模块开关规范拼写清单）与
- * cg.util.shellscan（shell 查找意图提取层）在此再导出，令伞面
- * `import cg.util;` 的用法原样保持可用。
+ * （分层最底层）。cg.util.json（yyjson 门面）、cg.util.platform（OS
+ * 探针）、cg.util.handle（操作系统句柄的拥有型封装）、cg.util.ownedptr
+ * （带删除器的拥有型指针）、cg.util.guard（硬件故障防护）、cg.util.pool
+ * （通用工人池）、cg.util.treesit（tree-sitter 门面）、cg.util.cshost
+ * （C# 对象宿主：Select-String 引擎面与 MSBuild 求值面）、
+ * cg.util.msvcswitch（MSVC 模块开关规范拼写清单）与 cg.util.shellscan
+ * （shell 查找意图提取层）在此再导出，令伞面 `import cg.util;` 的用法
+ * 原样保持可用。
  */
 export module cg.util;
 
@@ -19,6 +20,8 @@ import std;
 
 export import cg.util.json;
 export import cg.util.platform;
+export import cg.util.handle;
+export import cg.util.ownedptr;
 export import cg.util.guard;
 export import cg.util.pool;
 export import cg.util.treesit;

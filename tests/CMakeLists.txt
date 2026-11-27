@@ -49,6 +49,16 @@ ccg_add_test(cg_test_lookup lookup.test.ixx)
 # 报告不受影响，非 ASAN 构建则完全无视 ASAN_OPTIONS。
 set_tests_properties(cg_test_util PROPERTIES ENVIRONMENT
     "ASAN_OPTIONS=handle_segv=0")
+# C 接口资源拥有者（通用句柄封装、数据库原生语句与库分配文本、执行
+# 助手）与平台层取命令行参数、环境条目的两个函数：不变量检查，加资源
+# 计数探针——构造、移动、析构、栈展开的前后，本进程的句柄数、线程数、
+# 子进程数回到基线。句柄取自空设备与事件，数据库用内存库；命令行参数
+# 经本程序自身的子进程往返，不落盘。平台封装单元里取到句柄就交给拥
+# 有者的各条路径（只捕获执行、带超时执行、配置化子进程捕获、文件锁、
+# 只读映射、原子写与替换、目录压缩）同样按资源计数探针验证，子进程都
+# 是本程序自身；崩溃转储的武装在子进程里做（它挂进程级处理器），父进
+# 程读回计数。
+ccg_add_test(cg_test_handle handle.test.ixx)
 ccg_add_test(cg_test_db db.test.ixx)
 ccg_add_test(cg_test_clang clang.test.ixx)
 ccg_add_test(cg_test_extract extract.test.ixx)

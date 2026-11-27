@@ -22,6 +22,7 @@ import cg.util;
 import cg.util.cstd;
 import sqlpp23.core;
 import sqlpp23.sqlite3;
+import cg.db.native;
 import cg.db.schema;
 import cg.db.tables;
 
@@ -1871,17 +1872,16 @@ namespace cg::db
         // 写锁），把它的语句放进 make_statements 会让整个连接打不开——
         // 审计是尽力而为通道，绝不反噬协调主流程，故走原生 sqlite3 C
         // API、首次使用时才 prepare（表缺失时当场补建一次再试）。
+        /** @brief 旁路语句的删除器；销毁语句的调用只在这一处出现。 */
         struct StmtDeleter
         {
-            void operator()(sqlite3_stmt* s) const
+            auto operator()(sqlite3_stmt* stmt) const noexcept -> void
             {
-                if (s != nullptr)
-                {
-                    sqlite3_finalize(s);
-                }
+                sqlite3_finalize(stmt);
             }
         };
-        using NativeStmt = std::unique_ptr<sqlite3_stmt, StmtDeleter>;
+        using NativeStmt =
+            cg::util::handle::OwnedPtr<sqlite3_stmt, StmtDeleter>;
         NativeStmt coord_ins_;
         NativeStmt coord_sel_;
         NativeStmt coord_counts_;
@@ -1898,10 +1898,31 @@ namespace cg::db
         NativeStmt fid_ins_;
         NativeStmt fid_sel_;
 
+        /** @internal 在连接上预编译一条旁路语句并交给拥有型指针；预编译
+         *            失败返回空，库可能留下的半成品语句随拥有者回收。 */
+        [[nodiscard]]
+        auto prepare_side_stmt_(const char* sql) -> NativeStmt
+        {
+            // 出参直接落进拥有者：预编译失败时库可能留下半成品语句，由
+            // 拥有者的析构销毁。
+            NativeStmt prepared;
+            const int  rc = sqlite3_prepare_v2(
+                db_.native_handle(),
+                sql,
+                -1,
+                &prepared,
+                nullptr);
+            if (rc != SQLITE_OK)
+            {
+                return {};
+            }
+            return prepared;
+        }
+
         /** @internal 首次使用时 prepare 并确保旁路表在位；失败返回空。 */
         auto side_stmt_(NativeStmt& slot, const char* sql) -> sqlite3_stmt*
         {
-            if (slot == nullptr)
+            if (!slot)
             {
                 try
                 {
@@ -1913,19 +1934,11 @@ namespace cg::db
                 catch (const std::exception&)
                 {
                 }
-                sqlite3_stmt* raw = nullptr;
-                if (sqlite3_prepare_v2(
-                        db_.native_handle(),
-                        sql,
-                        -1,
-                        &raw,
-                        nullptr)
-                    != SQLITE_OK)
+                slot = prepare_side_stmt_(sql);
+                if (!slot)
                 {
-                    sqlite3_finalize(raw);
                     return nullptr;
                 }
-                slot.reset(raw);
             }
             sqlite3_reset(slot.get());
             sqlite3_clear_bindings(slot.get());
@@ -1935,7 +1948,7 @@ namespace cg::db
         /** @internal 首次使用时 prepare；表缺失先补建，仍失败返回空。 */
         auto coord_stmt_(NativeStmt& slot, const char* sql) -> sqlite3_stmt*
         {
-            if (slot == nullptr)
+            if (!slot)
             {
                 try
                 {
@@ -1947,14 +1960,8 @@ namespace cg::db
                 catch (const std::exception&)
                 {
                 }
-                sqlite3_stmt* raw = nullptr;
-                if (sqlite3_prepare_v2(
-                        db_.native_handle(),
-                        sql,
-                        -1,
-                        &raw,
-                        nullptr)
-                    != SQLITE_OK)
+                slot = prepare_side_stmt_(sql);
+                if (!slot)
                 {
                     // 旁路失败留痕（一行 stderr，绝不抛）：调试与运维唯一
                     // 的现场线索——表缺席之外的原因（连接状态等）在此现形。
@@ -1962,10 +1969,8 @@ namespace cg::db
                         std::cerr,
                         "ccg: note: coord audit statement unavailable - {}",
                         sqlite3_errmsg(db_.native_handle()));
-                    sqlite3_finalize(raw);
                     return nullptr;
                 }
-                slot.reset(raw);
             }
             sqlite3_reset(slot.get());
             sqlite3_clear_bindings(slot.get());
@@ -2068,13 +2073,16 @@ namespace cg::db
                 {
                     if (diag_on_)
                     {
-                        if (char* exp = sqlite3_expanded_sql(s.native_handle()))
+                        // 展开文本由库分配，交给拥有型对象持有，用完随作用
+                        // 域交还。
+                        const NativeText expanded{
+                            sqlite3_expanded_sql(s.native_handle())};
+                        if (expanded.valid())
                         {
                             std::println(
                                 std::cerr,
                                 "ccg-sql-diag: failed statement (expanded): {}",
-                                std::string_view{exp});
-                            sqlite3_free(exp);
+                                expanded.view());
                         }
                     }
                 }

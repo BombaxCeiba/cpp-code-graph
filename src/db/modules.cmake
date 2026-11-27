@@ -6,6 +6,7 @@ ccg_add_dir_modules(cg_core "${CMAKE_CURRENT_LIST_DIR}"
     db.tables.analysis.ixx
     db.tables.ixx
     db.schema.ixx
+    db.native.ixx
     db.store.ixx
     db.query.lookup.ixx
     db.query.batch.ixx

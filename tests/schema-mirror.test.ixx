@@ -1,5 +1,7 @@
 module;
-// sqlite3 C API 直连跑 PRAGMA。
+// SQLite 的打开旗标与结果码是宏，宏不跨模块边界：用到它们的测试单元在
+// 全局模块片段里包含头文件。语句经 cg.db.native 的拥有型对象执行，连接
+// 经类型化查询库的连接对象打开，测试里没有手动的销毁与关闭调用。
 #include <sqlite3.h>
 
 export module cg.test.schemamirror;
@@ -27,6 +29,8 @@ import std;
 import cg.util;
 import cg.db;
 import cg.db.tables;
+import cg.db.native;
+import sqlpp23.sqlite3;
 import cg.extract;
 import cg.analysis;
 import cg.test.harness;
@@ -76,28 +80,27 @@ namespace
         return names;
     }
 
-    // PRAGMA table_info 的列名集（第 2 列，按返回序）。
+    // PRAGMA table_info 的列名集（第 2 列，按返回序）。语句由拥有型对象
+    // 持有：预编译失败时带回错误文本，照旧返回空集。
     auto ddl_column_names(sqlite3* db, const char* table)
         -> std::vector<std::string>
     {
         std::vector<std::string> names;
         const std::string sql = std::format("PRAGMA table_info({})", table);
-        sqlite3_stmt*     stmt = nullptr;
-        if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr)
-            != SQLITE_OK)
+        std::expected<cg::db::NativeStatement, std::string> prepared =
+            cg::db::NativeStatement::prepare(db, sql.c_str());
+        if (!prepared.has_value())
         {
-            sqlite3_finalize(stmt);
             return names;
         }
-        while (sqlite3_step(stmt) == SQLITE_ROW)
+        while (prepared->step().has_row())
         {
-            const unsigned char* text = sqlite3_column_text(stmt, 1);
-            if (text != nullptr)
+            const std::string_view name = prepared->column_text(1);
+            if (!name.empty())
             {
-                names.emplace_back(reinterpret_cast<const char*>(text));
+                names.emplace_back(name);
             }
         }
-        sqlite3_finalize(stmt);
         return names;
     }
 
@@ -111,16 +114,29 @@ namespace
             cg::db::GraphStore store{p};
         }
 
-        sqlite3* raw = nullptr;
-        cg::test::check(
-            r,
-            sqlite3_open_v2(p.c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr)
-                == SQLITE_OK,
-            "mirror probe opens the bootstrapped db");
-        if (raw == nullptr)
+        // 探针连接由类型化查询库的连接对象持有：打开失败时连接器抛出，
+        // 这里落成一条失败的断言。连接先于删库文件关闭。
+        std::optional<sqlpp::sqlite3::connection> probe;
+        try
         {
+            sqlpp::sqlite3::connection_config probe_config;
+            probe_config.path_to_database = p;
+            probe_config.flags = SQLITE_OPEN_READWRITE;
+            probe.emplace(probe_config);
+        }
+        catch (const std::exception& error)
+        {
+            cg::test::check(
+                r,
+                false,
+                std::format(
+                    "mirror probe opens the bootstrapped db: {}",
+                    error.what()));
+            cg::test::remove_sqlite_db(path);
             return;
         }
+        cg::test::check(r, true, "mirror probe opens the bootstrapped db");
+        sqlite3* raw = probe->native_handle();
 
         using cg::db::tab::AnalysisSlots_;
         using cg::db::tab::CallSites_;
@@ -214,7 +230,8 @@ namespace
                 ddl == want,
                 "coord_events columns match the audit statements");
         }
-        sqlite3_close(raw);
+        // 连接先于删库文件关闭：库文件在连接开着的时候删不掉。
+        probe.reset();
         cg::test::remove_sqlite_db(path);
     }
 

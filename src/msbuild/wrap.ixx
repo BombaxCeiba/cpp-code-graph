@@ -8,17 +8,17 @@ module;
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#include <shellapi.h>
 #endif
 // clang-format on
 // capture.db 的读写经 sqlpp23，表模型由 import cg.msbuild.tables 取得。
-// 残留的 sqlite3 C API 面有两个白名单接缝：bootstrap_capture_db 的
-// PRAGMA journal_mode 探测与幂等 DDL（sqlpp23 无 schema 迁移 DSL、PRAGMA
-// 无 ORM 旋钮，经 connection 的原生句柄调用），以及 SQLITE_OPEN_* 旗标宏
-// 与 sqlite3_busy_timeout（宏不跨模块边界，连接器自身无超时旋钮）。include
-// 面由 cg_core 的 PUBLIC cg::sqlite3 链接传递（自取 amalgamation，头目录
-// PUBLIC 暴露）。sqlite3.h 自带 extern "C"，函数声明跨单元重复无 ODR 风险，
-// 与 db.store 的全局片段属主并行不悖。
+// 本单元直接调用 sqlite3 C API 的地方只剩两处，都不涉及资源：
+// SQLITE_OPEN_* 旗标宏与 sqlite3_busy_timeout（宏不跨模块边界，连接器
+// 自身无超时旋钮）。PRAGMA journal_mode 探测与幂等 DDL（sqlpp23 无
+// schema 迁移 DSL、PRAGMA 无 ORM 旋钮）经 connection 的原生句柄交给
+// cg.db.native 的拥有型语句与执行助手完成，语句与错误串不在这里释放。
+// include 面由 cg_core 的 PUBLIC cg::sqlite3 链接传递（自取 amalgamation，
+// 头目录 PUBLIC 暴露）。sqlite3.h 自带 extern "C"，函数声明跨单元重复
+// 无 ODR 风险，与 db.store 的全局片段属主并行不悖。
 #include <sqlite3.h>
 
 /**
@@ -49,10 +49,9 @@ module;
  * jsonl 名是既有触发契约与推导锚点，jsonl 文件本身不再写。读侧
  * cg.msbuild.pipeline 经 detail::capture_db_of_log_path 同一函数推导，
  * 两侧路径永不分叉。
- * 全局模块片段说明：包装器经 GetCommandLineW/CommandLineToArgvW 持有
- * 真宽命令行、经 cg.util.platform 的子进程原语派生真实编译器；本模块
- * 是 cg.msbuild 中唯一包含 shellapi.h 的地方（CommandLineToArgvW 所
- * 在，链接 Shell32）。
+ * 全局模块片段说明：真宽命令行经 cg.util.platform 的命令行参数取值
+ * 函数取得（系统分配的参数数组由平台层持有并交还），真实编译器经同
+ * 一单元的子进程原语派生；本模块不直接调用取用或释放系统资源的接口。
  * 失败契约：一切失败路径都向 capture 表写一条 kind="error" 行并以
  * 退出码 1 结束——被包装的构建绝不静默失败或挂起；记录层自身打不开
  * （db 插入失败）则跳过该行 + 向 stderr 打一行告警（wrap 继承
@@ -64,6 +63,7 @@ export module cg.msbuild.wrap;
 import std;
 import cg.util;
 import cg.util.cstd;
+import cg.db.native;
 import cg.msbuild.translate;
 import sqlpp23.core;
 import sqlpp23.sqlite3;
@@ -442,14 +442,30 @@ export namespace cg::msbuild
         }
 
         /**
+         * @brief 连接当前的日志模式是否已是预写日志模式。
+         *
+         * @internal 查询语句在函数返回时销毁，不会跨到随后的日志模式切换。
+         * 预编译失败或没有读到行都按"不是"处理。
+         */
+        [[nodiscard]]
+        inline auto journal_mode_is_wal(sqlite3* db) -> bool
+        {
+            std::expected<cg::db::NativeStatement, std::string> mode =
+                cg::db::NativeStatement::prepare(db, "PRAGMA journal_mode;");
+            return mode && mode->step().has_row()
+                   && mode->column_text(0) == "wal";
+        }
+
+        /**
          * @brief 把连接的 journal 模式尽力而为地切到 WAL 并确保 capture 表
          * 存在（幂等 DDL）。建表失败返回 false。
          *
-         * @internal 本函数是手写 SQL 的白名单接缝（PRAGMA 无 ORM 旋钮、DDL
-         * 无 schema DSL——两项均属全仓免 ORM 理由注释的既有豁免），保持 C API
-         * 直调形态：调用方传 sqlpp23 连接的原生句柄，WAL 探测/切换与幂等 DDL
-         * 的语句序列与旧直调时期逐字一致，12 进程并发冷启动的竞态行为
-         * （capture_db_ensure 预建 + 写者自建兜底）不变。
+         * @internal 手写 SQL 的落点（PRAGMA 无 ORM 旋钮、DDL 无 schema DSL
+         * ——两项均属全仓免 ORM 理由注释的既有豁免）：调用方传 sqlpp23
+         * 连接的原生句柄，语句与错误串经 cg.db.native 的拥有型语句和执行
+         * 助手处理，本函数不写释放调用。三步的次序不变：先查当前日志
+         * 模式，不是预写日志模式才切换，最后幂等建表；12 进程并发冷启动
+         * 的竞态行为（capture_db_ensure 预建 + 写者自建兜底）不变。
          * WAL 是吞吐优化不是正确性依赖：SQLite 对 journal_mode=WAL
          * 的切换在其它连接活动时不调用 busy handler 而直接回 SQLITE_BUSY
          *（并发冷启动实测：prune 删库后多个桩进程近乎同时 CREATE 同一个新
@@ -459,57 +475,24 @@ export namespace cg::msbuild
          */
         inline auto bootstrap_capture_db(sqlite3* db) -> bool
         {
-            bool          already_wal = false;
-            sqlite3_stmt* mode = nullptr;
-            if (sqlite3_prepare_v2(
-                    db,
-                    "PRAGMA journal_mode;",
-                    -1,
-                    &mode,
-                    nullptr)
-                == SQLITE_OK)
+            if (!journal_mode_is_wal(db))
             {
-                if (sqlite3_step(mode) == SQLITE_ROW)
-                {
-                    const unsigned char* const text =
-                        sqlite3_column_text(mode, 0);
-                    already_wal =
-                        text != nullptr
-                        && std::string_view{reinterpret_cast<const char*>(text)}
-                               == "wal";
-                }
-                sqlite3_finalize(mode);
+                static_cast<void>(
+                    cg::db::exec_native(db, "PRAGMA journal_mode=WAL;"));
             }
-            if (!already_wal)
-            {
-                char* switch_err = nullptr;
-                static_cast<void>(sqlite3_exec(
-                    db,
-                    "PRAGMA journal_mode=WAL;",
-                    nullptr,
-                    nullptr,
-                    &switch_err));
-                sqlite3_free(switch_err);
-            }
-            char*      err = nullptr;
-            const bool ok = sqlite3_exec(
-                                db,
-                                "CREATE TABLE IF NOT EXISTS capture ("
-                                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                                "token TEXT NOT NULL,"
-                                "timestamp TEXT NOT NULL,"
-                                "kind TEXT NOT NULL,"
-                                "argv_json TEXT NOT NULL,"
-                                "cwd TEXT NOT NULL,"
-                                "include_env TEXT,"
-                                "real_cl TEXT NOT NULL,"
-                                "message TEXT);",
-                                nullptr,
-                                nullptr,
-                                &err)
-                            == SQLITE_OK;
-            sqlite3_free(err);
-            return ok;
+            return cg::db::exec_native(
+                       db,
+                       "CREATE TABLE IF NOT EXISTS capture ("
+                       "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                       "token TEXT NOT NULL,"
+                       "timestamp TEXT NOT NULL,"
+                       "kind TEXT NOT NULL,"
+                       "argv_json TEXT NOT NULL,"
+                       "cwd TEXT NOT NULL,"
+                       "include_env TEXT,"
+                       "real_cl TEXT NOT NULL,"
+                       "message TEXT);")
+                .has_value();
         }
 
         /**
@@ -618,9 +601,10 @@ export namespace cg::msbuild
          * 退出码；此处不会返回 nullopt（环境门控已先行通过）。
          *
          * @internal
-         * argv 的事实来源是宽字符命令行（GetCommandLineW/CommandLineToArgvW），
-         * 绝不用 main() 的窄 argv——ANSI 转换会破坏 unicode 路径拼写。cwd 生成
-         * 两种拼写：正斜杠形供响应文件解析使用，capture 表保留原生反斜杠形。
+         * argv 的事实来源是宽字符命令行（经 cg.util.platform 的
+         * process_args_wide 取得），绝不用 main() 的窄 argv——ANSI 转换
+         * 会破坏 unicode 路径拼写。cwd 生成两种拼写：正斜杠形供响应文件
+         * 解析使用，capture 表保留原生反斜杠形。
          * @rsp 展开与适配器共享 expand_rsp：不可读或循环的响应文件是响亮的
          * 数据错误——写 error 行进 capture 表、令本次调用失败，绝不转发半
          * 展开的命令行、也绝不崩溃。capture 行的 argv[0] 是本可执行文件
@@ -654,18 +638,11 @@ export namespace cg::msbuild
             const std::optional<std::wstring> real_cl_env =
                 env_wide(L"CCG_CLWRAP_REAL_CL");
 
-            int     argc = 0;
-            LPWSTR* wide_argv = CommandLineToArgvW(GetCommandLineW(), &argc);
             std::vector<std::string> argv_utf8;
-            if (wide_argv != nullptr)
+            for (const std::wstring& arg :
+                 cg::util::platform::process_args_wide())
             {
-                for (int i = 0; i < argc; ++i)
-                {
-                    argv_utf8.push_back(
-                        cg::util::platform::narrow_utf8(
-                            std::wstring_view{wide_argv[i]}));
-                }
-                LocalFree(wide_argv);
+                argv_utf8.push_back(cg::util::platform::narrow_utf8(arg));
             }
 
             const DWORD cwd_needed = GetCurrentDirectoryW(0, nullptr);
@@ -757,7 +734,7 @@ export namespace cg::msbuild
             // 脚本形态的 real_cl（.py 后缀）：CreateProcessW 不走 shell
             // 文件关联，.py 无法直接派生；前插 PATH 上的 python 解释器
             // （裸名交给 CreateProcessW 的标准 PATH 搜索），脚本路径降为
-            // 首个参数，宽字符命令行经 GetCommandLineW 全程无损。刻意不用
+            // 首个参数，宽字符命令行经平台层取值函数全程无损。刻意不用
             // cmd.exe 批处理垫：垫层会把 %VAR% 按环境变量展开、把 ^ 与
             // |、<、> 一类令牌重新解析，转发即粉碎。capture 行的 real_cl
             // 仍记原始值——解释器前缀只属于拉起形态，不属于记录契约。

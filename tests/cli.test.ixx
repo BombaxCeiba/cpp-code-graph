@@ -72,22 +72,87 @@ namespace
     }
 
     /**
+     * @brief 一个 C 运行库文件描述符的拥有者：析构时关闭；负值表示没有持有。
+     *
+     * @internal 运行库的文件描述符不是内核句柄，通用拥有型句柄在 Windows 上
+     *           关不了它，所以重定向夹具自己带一个小拥有者。关闭调用只出现
+     *           在复位函数里，析构经它；接管只有一个入口（构造函数），不拷
+     *           贝也不移动。两个平台各用各的关闭原语（MSVC 的 _close 与
+     *           POSIX 的 close）。
+     */
+    class OwnedFd
+    {
+    public:
+        /** @brief 接管一个描述符；负值表示没有取到，析构不去关。 */
+        explicit OwnedFd(int fd) noexcept : fd_{fd} {}
+
+        OwnedFd(const OwnedFd&) = delete;
+        auto operator=(const OwnedFd&) -> OwnedFd& = delete;
+        OwnedFd(OwnedFd&&) = delete;
+        auto operator=(OwnedFd&&) -> OwnedFd& = delete;
+
+        ~OwnedFd() { reset(); }
+
+        /** @brief 是否持有描述符。 */
+        [[nodiscard]]
+        auto valid() const noexcept -> bool
+        {
+            return fd_ >= 0;
+        }
+
+        /** @brief 描述符的原值，只供传给运行库的复制调用。 */
+        [[nodiscard]]
+        auto get() const noexcept -> int
+        {
+            return fd_;
+        }
+
+        /** @brief 立即关闭；没有持有时不做任何事。 */
+        auto reset() noexcept -> void
+        {
+            if (fd_ >= 0)
+            {
+                close(fd_);
+                fd_ = -1;
+            }
+        }
+
+    private:
+        /** @brief 运行库的关闭原语；释放调用只在这一处出现。 */
+        static auto close(int fd) noexcept -> void
+        {
+#if defined(_WIN32)
+            _close(fd);
+#else
+            ::close(fd);
+#endif
+        }
+
+        int fd_;
+    };
+
+    /**
      * @brief 把一个 C 文件描述符在作用域内重定向到文件的 RAII 夹具。
      *
      * @internal std::print 写向 C 的 stdout/stderr 流，iostream 缓冲区捕获
      *           不到，config/hook 用例以此接管 fd 0/1/2（readable=true 按
      *           只读打开，供 stdin 注入）。构造时冲刷并保存原描述符、以
      *           目标文件接管；析构冲刷并恢复，中途 return 也不污染同进程
-     *           内后续用例的输出流。目标打开失败时静默保持原状，后续读
-     *           文件的断言自然失败。写侧原语沿用既有用例的双平台写法
-     *           （MSVC 的 _dup/_sopen_s/_dup2 与 POSIX 的 dup/open/dup2）。
+     *           内后续用例的输出流。保存的原描述符是成员，由 OwnedFd 持有
+     *           到恢复为止；打开目标的临时描述符一取到也交给 OwnedFd，复
+     *           制到目标之后随接管函数返回关闭。目标打开失败时静默保持原
+     *           状，后续读文件的断言自然失败。写侧原语沿用既有用例的双平
+     *           台写法（MSVC 的 _dup/_sopen_s/_dup2 与 POSIX 的
+     *           dup/open/dup2）。
      */
     class FdRedirect
     {
     public:
         FdRedirect(int fd, const std::filesystem::path& to, bool readable)
-            : fd_{fd}, saved_{redirect(fd_, to, readable)}
+            : fd_{fd}, saved_{dup_fd(fd)}
         {
+            flush(fd_);
+            redirect(fd_, to, readable);
         }
         FdRedirect(const FdRedirect&) = delete;
         auto operator=(const FdRedirect&) -> FdRedirect& = delete;
@@ -96,25 +161,18 @@ namespace
         /** @brief 立即冲刷并恢复原描述符（读捕获文件前复位用；析构幂等）。 */
         void restore()
         {
-            if (saved_ < 0 || restored_)
+            if (!saved_.valid())
             {
                 return;
             }
-            restored_ = true;
             flush(fd_);
-#if defined(_WIN32)
-            _dup2(saved_, fd_);
-            _close(saved_);
-#else
-            ::dup2(saved_, fd_);
-            ::close(saved_);
-#endif
+            dup2_fd(saved_.get(), fd_);
+            saved_.reset();
         }
 
     private:
-        int  fd_;
-        int  saved_;
-        bool restored_ = false;
+        int     fd_;
+        OwnedFd saved_;
 
         /** @brief 冲刷 fd 对应的 C 流（stdin 无对应可冲刷缓冲）。 */
         static void flush(int fd)
@@ -129,16 +187,24 @@ namespace
             }
         }
 
-        /** @brief 保存原描述符并以目标文件接管；返回保存的描述符。 */
-        static int redirect(
-            int                          fd,
-            const std::filesystem::path& to,
-            bool                         readable)
+        /** @brief 保存原描述符：复制出来的新描述符交给拥有者。 */
+        [[nodiscard]]
+        static auto dup_fd(int fd) noexcept -> OwnedFd
         {
-            flush(fd);
 #if defined(_WIN32)
-            const int saved = _dup(fd);
-            int       opened = -1;
+            return OwnedFd{_dup(fd)};
+#else
+            return OwnedFd{::dup(fd)};
+#endif
+        }
+
+        /** @brief 打开目标文件，描述符交给拥有者；打开失败时拥有者为空。 */
+        [[nodiscard]]
+        static auto open_target(const std::filesystem::path& to, bool readable)
+            -> OwnedFd
+        {
+#if defined(_WIN32)
+            int opened = -1;
             if (readable)
             {
                 _sopen_s(
@@ -157,24 +223,36 @@ namespace
                     _SH_DENYNO,
                     0600);
             }
-            if (opened >= 0)
-            {
-                _dup2(opened, fd);
-                _close(opened);
-            }
+            return OwnedFd{opened};
 #else
-            const int saved = ::dup(fd);
-            const int opened =
+            return OwnedFd{
                 readable
                     ? ::open(to.c_str(), O_RDONLY)
-                    : ::open(to.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
-            if (opened >= 0)
-            {
-                ::dup2(opened, fd);
-                ::close(opened);
-            }
+                    : ::open(to.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600)};
 #endif
-            return saved;
+        }
+
+        /** @brief 把一个描述符复制到另一个之上（接管与恢复共用）。 */
+        static void dup2_fd(int from, int to) noexcept
+        {
+#if defined(_WIN32)
+            _dup2(from, to);
+#else
+            ::dup2(from, to);
+#endif
+        }
+
+        /** @brief 以目标文件接管描述符；目标打开失败时什么都不做。 */
+        static void redirect(
+            int                          fd,
+            const std::filesystem::path& to,
+            bool                         readable)
+        {
+            const OwnedFd opened{open_target(to, readable)};
+            if (opened.valid())
+            {
+                dup2_fd(opened.get(), fd);
+            }
         }
     };
 
@@ -763,6 +841,81 @@ namespace
             r,
             parse_doc(cg::cli::render::error_json("boom", std::nullopt)),
             "error json parses");
+    }
+
+    /** @brief 把一个对象挂成它自己的成员；被拒绝时返回真。 */
+    auto self_attach_object_rejected(json::Object& object) -> bool
+    {
+        try
+        {
+            object.set("self", std::move(object));
+            return false;
+        }
+        catch (const std::invalid_argument&)
+        {
+            return true;
+        }
+    }
+
+    /** @brief 把一个数组追加进它自己；被拒绝时返回真。 */
+    auto self_attach_array_rejected(json::Array& array) -> bool
+    {
+        try
+        {
+            array.add(std::move(array));
+            return false;
+        }
+        catch (const std::invalid_argument&)
+        {
+            return true;
+        }
+    }
+
+    /**
+     * @brief 构建器的自挂拒绝与移空语义：把自己挂给自己（对象挂成员、数
+     *        组追加自己）抛出 std::invalid_argument，对象保持原样；正常挂
+     *        接之后被移空的子构建器序列化为空根。
+     *
+     * @internal 自挂拒绝发生在改动任何一棵树之前。没有这道检查时，写出
+     * 器的根被摘走、收养列表含它自己，门面对象从此不再持有它：内容丢失，
+     * 写出器无人释放。
+     */
+    void json_builder_guards(R& r)
+    {
+        json::Object root;
+        root.set("kept", std::int64_t{7});
+        cg::test::check(
+            r,
+            self_attach_object_rejected(root),
+            "attaching an object to itself is rejected");
+        cg::test::check(
+            r,
+            json::stringify(std::move(root)) == "{\"kept\":7}",
+            "the rejected object stays intact");
+
+        json::Array array;
+        array.add(std::int64_t{1});
+        cg::test::check(
+            r,
+            self_attach_array_rejected(array),
+            "appending an array to itself is rejected");
+        cg::test::check(
+            r,
+            json::stringify(std::move(array)) == "[1]",
+            "the rejected array stays intact");
+
+        json::Object parent;
+        json::Object child;
+        child.set("leaf", true);
+        parent.set("child", std::move(child));
+        cg::test::check(
+            r,
+            json::stringify(std::move(child)) == "{}",
+            "a child moved into its parent serializes as the empty root");
+        cg::test::check(
+            r,
+            json::stringify(std::move(parent)) == R"({"child":{"leaf":true}})",
+            "the parent carries the child");
     }
 
     // ------------------------------------------------------------ 文本渲染
@@ -3852,6 +4005,9 @@ namespace
         "cli.glob.exclude_filter",
         &glob_exclude_filter};
     const cg::test::Registrar reg_json{"cli.render.json", &json_round_trips};
+    const cg::test::Registrar reg_json_guards{
+        "cli.render.json_guards",
+        &json_builder_guards};
 
     // 成员面（含继承）+ --implements 派生树 + 零调用者置信三要素。
     void members_and_implements(R& r)

@@ -19,6 +19,66 @@ module;
 export module cg.util.json;
 
 import std;
+// 序列化输出缓冲区由带删除器的拥有型指针持有；handle 只依赖标准库。
+import cg.util.handle;
+
+namespace cg::util::json::detail
+{
+
+    /**
+     * @brief 序列化输出缓冲区的删除器，供拥有型指针持有。
+     *
+     * @internal 缓冲由桥接层按运行库的分配方式取得，要经桥接层的释放
+     * 函数交还；那个调用只出现在这里。
+     */
+    struct BufferDeleter
+    {
+        auto operator()(char* buffer) const noexcept -> void
+        {
+            ccg_json_buf_free(buffer);
+        }
+    };
+
+    /** @brief 序列化输出缓冲区的拥有者；析构时经桥接层交还。 */
+    using Buffer = cg::util::handle::OwnedPtr<char, BufferDeleter>;
+
+    /**
+     * @brief 把一个写出器的树序列化成紧凑文本，两个 stringify 重载共用。
+     *
+     * @internal 输出缓冲区一取到就交给拥有者：下面构造字符串抛出时，它
+     * 也随本函数交还。
+     */
+    [[nodiscard]]
+    inline auto write_out(void* writer) -> std::string
+    {
+        std::size_t  len = 0;
+        const Buffer buffer =
+            Buffer::adopt(ccg_json_writer_write(writer, &len));
+        if (!buffer)
+        {
+            return {};
+        }
+        return std::string{std::string_view{buffer.get(), len}};
+    }
+
+    /**
+     * @brief 挂接前的检查：把自己挂给自己时抛出 std::invalid_argument。
+     *
+     * @internal
+     * 自己挂给自己时，子写出器的根会被摘走、父写出器的收养列表里会出现
+     * 它自己，而门面对象从此不再持有这个写出器：内容丢失，写出器无人
+     * 释放（一旦释放就无限递归）。入口处直接拒绝。
+     */
+    inline void reject_self_attach(const void* parent, const void* nested)
+    {
+        if (parent == nested)
+        {
+            throw std::invalid_argument{
+                "cg json: a builder cannot be attached to itself"};
+        }
+    }
+
+} // namespace cg::util::json::detail
 
 export namespace cg::util::json
 {
@@ -390,10 +450,12 @@ export namespace cg::util::json
      * 嵌套写出器经 bridge 挂进父树（其分配随父节点存活）；被移空的构建器
      * 保持空态，析构时不释放任何东西。先物化嵌套写出器再挂接，是为保住
      * yyjson-cpp 门面的空构建器语义：从未动过的嵌套 Object/Array 序列化为
-     * "{}"/"[]"，而不是键缺失。
+     * "{}"/"[]"，而不是键缺失。把自己挂给自己是使用错误，抛出
+     * std::invalid_argument，对象保持原样。
      */
     inline void Object::set(std::string_view key, Object&& nested)
     {
+        detail::reject_self_attach(this, &nested);
         ensure();
         nested.ensure();
         ccg_json_obj_set_writer(
@@ -433,9 +495,13 @@ export namespace cg::util::json
 
     /**
      * @brief 将嵌套数组追加进数组。语义同 Array::add(Object&&) 的嵌套挂接。
+     *
+     * @internal 把自己追加给自己是使用错误，抛出 std::invalid_argument，
+     * 对象保持原样。
      */
     inline void Array::add(Array&& nested)
     {
+        detail::reject_self_attach(this, &nested);
         ensure();
         nested.ensure();
         ccg_json_arr_add_writer(writer_, nested.writer_);
@@ -448,24 +514,16 @@ export namespace cg::util::json
      * 结果完全拥有。从未动过的构建器序列化为其空根（"{}"）。
      *
      * @internal
-     * bridge 的写出缓冲区在其被释放前已拷出。此门面最初正是为绕开 yyjson-cpp
+     * bridge 的写出缓冲区在它被交还之前已拷出。此门面最初正是为绕开 yyjson-cpp
      * 的一个坑而写：其 write() 返回的 json_string 派生自 std::string_view 且
      * 自身拥有并释放 yyjson 缓冲区——把它当作超出该临时对象寿命的
-     * string_view 使用会静默悬垂（探针中实际踩中），故必须先拷出再释放。
+     * string_view 使用会静默悬垂（探针中实际踩中），故必须先拷出再交还。
      */
     [[nodiscard]]
     inline auto stringify(Object&& root) -> std::string
     {
         root.ensure();
-        std::size_t len = 0;
-        char* const buffer = ccg_json_writer_write(root.writer_, &len);
-        if (buffer == nullptr)
-        {
-            return {};
-        }
-        std::string owned{std::string_view{buffer, len}};
-        ccg_json_buf_free(buffer);
-        return owned;
+        return detail::write_out(root.writer_);
     }
 
     /**
@@ -477,15 +535,7 @@ export namespace cg::util::json
     inline auto stringify(Array&& root) -> std::string
     {
         root.ensure();
-        std::size_t len = 0;
-        char* const buffer = ccg_json_writer_write(root.writer_, &len);
-        if (buffer == nullptr)
-        {
-            return {};
-        }
-        std::string owned{std::string_view{buffer, len}};
-        ccg_json_buf_free(buffer);
-        return owned;
+        return detail::write_out(root.writer_);
     }
 
     /**

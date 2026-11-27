@@ -133,7 +133,8 @@ export namespace cg::msbuild
          *
          * @internal 双 NUL 结尾、CREATE_UNICODE_ENVIRONMENT 布局。remove 只
          * 从本子环境块剔除（构建子树专用；ccg 进程与探测子进程的环境不
-         * 动）。
+         * 动）。当前环境的条目经 cg.util.platform 的取值函数拿到，本函数
+         * 只遍历列表，不直接向系统取环境块。
          */
         [[nodiscard]]
         inline auto build_child_env(
@@ -141,41 +142,36 @@ export namespace cg::msbuild
             const std::vector<std::wstring>& remove = {}) -> std::wstring
         {
             std::wstring block;
-            const LPWCH  current = GetEnvironmentStringsW();
-            if (current != nullptr)
+            for (const std::wstring& current :
+                 cg::util::platform::environment_entries_wide())
             {
-                for (LPWCH entry = current; *entry != L'\0';)
+                const std::wstring_view view{current};
+                bool                    dropped = false;
+                for (const auto& [name, value] : overrides)
                 {
-                    const std::wstring_view view{entry};
-                    bool                    dropped = false;
-                    for (const auto& [name, value] : overrides)
+                    static_cast<void>(value);
+                    if (env_entry_named(view, name))
                     {
-                        static_cast<void>(value);
+                        dropped = true;
+                        break;
+                    }
+                }
+                if (!dropped)
+                {
+                    for (const std::wstring& name : remove)
+                    {
                         if (env_entry_named(view, name))
                         {
                             dropped = true;
                             break;
                         }
                     }
-                    if (!dropped)
-                    {
-                        for (const std::wstring& name : remove)
-                        {
-                            if (env_entry_named(view, name))
-                            {
-                                dropped = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (!dropped)
-                    {
-                        block += view;
-                        block.push_back(L'\0');
-                    }
-                    entry += view.size() + 1;
                 }
-                FreeEnvironmentStringsW(current);
+                if (!dropped)
+                {
+                    block += view;
+                    block.push_back(L'\0');
+                }
             }
             for (const auto& [name, value] : overrides)
             {

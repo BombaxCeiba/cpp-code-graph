@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <vector>
 
@@ -57,7 +58,11 @@ namespace
      *
      * @internal
      * 子的根值并入父树，而其分配仍留在子的池上；父经 adopted 列表传递地
-     * 释放各个池。
+     * 释放各个池。先给收养列表扩容再并入：扩容可能抛出，抛出时父子两棵
+     * 树都还没有被动过，子写出器仍归调用方所有；并入之后再登记就不会失
+     * 败，父树里不会留下指向已交还的池的引用。并入本身失败（内存不足）
+     * 时子的根值没有进父树，但子写出器仍被父收养——门面已经交出它的所
+     * 有权，不收养就会漏掉整个池。
      */
     void attach(
         ccg_json_writer* parent,
@@ -68,6 +73,7 @@ namespace
         {
             return;
         }
+        parent->adopted.reserve(parent->adopted.size() + 1);
         if (key != nullptr)
         {
             (void)yyjson_mut_obj_add(parent->root, key, child->root);
@@ -89,7 +95,9 @@ namespace
      */
     void* writer_new(int is_array)
     {
-        auto* w = new (std::nothrow) ccg_json_writer{};
+        // 外壳一建成就交给唯一指针：可变文档建不成时，随本函数返回回收。
+        std::unique_ptr<ccg_json_writer> w{new (std::nothrow)
+                                               ccg_json_writer{}};
         if (w == nullptr)
         {
             return nullptr;
@@ -97,13 +105,12 @@ namespace
         w->doc = yyjson_mut_doc_new(nullptr);
         if (w->doc == nullptr)
         {
-            delete w;
             return nullptr;
         }
         w->root =
             is_array != 0 ? yyjson_mut_arr(w->doc) : yyjson_mut_obj(w->doc);
         yyjson_mut_doc_set_root(w->doc, w->root);
-        return w;
+        return w.release();
     }
 
     /** @brief 视图句柄即裸 yyjson 值指针（借入式，永不拥有）。 */

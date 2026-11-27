@@ -70,8 +70,8 @@ if(MSVC)
     target_compile_options(cg_core PRIVATE /bigobj)
 endif()
 if(WIN32)
-    # Wrap 模式与发现功能使用 CommandLineToArgvW（shell32）；tests/ 里的
-    # 纯 C 闸门桩以同样方式链接它。Version 供 PowerShell 进程内引擎宿主
+    # cg.util.platform 的命令行参数取值函数（包装模式的命令行来源）使用
+    # CommandLineToArgvW（shell32）。Version 供 PowerShell 进程内引擎宿主
     # 读 hostfxr.dll 的产品版本（商店版复制布局的版本目录名）。User32
     # 供 cg.util.crashdump 的崩溃态路径拼接（wsprintfW——比 CRT 的
     # 格式化例程更可依赖）。

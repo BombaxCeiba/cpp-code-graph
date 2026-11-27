@@ -1,7 +1,7 @@
 module;
 // std::system（vcvars 手工复核块需要）经全局模块片段包含。
 #include <cstdlib>
-// 卸载引擎副本需要平台加载器接口（GetModuleHandleExW/FreeLibrary/
+// 引擎切换用例要按模块名取副本引擎的句柄（GetModuleHandleExW/
 // GetModuleHandleW）。两个防御宏挡掉 min/max 宏与冗余声明；
 // rpcndr.h 随 windows.h 进入并会把 interface 定义为宏，本单元
 // 有以 interface 为名的形参与成员访问，紧随包含之后撤销该宏。
@@ -4083,21 +4083,23 @@ namespace
                 // 查询与崩溃恢复开关，从未创建 Index 或翻译单元
                 // （引擎切换本身要求 Index 计数归零才放行），副
                 // 本内无存活 clang-c 对象；进程引擎此刻已锚回真
-                // 实安装。副本恰被引擎加载一次，取句柄不增引用、
-                // FreeLibrary 一次即解除映射。
-                HMODULE copy_module = nullptr;
-                cg::test::check(
-                    r,
-                    GetModuleHandleExW(
-                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                        fs::path{lib_copy.generic_string()}.wstring().c_str(),
-                        &copy_module)
-                            != 0
-                        && copy_module != nullptr,
-                    "the copy engine module stays mapped before unload");
-                if (copy_module != nullptr)
+                // 实安装。副本恰被引擎加载一次，取句柄不增引用，
+                // 拥有者析构时卸载一次即解除映射。
                 {
-                    FreeLibrary(copy_module);
+                    // 模块句柄直接由拥有者接住：作用域结束时卸载副本。
+                    cc::dylib::Library copy_owner;
+                    cg::test::check(
+                        r,
+                        GetModuleHandleExW(
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            fs::path{lib_copy.generic_string()}
+                                .wstring()
+                                .c_str(),
+                            reinterpret_cast<HMODULE*>(
+                                copy_owner.release_and_get_address_of()))
+                                != 0
+                            && copy_owner.get() != nullptr,
+                        "the copy engine module stays mapped before unload");
                 }
                 cg::test::check(
                     r,
@@ -4179,6 +4181,163 @@ namespace
             return true;
         }
         return true;
+    }
+
+    /** @brief 按模块名判断一个库此刻是否映射在本进程里。 */
+    [[nodiscard]]
+    auto module_is_mapped(const std::wstring& module_name) -> bool
+    {
+        return GetModuleHandleW(module_name.c_str()) != nullptr;
+    }
+
+    /**
+     * @brief 动态库句柄拥有者的生命周期：装得进但没有引擎导出的库，符号
+     *        解析抛出之后必须已经卸载；移动之后只有目标持有库；交出所有
+     *        权之后拥有者不再卸载。
+     *
+     * @internal
+     * 输入取系统目录里平时不会被本进程加载的小型系统库，位置从系统根的
+     * 环境变量推导（不写机器绝对路径）。用按模块名取句柄的调用判断库是
+     * 否映射在进程里：解析失败之后它必须已经不在。候选库本来就被映射着
+     * 时观察不到卸载，换下一个候选；都不合适时整组跳过。交出去的句柄重
+     * 新交给拥有者收尾，测试里不写卸载调用。
+     */
+    void library_owner_lifecycle(R& r)
+    {
+#if defined(_WIN32)
+        const auto system_root = cg::util::cstd::get_env("SystemRoot");
+        if (!system_root.has_value())
+        {
+            std::println("library_owner_lifecycle: skip, SystemRoot is unset");
+            return;
+        }
+        const std::filesystem::path system_dir =
+            std::filesystem::path{*system_root} / "System32";
+        std::filesystem::path candidate;
+        for (const wchar_t* name :
+             {L"version.dll", L"winmm.dll", L"msimg32.dll"})
+        {
+            const std::filesystem::path file = system_dir / name;
+            std::error_code             ec;
+            if (std::filesystem::is_regular_file(file, ec)
+                && !module_is_mapped(name))
+            {
+                candidate = file;
+                break;
+            }
+        }
+        if (candidate.empty())
+        {
+            std::println(
+                "library_owner_lifecycle: skip, no system library candidate "
+                "is unloaded right now");
+            return;
+        }
+        const std::wstring name = candidate.filename().wstring();
+        const std::string  path = candidate.string();
+        std::println("library_owner_lifecycle: candidate {}", path);
+
+        // 装得进、解析不出引擎符号的库：抛出之后由拥有者卸载。
+        bool rejected = false;
+        try
+        {
+            const cc::dylib::Library library = cc::dylib::open(path);
+            cg::test::check(
+                r,
+                module_is_mapped(name),
+                "opening maps the library");
+            cc::detail::Api api{};
+            cc::detail::resolve_api_into(api, library);
+        }
+        catch (const std::exception&)
+        {
+            rejected = true;
+        }
+        cg::test::check(
+            r,
+            rejected,
+            "resolving engine symbols from a library without them throws");
+        cg::test::check(
+            r,
+            !module_is_mapped(name),
+            "the failed library is unloaded by its owner");
+
+        // 移动构造：源对象为空，库在目标手里一直映射到目标析构。
+        {
+            cc::dylib::Library       first = cc::dylib::open(path);
+            const cc::dylib::Library second = std::move(first);
+            // 被移动走的对象是有效的空对象，这里检查的正是它。
+            cg::test::check(
+                r,
+                first.get() == nullptr // NOLINT(clang-analyzer-cplusplus.Move)
+                    && second.get() != nullptr,
+                "move hands the library to the target and empties the source");
+            cg::test::check(
+                r,
+                module_is_mapped(name),
+                "the library stays mapped while the target owns it");
+        }
+        cg::test::check(
+            r,
+            !module_is_mapped(name),
+            "the moved-to owner unloads the library");
+
+        // 移动赋值：先卸载目标原有的引用再接管来源的；两个引用都放手后
+        // 库才离开进程；自己赋给自己保持原样。
+        {
+            cc::dylib::Library target = cc::dylib::open(path);
+            cc::dylib::Library source = cc::dylib::open(path);
+            target = std::move(source);
+            // 被移动走的对象是有效的空对象，这里检查的正是它。
+            cg::test::check(
+                r,
+                source.get() == nullptr // NOLINT(clang-analyzer-cplusplus.Move)
+                    && target.get() != nullptr,
+                "move assignment takes over the source and empties it");
+            cg::test::check(
+                r,
+                module_is_mapped(name),
+                "one reference keeps the library mapped after move assignment");
+        }
+        cg::test::check(
+            r,
+            !module_is_mapped(name),
+            "the move-assigned owner unloads the last reference");
+        {
+            cc::dylib::Library  self = cc::dylib::open(path);
+            cc::dylib::Library& alias = self;
+            self = std::move(alias);
+            cg::test::check(
+                r,
+                self.get() != nullptr && module_is_mapped(name),
+                "self move assignment keeps the library");
+        }
+        cg::test::check(
+            r,
+            !module_is_mapped(name),
+            "the self-assigned owner still unloads the library");
+
+        // 交出所有权：拥有者变空、不再卸载，库留在进程里；重新接管之后才
+        // 由拥有者收尾。
+        {
+            cc::dylib::Library handed = cc::dylib::open(path);
+            void* const        raw = handed.release();
+            cg::test::check(
+                r,
+                raw != nullptr && handed.get() == nullptr
+                    && module_is_mapped(name),
+                "release hands out the library and the emptied owner unloads "
+                "nothing");
+            [[maybe_unused]]
+            const cc::dylib::Library back = cc::dylib::Library::adopt(raw);
+        }
+        cg::test::check(
+            r,
+            !module_is_mapped(name),
+            "a re-adopted library is unloaded with its owner");
+#else
+        std::println("library_owner_lifecycle: skip, Windows only");
+#endif
     }
 
     // PCH 加载器规范化：`-Xclang` 原子对、`-include-pch` /
@@ -7048,6 +7207,9 @@ namespace
     const cg::test::Registrar reg_driver_rekey{
         "clang.driver_cache_rekey",
         &driver_cache_rekeys_on_engine_switch};
+    const cg::test::Registrar reg_library_owner{
+        "clang.library_owner_lifecycle",
+        &library_owner_lifecycle};
     const cg::test::Registrar reg_db{"clang.compile_db", &compile_db_load};
     const cg::test::Registrar reg_tok_gate{
         "clang.tokenize_gate",

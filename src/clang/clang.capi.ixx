@@ -20,10 +20,12 @@ module;
  * 写出移动构造。库本身是运行时加载（按数据库解析的世界观，既有
  * 口径）：项目任何地方都不存在对 libclang 的链接期依赖。
  * 下方每个 clang-c 调用都走模块内部分发表（detail::Api），在
- * detail::load_locked() 时由 cg.clang.loader 句柄按名填充——项目中
- * 已零直接 clang-c 调用。生命周期显式：load_clang_library()（或首个
- * Index 获取的默认链）加载、最后一个 Index 析构卸载、Index 对象
- * 存活期间拒绝切换引擎（一个解析会话 = 一个世界观）。
+ * detail::load_locked() 时由 cg.clang.loader 交来的库句柄按名填充——项目
+ * 中已零直接 clang-c 调用。生命周期显式：load_clang_library()（或首个
+ * Index 获取的默认链）加载；引擎库按设计常驻到进程退出，Index 析构只给
+ * 引擎的引用计数减一；Index 对象存活期间拒绝切换引擎（一个解析会话 =
+ * 一个世界观）。引擎交出的字符串、诊断、记号数组、覆写游标数组都由各
+ * 门面单元里的拥有型对象持有，交还只出现在它们的析构里。
  */
 export module cg.clang.capi;
 

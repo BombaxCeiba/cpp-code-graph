@@ -4,8 +4,9 @@ module;
 /**
  * @module cg.clang.capi.model
  *
- * @brief 门面类型域：位置/范围/诊断/未保存文件/Str 字符串盒/Tu 翻译单元/Index
- * 索引，及诊断构造与子游标访问器。
+ * @brief 门面类型域：位置/范围/诊断/未保存文件/Tu 翻译单元/Index
+ * 索引，及诊断构造与子游标访问器。引擎给出的字符串由 cg.clang.capi.api
+ * 的 Str 持有（装载路径要用它，所以它住在分发表所在的单元）。
  */
 export module cg.clang.capi.model;
 
@@ -134,45 +135,56 @@ export namespace cg::clang
         std::string contents;
     };
 
-    /**
-     * @brief 拥有一个 CXString；转换为 C 串 / 视图 / std::string。
-     *
-     * @internal 探针验证过的形状；因用户声明的析构抑制隐式移动构造而
-     * 逐字写出（删除拷贝与移动）。
-     */
-    class Str
-    {
-    public:
-        explicit Str(CXString s) noexcept : s_{s} {}
-        ~Str() { detail::api().clang_disposeString(s_); }
-        Str(const Str&) = delete;
-        Str& operator=(const Str&) = delete;
-        Str(Str&&) = delete;
-        Str& operator=(Str&&) = delete;
-
-        [[nodiscard]]
-        const char* c_str() const noexcept
-        {
-            const char* p = detail::api().clang_getCString(s_);
-            return p != nullptr ? p : "";
-        }
-        [[nodiscard]]
-        std::string_view view() const noexcept
-        {
-            return c_str();
-        }
-        [[nodiscard]]
-        std::string std_str() const
-        {
-            return c_str();
-        }
-
-    private:
-        CXString s_;
-    };
-
     namespace detail
     {
+
+        /**
+         * @brief 拥有一条引擎给出的诊断：析构时交还给引擎。
+         *
+         * @internal
+         * 引擎按条交出诊断，每条都要交还。诊断只在收集它的那一次循环里用
+         * 得到，所以不移动也不拷贝，交还调用只出现在析构一处。引擎没有给
+         * 出诊断（下标越界）时对象为空，析构不做任何事。
+         */
+        class OwnedDiagnostic
+        {
+        public:
+            OwnedDiagnostic(const OwnedDiagnostic&) = delete;
+            auto operator=(const OwnedDiagnostic&) -> OwnedDiagnostic& = delete;
+            OwnedDiagnostic(OwnedDiagnostic&&) = delete;
+            auto operator=(OwnedDiagnostic&&) -> OwnedDiagnostic& = delete;
+
+            ~OwnedDiagnostic()
+            {
+                if (diag_ != nullptr)
+                {
+                    api().clang_disposeDiagnostic(diag_);
+                }
+            }
+
+            /** @brief 取翻译单元的第 index 条诊断并持有；越界时对象为空。 */
+            [[nodiscard]]
+            static auto at(const CXTranslationUnit& tu, unsigned index)
+                -> OwnedDiagnostic
+            {
+                return OwnedDiagnostic{api().clang_getDiagnostic(tu, index)};
+            }
+
+            /** @brief 诊断的原生值，只供传给门面调用；不持有时是空值。 */
+            [[nodiscard]]
+            auto get() const noexcept -> CXDiagnostic
+            {
+                return diag_;
+            }
+
+        private:
+            /** @brief 接管引擎给出的一条诊断。 */
+            explicit OwnedDiagnostic(CXDiagnostic diag) noexcept : diag_{diag}
+            {
+            }
+
+            CXDiagnostic diag_ = nullptr;
+        };
 
         auto file_location(CXSourceLocation loc) -> SourceLocation
         {
@@ -266,43 +278,44 @@ export namespace cg::clang
     /**
      * @brief 拥有一个 CXTranslationUnit，并记住解析它的主文件路径（主
      * 文件游标过滤的锚点）。
+     *
+     * @internal
+     * 翻译单元指针由带删除器的拥有型指针持有：销毁调用只在删除器里，
+     * 析构、移动赋值与交出地址都经它，所以析构与移动都不抛。只能移动，
+     * 被移动走的对象不持有翻译单元。
      */
     class Tu
     {
+        /** @brief 翻译单元的删除器；销毁调用只在这一处出现。 */
+        struct Deleter
+        {
+            auto operator()(CXTranslationUnit tu) const noexcept -> void
+            {
+                detail::api().clang_disposeTranslationUnit(tu);
+            }
+        };
+
+        /**
+         * @brief 翻译单元指针的拥有者。
+         *
+         * @internal
+         * CXTranslationUnit 本身是指针类型（指向引擎内部的结构体），模板
+         * 参数写它指向的那个结构体。
+         */
+        using Owner =
+            cg::util::handle::OwnedPtr<CXTranslationUnitImpl, Deleter>;
+
     public:
         Tu() = default;
-        ~Tu()
-        {
-            if (tu_ != nullptr)
-            {
-                detail::api().clang_disposeTranslationUnit(tu_);
-            }
-        }
         Tu(const Tu&) = delete;
         Tu& operator=(const Tu&) = delete;
-        Tu(Tu&& other) noexcept : tu_{other.tu_}, file_{std::move(other.file_)}
-        {
-            other.tu_ = nullptr;
-        }
-        Tu& operator=(Tu&& other) noexcept
-        {
-            if (this != &other)
-            {
-                if (tu_ != nullptr)
-                {
-                    detail::api().clang_disposeTranslationUnit(tu_);
-                }
-                tu_ = other.tu_;
-                file_ = std::move(other.file_);
-                other.tu_ = nullptr;
-            }
-            return *this;
-        }
+        Tu(Tu&& other) noexcept = default;
+        Tu& operator=(Tu&& other) noexcept = default;
 
         [[nodiscard]]
         bool valid() const noexcept
         {
-            return tu_ != nullptr;
+            return tu_.valid();
         }
         /** @brief 传入 Index::parse 时的原样路径；比较须经
          *  cg::util::norm_path。 */
@@ -316,7 +329,7 @@ export namespace cg::clang
         [[nodiscard]]
         CXCursor cursor() const noexcept
         {
-            return detail::api().clang_getTranslationUnitCursor(tu_);
+            return detail::api().clang_getTranslationUnitCursor(tu_.get());
         }
 
         /**
@@ -334,12 +347,16 @@ export namespace cg::clang
             bool         with_fixits = false) const
         {
             std::vector<Diagnostic> out;
-            const unsigned count = detail::api().clang_getNumDiagnostics(tu_);
+            const unsigned          count =
+                detail::api().clang_getNumDiagnostics(tu_.get());
             for (unsigned i = 0; i < count; ++i)
             {
-                const CXDiagnostic d =
-                    detail::api().clang_getDiagnostic(tu_, i);
-                const auto severity = static_cast<DiagSeverity>(
+                // 每条诊断一取到就交给拥有者：达到条数上限提前离开，或者
+                // 拼接文本时抛出，它都随本次循环交还。
+                const detail::OwnedDiagnostic owned =
+                    detail::OwnedDiagnostic::at(tu_.get(), i);
+                const CXDiagnostic d = owned.get();
+                const auto         severity = static_cast<DiagSeverity>(
                     detail::api().clang_getDiagnosticSeverity(d));
                 if (severity >= min_severity)
                 {
@@ -347,35 +364,34 @@ export namespace cg::clang
                         detail::make_diagnostic(d, severity, with_fixits));
                     if (limit != 0 && out.size() >= limit)
                     {
-                        detail::api().clang_disposeDiagnostic(d);
                         break;
                     }
                 }
-                detail::api().clang_disposeDiagnostic(d);
             }
             return out;
         }
 
     private:
         friend class Index;
-        Tu(CXTranslationUnit tu, std::string file) noexcept
-            : tu_{tu}, file_{std::move(file)}
+        Tu(Owner tu, std::string file) noexcept
+            : tu_{std::move(tu)}, file_{std::move(file)}
         {
         }
 
-        CXTranslationUnit tu_ = nullptr;
-        std::string       file_;
+        Owner       tu_;
+        std::string file_;
     };
 
     /**
      * @brief 拥有一个 CXIndex。必须活过由它创建的每个 Tu。不可移动：
      * 一个索引对应一个解析会话即预期用法。
      *
-     * @internal 构造获取进程引擎（尚无显式加载时经默认解析链加载）；
-     * 最后一个存活 Index 的析构再次卸载引擎库。构造参数 (0, 0) = 保留
-     * PCH 声明、不打印 libclang 侧诊断（诊断经 Tu::diagnostics 收集）。
-     * 崩溃恢复不是 createIndex 参数——它每次引擎加载武装一次
-     * （detail::load_locked 调 clang_toggleCrashRecovery）。
+     * @internal 构造获取进程引擎（尚无显式加载时经默认解析链加载）；析构
+     * 给引擎的引用计数减一。引擎库本身按设计常驻到进程退出，最后一个
+     * Index 析构也不卸载它（理由见 detail::EngineState 的生命周期注记）。
+     * 构造参数 (0, 0) = 保留 PCH 声明、不打印 libclang 侧诊断（诊断经
+     * Tu::diagnostics 收集）。崩溃恢复不是 createIndex 参数——它每次引擎加载武
+     * 装一次（detail::load_locked 调 clang_toggleCrashRecovery）。
      */
     class Index
     {
@@ -446,7 +462,9 @@ export namespace cg::clang
                             static_cast<unsigned long>(u.contents.size())});
             }
             const std::string path{file};
-            CXTranslationUnit raw = nullptr;
+            // 翻译单元直接由拥有者接住：解析失败而引擎在出参里留下了东
+            // 西时，它随抛出的栈展开销毁。
+            Tu::Owner parsed;
             // replay-degraded PCH 消费显式关闭预处理记录（否则非 DPR 用户
             // PCH 硬失败）；该模式下 include 边不完整，索引侧持续标记。
             const unsigned options = static_cast<unsigned>(
@@ -461,12 +479,11 @@ export namespace cg::clang
                 covers.data(),
                 static_cast<unsigned>(covers.size()),
                 options,
-                &raw);
-            if (rc != CXError_Success || raw == nullptr)
+                &parsed);
+            if (rc != CXError_Success || !parsed)
             {
                 const auto code = static_cast<ParseErrc>(
-                    raw == nullptr && rc == CXError_Success ? CXError_Failure
-                                                            : rc);
+                    !parsed && rc == CXError_Success ? CXError_Failure : rc);
                 throw ParseError(
                     std::format(
                         "libclang failed to parse {}: error code {}",
@@ -474,7 +491,7 @@ export namespace cg::clang
                         static_cast<int>(code)),
                     code);
             }
-            return Tu{raw, path};
+            return Tu{std::move(parsed), path};
         }
 
     private:

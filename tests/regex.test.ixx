@@ -5,7 +5,9 @@
  *        语义、空串试探、与标准库正则的命中集合等价性、步数上限、
  *        移动语义与引擎档位。
  *
- * 名字池现场构造；标准库正则只作等价性的参照，不进生产路径。
+ * 名字池现场构造；标准库正则只作等价性的参照，不进生产路径。步数上限
+ * 用例为了拿引擎的原始返回码直接调引擎接口，取到的资源由测试内的拥有
+ * 型对象持有，交还只出现在它的析构里。
  */
 
 export module cg.test.regex;
@@ -21,6 +23,37 @@ namespace
     using R = cg::test::Result;
     namespace rx = cg::util::regex;
     namespace pc = cg::util::pcre2;
+
+    /**
+     * @brief 测试内直接调引擎接口时，三项引擎资源的拥有者。
+     *
+     * @internal
+     * 步数上限用例要拿引擎的原始返回码，只能绕过封装类直接调接口。取
+     * 到的编译好的模式、匹配数据块、匹配上下文逐项交给本类，交还只在析
+     * 构里发生，测试代码里没有人手配对的取与放。不拷贝也不移动：每一项
+     * 取到就交给它，随所在作用域一并交还。
+     */
+    class RawResources
+    {
+    public:
+        RawResources() = default;
+
+        RawResources(const RawResources&) = delete;
+        auto operator=(const RawResources&) -> RawResources& = delete;
+        RawResources(RawResources&&) = delete;
+        auto operator=(RawResources&&) -> RawResources& = delete;
+
+        ~RawResources()
+        {
+            pcre2_match_context_free_8(context);
+            pcre2_match_data_free_8(data);
+            pcre2_code_free_8(code);
+        }
+
+        pcre2_code_8*          code = nullptr;
+        pcre2_match_data_8*    data = nullptr;
+        pcre2_match_context_8* context = nullptr;
+    };
 
     /** @brief 匹配语义：全名字覆盖，或名字里的任意一段。 */
     enum class Semantics : std::uint8_t
@@ -649,37 +682,35 @@ namespace
             r,
             elapsed < std::chrono::seconds{2},
             "limit: cut-off calls stay far below the unlimited cost");
-        // 直接走引擎接口：同一名字、同一上限，返回值就是步数触限。
-        int           error_code = 0;
-        std::size_t   error_offset = 0;
-        pcre2_code_8* code = pcre2_compile_8(
+        // 直接走引擎接口：同一名字、同一上限，返回值就是步数触限。三项
+        // 资源逐项取到就交给测试内的拥有者。
+        int          error_code = 0;
+        std::size_t  error_offset = 0;
+        RawResources raw;
+        raw.code = pcre2_compile_8(
             reinterpret_cast<const std::uint8_t*>("(a+)+[bc]"),
             9,
             0,
             &error_code,
             &error_offset,
             nullptr);
-        cg::test::check(r, code != nullptr, "limit: raw compile succeeds");
-        pcre2_match_data_8* data =
-            pcre2_match_data_create_from_pattern_8(code, nullptr);
-        pcre2_match_context_8* context = pcre2_match_context_create_8(nullptr);
-        pcre2_set_match_limit_8(context, rx::MATCH_STEP_LIMIT);
+        cg::test::check(r, raw.code != nullptr, "limit: raw compile succeeds");
+        raw.data = pcre2_match_data_create_from_pattern_8(raw.code, nullptr);
+        raw.context = pcre2_match_context_create_8(nullptr);
+        pcre2_set_match_limit_8(raw.context, rx::MATCH_STEP_LIMIT);
         const std::string subject = std::string(22, 'a') + "d";
         const int         rc = pcre2_match_8(
-            code,
+            raw.code,
             reinterpret_cast<const std::uint8_t*>(subject.data()),
             subject.size(),
             0,
             pc::ANCHORED | pc::ENDANCHORED,
-            data,
-            context);
+            raw.data,
+            raw.context);
         cg::test::check(
             r,
             rc == pc::ERROR_MATCHLIMIT,
             std::format("limit: raw call reports the step limit (rc {})", rc));
-        pcre2_match_context_free_8(context);
-        pcre2_match_data_free_8(data);
-        pcre2_code_free_8(code);
         auto flat = rx::Pattern::compile(".*.*_types");
         cg::test::check(
             r,
@@ -751,6 +782,20 @@ namespace
             "tier: the step limit is set explicitly below the engine default");
     }
 
+    /** @brief 引擎的三个释放函数对空指针不做任何事：封装类的释放函数
+     *          不判空，编译失败与被移走的对象都靠这一点。 */
+    void null_release_cases(R& r)
+    {
+        {
+            // 三项都没有取到的拥有者：析构对三个释放函数各传一次空指针。
+            const RawResources empty;
+        }
+        cg::test::check(
+            r,
+            true,
+            "null: releasing never-acquired engine resources is harmless");
+    }
+
     const cg::test::Registrar REG_COMPILE{"regex.compile", &compile_cases};
     const cg::test::Registrar REG_FULL_MATCH{
         "regex.full_match",
@@ -768,6 +813,9 @@ namespace
     const cg::test::Registrar REG_LIMIT{"regex.limit", &limit_cases};
     const cg::test::Registrar REG_MOVE{"regex.move", &move_cases};
     const cg::test::Registrar REG_TIER{"regex.tier", &tier_cases};
+    const cg::test::Registrar REG_NULL_RELEASE{
+        "regex.null_release",
+        &null_release_cases};
 
 } // namespace
 

@@ -373,9 +373,9 @@ target 执行之前做的*求值*，由 ccg 进程内驱动：
 
 MSBuild 特性在设计上仅限 Windows。翻译器、注册表
 格式与 CLI 解析是平台中立的，到处都能编译；所有
-Windows API（CreateProcessW、GetCommandLineW、
-vswhere/注册表访问）都住在 `src/msbuild/` 的 `_WIN32`
-守卫之后，非 Windows 路径返回不支持错误。在非
+Windows API（vswhere 与注册表访问）都住在 `src/msbuild/` 的
+`_WIN32` 守卫之后（派生子进程与取命令行经平台单元调用），非
+Windows 路径返回不支持错误。在非
 Windows 机器上，`ccg msbuild --list`（纯注册表读取）可用，
 而每个会抽取的调用都会干净地失败并报
 `ccg msbuild: not supported on this platform`（退出码 1）——绝不会是编译
@@ -520,7 +520,7 @@ ActiveCfg/Build.0 概念，也不携带它们。`mode` 是 `evaluate`（默认�
 上面的"求值通道失败（求值）"一行中止时打印 `evaluation failed
 for <config>: <error>`，其中 `<error>` 可能携带裸数字——
 `Begin failed rc=-13 payload=...`、`NextEvent failed rc=-14 payload=...`、
-`MsbuildEval session open failed, probe rc=-30 ... detail=...`。这些
+`MsbuildEval session open failed, rc=-30 detail=...`。这些
 `rc` 值来自承载求值会话的 C# 对象宿主通道（CLR 4 线上的
 `ccg-cshost51.dll`）：`0` 表示成功，正数是句柄 token，每个负数都是
 下表中的一个码。`-1`..`-20` 由垫片自身回传；`-30`/`-31` 是宿主侧
