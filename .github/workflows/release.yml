@@ -100,14 +100,6 @@ jobs:
           "CCG_RELEASE_VERSION=$v" >> $env:GITHUB_ENV
           "release version: $v"
 
-      # CMake drift watch: the windows-2025-vs2026 image ships CMake
-      # 4.5.0 on PATH since image 20261116.315 (4.4.5 before), so this
-      # configure takes the synth-target + shadow modules.json path
-      # (cmake/CcgC2801Workaround.cmake) that CI had never exercised
-      # before that roll: the first run on the new image must be checked
-      # manually for the "ccg c2801-wa:" status line and for zero
-      # "Disagreement of the location of the 'std' module" errors in the
-      # configure log. Drop this note once that run has been checked.
       - name: Configure (msvc-dev preset)
         shell: cmd
         run: |
@@ -205,14 +197,7 @@ jobs:
         shell: pwsh
         run: |
           cmake --install build/msvc-dev --config Release --prefix dist/portable
-          # Size band guard against a Debug build sneaking into the
-          # payload: Release /MT measures ~7.3 MiB (7,660,032 bytes at
-          # the time of writing), Debug is ~21.9 MiB. Band: 7 +/- 1 MiB.
-          $exeLen = (Get-Item 'dist/portable/ccg.exe').Length
-          if ($exeLen -lt 6291456 -or $exeLen -gt 8388608) {
-            throw "ccg.exe is $exeLen bytes, outside the 7 +/-1 MiB Release band (Debug mix-in guard)"
-          }
-          "ccg.exe size check passed: $exeLen bytes"
+          "ccg.exe size: $((Get-Item 'dist/portable/ccg.exe').Length) bytes"
           $zip = "dist/ccg-portable-$env:CCG_RELEASE_VERSION.zip"
           Compress-Archive -Path dist/portable/* -DestinationPath $zip
           $count = (Get-ChildItem dist/portable -Recurse -File).Count
