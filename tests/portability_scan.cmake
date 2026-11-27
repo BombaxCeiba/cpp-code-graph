@@ -60,6 +60,7 @@ set(_inputs
 file(GLOB _flat_units
     "${root}/src/*.ixx" "${root}/src/*.cpp" "${root}/src/*.h"
     "${root}/src/*/*.ixx" "${root}/src/*/*.cpp" "${root}/src/*/*.h"
+    "${root}/src/*/*.cmake"
     "${root}/tests/*.c" "${root}/tests/*.cpp" "${root}/tests/*.py"
     "${root}/cmake/*.cmake"
     "${root}/scripts/*.py" "${root}/scripts/*.cmake")

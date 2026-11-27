@@ -346,6 +346,10 @@ function(ccg_add_modules target base_dir)          # append .ixx files as one PU
                    BASE_DIRS ${base_dir} FILES ${ARGN})
 endfunction()
 
+function(ccg_add_dir_modules target dir)            # for per-directory manifests src/<layer>/modules.cmake: names relative to dir; add new units to their layer's manifest
+    ccg_add_modules(${target} "${CMAKE_CURRENT_SOURCE_DIR}" ${dir}/${ARGN})
+endfunction()
+
 function(ccg_module_target target)                 # C++23 + import std, once per module-owning target
     set_target_properties(${target} PROPERTIES CXX_MODULE_STD ON)
     target_compile_features(${target} PUBLIC cxx_std_23)

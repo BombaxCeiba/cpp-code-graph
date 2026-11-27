@@ -44,146 +44,13 @@ else()
         COMPILE_OPTIONS "-mavx512f;-mavx512vl;-mavx512bw;-mavx512dq")
 endif()
 ccg_module_target(cg_core)
-ccg_add_modules(cg_core "${CMAKE_CURRENT_SOURCE_DIR}"
-    util/util.ixx
-    util/util.json.ixx
-    util/util.platform.ixx
-    util/util.guard.ixx
-    util/util.crashdump.ixx
-    util/util.cstd.ixx
-    util/util.msvcswitch.ixx
-    util/util.pool.ixx
-    util/util.instrdigest.ixx
-    util/util.treesit.ixx
-    util/util.cshost.ixx
-    util/util.shellscan.ixx
-    util/util.pcre2.ixx
-    util/util.regex.ixx
-    db/db.tables.core.ixx
-    db/db.tables.graph.ixx
-    db/db.tables.sites.ixx
-    db/db.tables.analysis.ixx
-    db/db.tables.ixx
-    db/db.schema.ixx
-    db/db.store.ixx
-    db/db.query.lookup.ixx
-    db/db.query.batch.ixx
-    db/db.query.members.ixx
-    db/db.query.stats.ixx
-    db/db.query.dumpkeys.ixx
-    db/db.query.ixx
-    db/db.ixx
-    clang/clang.loader.ixx
-    clang/clang.capi.api.ixx
-    clang/clang.capi.model.ixx
-    clang/clang.capi.cursor.ixx
-    clang/clang.capi.type.ixx
-    clang/clang.capi.ixx
-    clang/clang.driver.ixx
-    clang/clang.tu.lex.ixx
-    clang/clang.tu.imports.ixx
-    clang/clang.tu.argv.ixx
-    clang/clang.tu.scrub.ixx
-    clang/clang.tu.parse.ixx
-    clang/clang.tu.ixx
-    clang/clang.compile_db.model.ixx
-    clang/clang.compile_db.tokens.ixx
-    clang/clang.compile_db.expand.ixx
-    clang/clang.compile_db.bmi.ixx
-    clang/clang.compile_db.load.ixx
-    clang/clang.compile_db.ixx
-    clang/clang.bmi.ixx
-    clang/clang.pch.model.ixx
-    clang/clang.pch.paths.ixx
-    clang/clang.pch.sidecar.ixx
-    clang/clang.pch.incdirs.ixx
-    clang/clang.pch.depfile.ixx
-    clang/clang.pch.inject.ixx
-    clang/clang.pch.manifest.ixx
-    clang/clang.pch.plan.ixx
-    clang/clang.pch.ixx
-    clang/clang.ixx
-    extract/extract.model.ixx
-    extract/extract.visitor.ixx
-    extract/extract.ixx
-    # 动态派发分析（schema v8）。依赖栅栏：analysis 可以
-    # import db/clang；graph/cli 可以 import analysis；反向绝不。
-    analysis/analysis.model.ixx
-    analysis/analysis.points_to.ixx
-    analysis/analysis.collect.ixx
-    analysis/analysis.snapshot.ixx
-    analysis/analysis.propagate.ixx
-    analysis/analysis.dispatch.graph.ixx
-    analysis/analysis.dispatch.context.ixx
-    analysis/analysis.dispatch.statics.ixx
-    analysis/analysis.dispatch.dynamics.ixx
-    analysis/analysis.dispatch.ixx
-    analysis/analysis.external.ixx
-    analysis/analysis.ixx
-    graph/graph.headcache.ixx
-    graph/graph.waveflush.ixx
-    graph/graph.symledger.ixx
-    graph/graph.headdomain.ixx
-    graph/graph.incrcapture.ixx
-    graph/graph.timing.ixx
-    graph/graph.build.ixx
-    graph/graph.traverse.model.ixx
-    graph/graph.traverse.dispatchidx.ixx
-    graph/graph.traverse.include.ixx
-    graph/graph.traverse.walk.ixx
-    graph/graph.traverse.queries.ixx
-    graph/graph.traverse.context.ixx
-    graph/graph.traverse.changes.ixx
-    graph/graph.traverse.ixx
-    graph/graph.ixx
-    msbuild/msbuild.ixx
-    msbuild/translate.ixx
-    msbuild/msbuild.tables.ixx
-    msbuild/wrap.ixx
-    msbuild/pipeline.configs.ixx
-    msbuild/pipeline.registry.ixx
-    msbuild/pipeline.wraplog.ixx
-    msbuild/pipeline.extractargs.ixx
-    msbuild/pipeline.hostfind.ixx
-    msbuild/pipeline.treestate.ixx
-    msbuild/pipeline.outputs.ixx
-    msbuild/pipeline.extract.ixx
-    msbuild/pipeline.ixx
-    msbuild/eval.ixx
-    msbuild/compose.ixx
-    cli/cli.parse.model.ixx
-    cli/cli.parse.usage.ixx
-    cli/cli.parse.opts.ixx
-    cli/cli.parse.parse.ixx
-    cli/cli.parse.ixx
-    cli/cli.render.base.ixx
-    cli/cli.render.symbol.ixx
-    cli/cli.render.context.ixx
-    cli/cli.render.impact.ixx
-    cli/cli.render.stats.ixx
-    cli/cli.render.changes.ixx
-    cli/cli.render.ixx
-    cli/cli.lookup.name.ixx
-    cli/cli.render.disclose.ixx
-    cli/cli.scan.names.ixx
-    cli/cli.layout.ixx
-    cli/cli.commands.matchers.ixx
-    cli/cli.commands.runs.ixx
-    cli/cli.commands.entry.ixx
-    cli/cli.commands.ixx
-    # 共享的索引主干（原先是内部分区，后来是
-    # 纯声明接口；自模块布局定稿起
-    # 定义就地内联）与各 CLI 运行器模块。
-    cli/cli.runners.engine.ixx
-    cli/cli.runners.resolve.ixx
-    cli/cli.runners.tail.ixx
-    cli/cli.runners.ixx
-    cli/cli.index.ixx
-    cli/cli.update.ixx
-    cli/cli.msbuild.ixx
-    cli/cli.config.ixx
-    cli/cli.hook.ixx
-    cli/cli.ixx)
+# 模块单元的清单分散在各层自己的子目录里：每个子目录的 modules.cmake
+# 把本层的单元追加进 cg_core，文件名相对该子目录，文件集的基准目录
+# 是 src。本文件只负责把清单包含进来；包含次序决定单元进入目标的
+# 次序。
+foreach(_ccg_layer IN ITEMS util db clang extract analysis graph msbuild cli)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/${_ccg_layer}/modules.cmake")
+endforeach()
 target_link_libraries(cg_core PUBLIC
     cg::sqlite3
     cg::libclang
@@ -308,8 +175,7 @@ endif()
 # 派发；app.main 只是跳板进入它。
 add_executable(ccg)
 ccg_module_target(ccg)
-ccg_add_modules(ccg "${CMAKE_CURRENT_SOURCE_DIR}"
-    app/main.ixx)
+include("${CMAKE_CURRENT_SOURCE_DIR}/app/modules.cmake")
 target_link_libraries(ccg PRIVATE cg_core)
 
 # 可选启用的打包辅助；开发构建依赖工具集 bin 目录已在

@@ -317,6 +317,10 @@ function(ccg_add_modules target base_dir)          # append .ixx files as one PU
                    BASE_DIRS ${base_dir} FILES ${ARGN})
 endfunction()
 
+function(ccg_add_dir_modules target dir)            # 子目录清单 src/<层>/modules.cmake 用：文件名相对 dir；新增单元写进所属层的清单
+    ccg_add_modules(${target} "${CMAKE_CURRENT_SOURCE_DIR}" ${dir}/${ARGN})
+endfunction()
+
 function(ccg_module_target target)                 # C++23 + import std, once per module-owning target
     set_target_properties(${target} PROPERTIES CXX_MODULE_STD ON)
     target_compile_features(${target} PUBLIC cxx_std_23)

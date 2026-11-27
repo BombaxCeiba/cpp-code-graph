@@ -176,6 +176,22 @@ function(ccg_add_modules target base_dir)
         FILE_SET CXX_MODULES BASE_DIRS "${base_dir}" FILES ${_abs_files})
 endfunction()
 
+# 把一份子目录清单（src/<层>/modules.cmake）里的模块单元追加到目标：
+# 清单只写本目录下的文件名，相对 dir 解析——清单文件把自己的
+# CMAKE_CURRENT_LIST_DIR 传进来。其余全部委托给 ccg_add_modules。
+# 文件集的基准目录固定取调用方所在的源码目录：清单经 include()
+# 进入 src/CMakeLists.txt，而 include() 不改变 CMAKE_CURRENT_SOURCE_DIR，
+# 所以基准目录始终是 src。它不能跟着清单落到子目录——CMake 按单元
+# 相对基准目录的路径给目标文件起名，基准目录一变，目标文件路径
+# 全部改变，整棵树就得重编。
+function(ccg_add_dir_modules target dir)
+    set(_abs_files "")
+    foreach(f IN LISTS ARGN)
+        list(APPEND _abs_files "${dir}/${f}")
+    endforeach()
+    ccg_add_modules(${target} "${CMAKE_CURRENT_SOURCE_DIR}" ${_abs_files})
+endfunction()
+
 # C++23 + `import std;` + 警告，对每个持有模块的目标做一次。
 function(ccg_module_target target)
     # 做登记使 tidy 闸（cmake/CcgTidy.cmake）能依赖每个
