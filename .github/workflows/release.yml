@@ -1,5 +1,6 @@
-# Release pipeline: build (MSVC 14.51 on the pinned VS2026 image), test,
-# package the Inno Setup installer via CPack plus a portable zip.
+# Release pipeline: build (MSVC toolset 14.51+ on the rolling VS2026
+# image), test, package the Inno Setup installer via CPack plus a
+# portable zip.
 #
 # Tiering (per the release pipeline design):
 #   - push (any branch) / workflow_dispatch: smoke tests (4 tests)
@@ -58,14 +59,22 @@ jobs:
           if (-not (Test-Path $iscc)) { throw 'ISCC.exe not found after installation' }
           'C:\Program Files\Inno Setup 7' >> $env:GITHUB_PATH
 
-      - name: Assert toolchain (cl 19.51, libclang.dll)
+      # The windows-2025-vs2026 label is a rolling image: the MSVC toolset
+      # it ships changes without notice (images 20261103 -> 20261123 moved
+      # the toolset from 14.51 to 14.52). 14.51 is the toolset this
+      # project is developed against, so the gate accepts 14.51 and newer
+      # minors of the 14 line and stops on anything else (older minors, a
+      # different major, an unparsable version). VsDevCmd exports the
+      # toolset version as VCToolsVersion (<major>.<minor>.<build>).
+      - name: Assert toolchain (MSVC 14.51+, libclang.dll)
         shell: cmd
         run: |
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
           call "%VSROOT%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
-          cl 2>&1 | findstr /C:"19.51" >nul
+          echo toolset version: %VCToolsVersion%
+          powershell -NoProfile -Command "$v = [version]$env:VCToolsVersion; if ($v.Major -ne 14 -or $v.Minor -lt 51) { exit 1 }"
           if errorlevel 1 (
-            echo toolchain assertion failed: cl is not 19.51 1>&2
+            echo toolchain assertion failed: toolset is not 14.51 or newer 1>&2
             exit /b 1
           )
           if not exist "C:\Program Files\LLVM\bin\libclang.dll" (
@@ -92,14 +101,13 @@ jobs:
           "release version: $v"
 
       # CMake drift watch: the windows-2025-vs2026 image ships CMake
-      # 4.4.3 on PATH today (verified on image 20260925.250.1), so
-      # this configure takes the <4.5 legacy std-module path. When the
-      # image rolls to CMake >= 4.5 it auto-switches to the synth-target
-      # + shadow modules.json path (cmake/CcgC2801Workaround.cmake) that
-      # CI has never exercised: the first such run must be checked
+      # 4.5.0 on PATH since image 20261116.315 (4.4.5 before), so this
+      # configure takes the synth-target + shadow modules.json path
+      # (cmake/CcgC2801Workaround.cmake) that CI had never exercised
+      # before that roll: the first run on the new image must be checked
       # manually for the "ccg c2801-wa:" status line and for zero
       # "Disagreement of the location of the 'std' module" errors in the
-      # configure log.
+      # configure log. Drop this note once that run has been checked.
       - name: Configure (msvc-dev preset)
         shell: cmd
         run: |
@@ -124,23 +132,6 @@ jobs:
           ) else (
             ctest --test-dir build/msvc-dev -C Release --output-on-failure -R "^ccg_smoke_version$|^ccg_portability_scan$|^ccg_sqlite_smoke$|^ccg_msbuild_gt$"
           )
-
-      # Inno Setup 7 is required for the Simplified Chinese official
-      # language pack (7.0.2+) and is NOT available via chocolatey (the
-      # community `innosetup` package tops out at 6.7.1), so install the
-      # official 7.1.1 release directly from GitHub.
-      - name: Install Inno Setup 7.1.1
-        shell: pwsh
-        run: |
-          $iscc = 'C:\Program Files\Inno Setup 7\ISCC.exe'
-          if (Test-Path $iscc) { 'Inno Setup 7 already present'; exit 0 }
-          curl.exe -L -f -o "$env:RUNNER_TEMP\innosetup.exe" `
-            https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe
-          $p = Start-Process -PassThru -Wait -FilePath "$env:RUNNER_TEMP\innosetup.exe" `
-            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/ALLUSERS'
-          if ($p.ExitCode -ne 0) { throw "Inno Setup installer exited with $($p.ExitCode)" }
-          if (-not (Test-Path $iscc)) { throw 'ISCC.exe not found after installation' }
-          'C:\Program Files\Inno Setup 7' >> $env:GITHUB_PATH
 
       - name: Package installer (CPack INNOSETUP)
         shell: cmd
