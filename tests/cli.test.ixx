@@ -4271,7 +4271,8 @@ namespace
     }
 
     // Grep 模式过滤器与受限正则路径：整标识符（链）在装饰剥离后幸存、
-    // 顶层交替拆分与分支级合并、形态护栏拒指数回溯形状。
+    // 顶层交替拆分与分支级合并、形态护栏只管长度与纯装饰，量词形态
+    // 交给引擎的步数上限与编译失败兜底。
     void grep_pattern_filter_units(R& r)
     {
         // Grep 模式过滤器：整标识符（链）在装饰
@@ -4417,9 +4418,9 @@ namespace
                      .has_value(),
                 "classify: over-limit merged branches stay silent");
         }
-        // 受限正则路径的形态护栏：长度上限、纯装饰拒、相邻量词、右括号
-        // 后紧跟量词的一切组合（含构造合法不抛异常的指数回溯形态——机械
-        // 检测是唯一防线）；(ab)+ 无害形态同拒是保守口径的既定代价。
+        // 受限正则路径的形态护栏只管长度上限与纯装饰两道；量词形态
+        // （相邻量词、右括号后量词、带量词的分组）交给引擎的步数上限
+        // 与编译失败兜底。
         cg::test::check(
             r,
             hk::regex_pattern_allowed(std::string(61, 'G') + "\\w+")
@@ -4427,23 +4428,18 @@ namespace
             "regex guard: 64-byte boundary");
         cg::test::check(
             r,
-            !hk::regex_pattern_allowed("a**")
-                && !hk::regex_pattern_allowed("a*+")
-                && !hk::regex_pattern_allowed("a+?")
-                && !hk::regex_pattern_allowed("a?{2}"),
-            "regex guard: adjacent quantifiers reject");
+            hk::regex_pattern_allowed("a+?") && hk::regex_pattern_allowed("a*+")
+                && hk::regex_pattern_allowed("a**")
+                && hk::regex_pattern_allowed("a?{2}"),
+            "regex guard: adjacent quantifiers reach the engine");
         cg::test::check(
             r,
-            !hk::regex_pattern_allowed("(a*)*")
-                && !hk::regex_pattern_allowed("(\\w+)+"),
-            "regex guard: quantified group holding quantifiers rejects");
-        cg::test::check(
-            r,
-            !hk::regex_pattern_allowed("(a|aa)+")
-                && !hk::regex_pattern_allowed("(\\w|\\w\\w)+")
-                && !hk::regex_pattern_allowed("(ab)+"),
-            "regex guard: any quantifier right after a closing paren "
-            "rejects");
+            hk::regex_pattern_allowed("(a*)*")
+                && hk::regex_pattern_allowed("(\\w+)+")
+                && hk::regex_pattern_allowed("(a|aa)+")
+                && hk::regex_pattern_allowed("(ab)+")
+                && hk::regex_pattern_allowed("ccg.db(-wal)?$"),
+            "regex guard: quantified groups reach the engine");
         cg::test::check(
             r,
             hk::regex_pattern_allowed("Get\\w+")
@@ -4600,7 +4596,7 @@ namespace
                     && text.ends_with(" …[ccg 截断]"),
                 "multi list: hard truncation fuse caps at the budget");
         }
-        // 超限计数披露行：单行、symbols/names 两种口径。
+        // 超限计数披露行（多词路径）：单行、符号数口径。
         cg::test::check(
             r,
             hk::render_overmatch_disclosure("pi|area", 7)
@@ -4609,24 +4605,25 @@ namespace
             "overmatch disclosure: symbols wording");
         cg::test::check(
             r,
-            hk::render_overmatch_disclosure("\\w+", 42, "names")
-                    .find("matched 42 names — too many to list")
-                != std::string::npos,
-            "overmatch disclosure: names wording");
-        cg::test::check(
-            r,
             hk::render_overmatch_disclosure(std::string(100, 'y'), 9)
                     .find(std::string(100, 'y'))
                 == std::string::npos,
             "overmatch disclosure: pattern display is clipped");
-        // 开关三态语义归 e2e 进程级用例；单测只钉"回落默认"这一态
-        // （宿主残留由 ctest ENVIRONMENT 显式置空值压过——Windows 环境
-        // 名查找大小写不敏感，小写变体同样被覆盖）。
+        // 两个正则开关的三态语义归 e2e 进程级用例；单测只钉"回落默认"
+        // 这一态（宿主残留由 ctest ENVIRONMENT 显式置空值压过——
+        // Windows 环境名查找大小写不敏感，小写变体同样被覆盖）。
         cg::test::check(
             r,
             hk::pretooluse_regex_enabled() == hk::PTU_REGEX_DEFAULT_ENABLED,
             "regex switch: unset or foreign value falls back to the "
             "built-in default");
+        cg::test::check(
+            r,
+            hk::pretooluse_regex_partial_enabled()
+                    == hk::PTU_REGEX_PARTIAL_DEFAULT_ENABLED
+                && hk::PTU_REGEX_PARTIAL_DEFAULT_ENABLED,
+            "regex partial switch: unset or foreign value falls back to the "
+            "built-in default, which is on");
         // 候选清单渲染：种子形态（N 计数、refs 降序、(+M more) 尾注挂在
         // 最后一个候选行、末行提示用头部候选的限定名）。
         {

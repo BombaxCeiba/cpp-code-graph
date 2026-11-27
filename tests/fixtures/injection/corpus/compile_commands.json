@@ -1,5 +1,7 @@
 [
 {"directory": ".", "file": "alpha/lookup.cpp", "command": "c++ -std=c++23 -I . -c alpha/lookup.cpp -o alpha/lookup.o"},
 {"directory": ".", "file": "beta/lookup.cpp", "command": "c++ -std=c++23 -I . -c beta/lookup.cpp -o beta/lookup.o"},
+{"directory": ".", "file": "gamma/notes.cpp", "command": "c++ -std=c++23 -I . -c gamma/notes.cpp -o gamma/notes.o"},
+{"directory": ".", "file": "delta/delta.cpp", "command": "c++ -std=c++23 -I . -c delta/delta.cpp -o delta/delta.o"},
 {"directory": ".", "file": "main.cpp", "command": "c++ -std=c++23 -I . -c main.cpp -o main.o"}
 ]

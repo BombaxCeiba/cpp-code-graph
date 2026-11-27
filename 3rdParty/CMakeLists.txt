@@ -182,6 +182,38 @@ function(_cpm_add_treesitter_bash)
     target_link_libraries(cg_treesitter_bash PUBLIC cg::treesitter)
 endfunction()
 
+function(_cpm_add_pcre2)
+    # PCRE2 10.49：钩子受限正则路径的匹配引擎，解释器档（不开
+    # 即时编译）。发行包以网址加摘要钉版。上游清单的默认值逐项显式
+    # 钉住：自测、自带搜索程序、配置报告默认开，全部关掉；只编 8 位
+    # 库；即时编译默认关，显式写出以钉住意图；统一字符属性支持默认
+    # 开，显式写出。静态库目标是 pcre2-8-static，它公开给出头文件
+    # 路径与静态链接宏——消费方经目标链接即可，头文件不再把函数
+    # 声明成动态库导入。
+    CPMAddPackage(NAME pcre2
+        URL "${GITHUB_MIRROR_URL}/PCRE2Project/pcre2/releases/download/pcre2-10.49/pcre2-10.49.tar.bz2"
+        URL_HASH SHA256=53c156e1ba416a20da8e65395daa132da0d80e76910424caca3fcdae7831d384
+        SYSTEM YES
+        EXCLUDE_FROM_ALL YES
+        OPTIONS
+            "BUILD_SHARED_LIBS OFF"
+            "BUILD_STATIC_LIBS ON"
+            "PCRE2_BUILD_PCRE2_8 ON"
+            "PCRE2_BUILD_PCRE2_16 OFF"
+            "PCRE2_BUILD_PCRE2_32 OFF"
+            "PCRE2_SUPPORT_JIT OFF"
+            "PCRE2_SUPPORT_UNICODE ON"
+            "PCRE2_STATIC_PIC ON"
+            "PCRE2_BUILD_PCRE2GREP OFF"
+            "PCRE2_BUILD_TESTS OFF"
+            "PCRE2_SHOW_REPORT OFF")
+    if(NOT TARGET pcre2-8-static)
+        message(FATAL_ERROR
+            "ccg: pcre2 fetch incomplete - target pcre2-8-static missing")
+    endif()
+    add_library(cg::pcre2 ALIAS pcre2-8-static)
+endfunction()
+
 # 调用次序有讲究：pfr 必须先于 cpp_yyjson（目标校验所需）。
 _config_sqlite3()
 _config_libclang()
@@ -191,3 +223,4 @@ _cpm_add_yyjson_cpp()
 _cpm_add_sqlpp23()
 _cpm_add_treesitter()
 _cpm_add_treesitter_bash()
+_cpm_add_pcre2()

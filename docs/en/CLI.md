@@ -799,13 +799,33 @@ disclosure; a single surviving (or singly-hitting) branch degrades to
 the exact single-chain answer below. A pattern with metacharacters but
 no surviving branch can take a **restricted regex path** when the
 `CCG_PRETOOLUSE_REGEX` switch allows it (on by default) and the shape
-passes the guardrails (pattern length ≤ 64, no pathological quantifier
-forms such as `(a*)*`, one full-table full-match scan per event,
-deadline probes before and during the scan). Bash and PowerShell
-commands funnel their extracted `rg`/`Select-String` pattern through
-this same gate: a multi-request or wildcard-path command stays silent,
-and a `-F`/`-SimpleMatch` literal only passes when it is itself a bare
-identifier chain (a fixed multi-pattern command stays silent too). A
+passes the guardrails (pattern length ≤ 64 and not pure decoration; the
+PCRE2 engine bounds every single match by a step limit, so quantifier
+forms such as `(a*)*` are admitted, a name that hits the limit counts
+as a non-match, and the exits disclose how many such names there are;
+deadline probes before and during every scan). The
+path first scans the whole table with full-match semantics; when that
+finds nothing and the pattern cannot match the empty string, it scans
+again with partial-match semantics (a fragment inside the name) while
+`CCG_PRETOOLUSE_REGEX_PARTIAL` allows it. Either layer branches on the
+number of matching names: one name takes the single-chain answer,
+two to five take the multi-term candidate list, and more
+than five answer with a **graded envelope** — the hit total, the
+five lexicographically smallest names that can be re-queried
+verbatim, and one narrowing hint (the
+over-limit exit of the multi-term path itself stays a one-line count
+disclosure). The envelope's list only takes names that resolve again
+when re-queried verbatim: operator names carrying regex
+metacharacters and descriptive long names past the length limit take
+no slot, and when there is no such name no name is listed. When some
+names were left undecided by the step limit, every injection exit
+discloses their count (right after the total in the envelope's first
+line, as a trailing line elsewhere); zero hits in both layers stay
+silent as before. Bash and PowerShell commands funnel their extracted
+`rg`/`Select-String` pattern through this same gate: a multi-request
+or wildcard-path command stays silent, and a `-F`/`-SimpleMatch`
+literal only passes when it is itself a bare identifier chain (a
+fixed multi-pattern command stays silent too). A
 **unique** hit (bare
 name with exactly one symbol, or a qualified chain that resolves to
 one) injects five bounded lines: the identity line (qualified name,
@@ -833,15 +853,19 @@ reads):
 
 | switch | effect |
 |---|---|
-| `CCG_PRETOOLUSE_REGEX=1` | enables the restricted regex path of the PreToolUse injection: a metacharacter pattern with no surviving identifier branch (and not all-noise branches) is matched against the symbol-name table with `std::regex` full-match, one full-table scan per event, guarded by pattern length ≤ 64, pathological-quantifier rejection, name-length skip, and deadline probes before and during the scan |
+| `CCG_PRETOOLUSE_REGEX=1` | enables the restricted regex path of the PreToolUse injection: a metacharacter pattern with no surviving identifier branch (and not all-noise branches) is matched against the symbol-name table with PCRE2 full-match (interpreter tier, step-limited per name — a hit on the limit counts as a non-match and the exits disclose how many such names there are; quantified groups, lazy and possessive quantifiers, and the `(?i)` inline flag are accepted, while a pattern the engine cannot compile stays silent), one full-table scan per event, guarded by pattern length ≤ 64, name-length skip, and deadline probes before and during the scan |
 | `CCG_PRETOOLUSE_REGEX=0` | disables the regex path (such patterns stay silent) |
-| unset or any other value | falls back to the built-in default (currently enabled — the closed-book paired evaluation found the regex path harmless, so it ships on), documented here and in REALTIME.md |
+| `CCG_PRETOOLUSE_REGEX_PARTIAL=1` | enables the second layer of the restricted regex path: when the full-match scan finds nothing and the pattern cannot match the empty string, the table is scanned once more with partial-match semantics (the pattern covers a fragment of a name, under the same step limit and deadline probes) and the hits take the same three exits |
+| `CCG_PRETOOLUSE_REGEX_PARTIAL=0` | disables the second layer (the path stops after the full-match scan) |
+| unset or any other value | either switch falls back to its built-in default (both currently enabled — the closed-book paired evaluation found the regex path harmless, so it ships on), documented here and in REALTIME.md |
 
-The switch gates only the regex path — alternation splitting and
-multi-pattern lookup are always on. Windows note: environment variable
-lookup is case-insensitive there, so a differently-cased variant (for
-example an all-lowercase spelling) takes effect as well — set exactly
-one spelling and do not export case variants.
+The first switch gates only the regex path — alternation splitting and
+multi-pattern lookup are always on. The second gates only the second
+layer and has no effect while the first is off. Windows note:
+environment variable lookup is case-insensitive there, so a
+differently-cased variant (for example an all-lowercase spelling)
+takes effect as well — set exactly one spelling and do not export
+case variants.
 
 **Fast path.** When an edit arrives while another `ccg update` holds a
 live claim lease, the PostToolUse hook does not spawn a refresh and does

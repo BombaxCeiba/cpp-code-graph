@@ -12,6 +12,7 @@ upstream repositories.
 | sqlpp23 | `0.70` | BSD-2-Clause | Copyright (c) 2013-2016 Roland Bock |
 | tree-sitter | `v0.27.1` | MIT | Copyright (c) 2018 Max Brunsfeld |
 | tree-sitter-bash | `v0.25.1` | MIT | Copyright (c) 2017 Max Brunsfeld |
+| PCRE2 (regular expression matching, interpreter only) | `10.49` | BSD-3-Clause with binary-redistribution exception | Copyright (c) 1997-2007 University of Cambridge, Copyright (c) 2007-2024 Philip Hazel |
 | SQLite amalgamation | `3.54.0` | Public Domain | — |
 
 The libclang engine is **not** part of this package: ccg resolves a local

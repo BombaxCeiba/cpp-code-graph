@@ -15,14 +15,30 @@ Lock forms covered by the manifest entries:
     coordinate, same-name disambiguation, callers, dispatch tier);
   * bare ambiguous name -> candidate list ("mode": "list");
   * bare ambiguous name + path filter -> collapses the ambiguity and
-    must reproduce the unique five-line branch byte-for-byte.
+    must reproduce the unique five-line branch byte-for-byte;
+  * restricted-regex pattern ("mode": "regex" / "envelope"): a
+    full match on exactly one symbol name -> the five-line branch;
+    more matching names than the list cap -> the graded envelope
+    (hit total, the lexicographically smallest names that can be
+    re-queried verbatim, one narrowing hint; exact match required,
+    since the head selection does not depend on database insertion
+    order);
+  * restricted-regex second layer ("mode": "regex-partial" /
+    "regex-partial-list" / "regex-partial-envelope"): a pattern with
+    no full match is re-scanned for fragments inside the names; the
+    hits take the same three exits as above (five-line branch,
+    multi-term list, graded envelope);
+  * names the engine cannot settle within its step limit are left
+    out of the hits and their count is disclosed on every exit (the
+    "-undetermined" entries).
 
-Fallback semantics for five-line entries: when a qualified-name query
-renders as a candidate list instead (the symbol's same-name family
-grew beyond one), the entry still passes softly as LIST when the
-rendered list carries the locked symbol's qualified name and def
-coordinate. List-mode and path-narrowed entries always require an
-exact byte match.
+Fallback semantics for five-line entries (no mode, or mode "regex" or
+"regex-partial"): when a qualified-name query renders as a candidate
+list instead (the symbol's same-name family grew beyond one), the
+entry still passes softly as LIST when the rendered list carries the
+locked symbol's qualified name and def coordinate. List-mode,
+envelope-mode and path-narrowed entries always require an exact byte
+match.
 
 Set CCG_BYTELOCK_REGEN=1 to rewrite the manifest's expect fields with
 the live output (the reviewed way to re-lock after an intentional
@@ -83,6 +99,10 @@ def main():
     db_folder = os.path.join(work, ".ccg")
     env = dict(os.environ)
     env["CCG_DB"] = db_folder
+    # 正则路径及其第二层显式开启：宿主环境残留的开关取值不得翻转
+    # 正则条目。
+    env["CCG_PRETOOLUSE_REGEX"] = "1"
+    env["CCG_PRETOOLUSE_REGEX_PARTIAL"] = "1"
     regen = os.environ.get("CCG_BYTELOCK_REGEN") == "1"
     failures = []
 
@@ -106,10 +126,12 @@ def main():
         if got == want:
             print("%-16s %-46s IDENTICAL" % (label, shown))
             continue
-        # 清单族回退：限定名条目渲染成候选清单（同名族变大）
-        # 时，锁定符号的限定名与 def 坐标仍在清单里即软通过
-        #（list 与路径收窄条目必须逐字节相等）。
-        if (entry.get("mode") != "list" and "path" not in entry
+        # 清单族回退：五行块条目（无 mode，或 mode 为 regex /
+        # regex-partial）渲染成候选清单（同名族变大）时，锁定符号的
+        # 限定名与 def 坐标仍在清单里即软通过（清单、信封与路径收窄
+        # 条目必须逐字节相等）。
+        if (entry.get("mode") in (None, "regex", "regex-partial")
+                and "path" not in entry
                 and LIST_HEAD in got and got.startswith("[ccg] \"")):
             if qualified_of(want) in got and def_at_of(want) in got:
                 print("%-16s %-46s LIST (family; locked def present)"

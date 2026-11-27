@@ -25,6 +25,7 @@ import std;
 import cg.util;
 import cg.util.cstd;
 import cg.util.shellscan;
+import cg.util.regex;
 import cg.db.schema;
 import cg.db.store;
 import cg.db.query.lookup;
@@ -34,10 +35,13 @@ import cg.db.query.dumpkeys;
 import cg.graph.traverse.model;
 import cg.graph.traverse.queries;
 import cg.graph.traverse.changes;
+import cg.cli.lookup.name;
 import cg.cli.parse.model;
 import cg.cli.parse.opts;
 import cg.cli.parse.usage;
 import cg.cli.render.base;
+import cg.cli.render.disclose;
+import cg.cli.scan.names;
 import cg.cli.layout;
 
 export namespace cg::cli
@@ -5393,38 +5397,6 @@ export namespace cg::cli
         }
 
         /**
-         * @brief 字节上限的 UTF-8 序列安全前缀（不切断多字节序列中段）。
-         *
-         * @internal 与 utf8_prefix（码点数口径）互补：按字节预算判定的截
-         *           断（注入硬顶与微小上限分支）必须把截点落在序列边界
-         *           上，尾部残缺序列停在其起点；非法引导字节按 1 字节消
-         *           费（utf8_seq_len 口径）。
-         */
-        [[nodiscard]]
-        inline auto utf8_trunc_bytes(
-            std::string_view text,
-            std::size_t      max_bytes) -> std::string_view
-        {
-            if (text.size() <= max_bytes)
-            {
-                return text;
-            }
-            std::size_t keep = 0;
-            std::size_t i = 0;
-            while (i < text.size())
-            {
-                const std::size_t len = cg::util::utf8_seq_len(text[i]);
-                if (i + len > text.size() || i + len > max_bytes)
-                {
-                    break;
-                }
-                i += len;
-                keep = i;
-            }
-            return text.substr(0, keep);
-        }
-
-        /**
          * @brief 裁剪到至多 max 字节（UTF-8 码点安全，绝不产生非法序列）。
          *
          * @internal `clip` 会为省略号额外留 3 字节；预算约束下先让出这 3 字节，
@@ -8536,20 +8508,12 @@ export namespace cg::cli
         /** @brief 交替拆分与多 pattern 合并的分支数上限（超限整体静默）。 */
         inline constexpr std::size_t PTU_ALTERNATION_MAX_BRANCHES = 8;
 
-        /** @brief 多词合成信封的合计命中上限（超过只报计数披露行）。 */
+        /** @brief 列名上限：合计命中不超过它时列清单，超过时只报披露
+         *         （多词路径报计数披露行，受限正则路径报分级信封）。 */
         inline constexpr std::size_t PTU_LOOKUP_HITS_MAX = 5;
 
-        /** @brief 受限正则路径接受的 pattern 字节长度上限（复杂度代理）。 */
+        /** @brief 受限正则路径接受的 pattern 字节长度上限（长度护栏）。 */
         inline constexpr std::size_t PTU_REGEX_PATTERN_MAX = 64;
-
-        /** @brief 受限正则路径扫描时跳过的名字字节长度上限（超长模板实例名
-         *         防护：实测无上限时超长名可把回溯推成栈溢出）。 */
-        inline constexpr std::size_t PTU_REGEX_NAME_MAX = 128;
-
-        /** @brief 受限正则路径全表物化的每段行数（段间查截止探针,可弃置
-         *         后续段——每段 SQL 独立跑完，满足结果循环跑到 DONE 的全店
-         *         不变式）。 */
-        inline constexpr std::size_t PTU_REGEX_SPAN_ROWS = 20000;
 
         /** @brief 受限正则路径（CCG_PRETOOLUSE_REGEX）的内部默认开关值。
          *
@@ -8560,6 +8524,40 @@ export namespace cg::cli
          * 仍可用 "0" 显式关闭。
          */
         inline constexpr bool PTU_REGEX_DEFAULT_ENABLED = true;
+
+        /** @brief 受限正则路径第二层（CCG_PRETOOLUSE_REGEX_PARTIAL）的
+         *         内部默认开关值。
+         *
+         * 环境变量未设置或取值不是 "1"/"0" 时回落到这里。默认启用：第
+         * 二层只在第一层零命中后付费，并由空串试探闸、步数上限与截止
+         * 探针三重限流；需要回到单层行为的环境可用 "0" 显式关闭。
+         */
+        inline constexpr bool PTU_REGEX_PARTIAL_DEFAULT_ENABLED = true;
+
+        /**
+         * @brief 环境变量三态开关的取值："1" 为真、"0" 为假，未设置或
+         *        任何其它值（含空串、垃圾值）回落调用方给的默认值。
+         *
+         * @internal 每次调用都读环境变量，不做缓存：缓存由各开关函数
+         *           用函数局部 static 自己做，保证一个进程内只解析一次。
+         */
+        [[nodiscard]]
+        auto env_switch_enabled(const char* name, bool default_enabled) -> bool
+        {
+            const auto env = cg::util::cstd::get_env(name);
+            if (env.has_value())
+            {
+                if (*env == "1")
+                {
+                    return true;
+                }
+                if (*env == "0")
+                {
+                    return false;
+                }
+            }
+            return default_enabled;
+        }
 
         /**
          * @brief PreToolUse 受限正则路径的运行期开关（环境变量
@@ -8575,24 +8573,28 @@ export namespace cg::cli
         [[nodiscard]]
         auto pretooluse_regex_enabled() -> bool
         {
-            static const bool enabled = []
-            {
-                const auto env =
-                    cg::util::cstd::get_env("CCG_PRETOOLUSE_REGEX");
-                if (env.has_value())
-                {
-                    if (*env == "1")
-                    {
-                        return true;
-                    }
-                    if (*env == "0")
-                    {
-                        return false;
-                    }
-                }
-                return PTU_REGEX_DEFAULT_ENABLED;
-            }();
-            return enabled;
+            static const bool ENABLED = env_switch_enabled(
+                "CCG_PRETOOLUSE_REGEX",
+                PTU_REGEX_DEFAULT_ENABLED);
+            return ENABLED;
+        }
+
+        /**
+         * @brief 受限正则路径第二层（部分匹配）的运行期开关（环境变量
+         *        CCG_PRETOOLUSE_REGEX_PARTIAL）。
+         *
+         * 取值与缓存方式同 pretooluse_regex_enabled。只在受限正则路径
+         * 第一层零命中处起作用，决定是否做第二层的部分匹配重扫；关掉
+         * 即回到只做全匹配的单层行为。它不闸正则路径本身——那条由
+         * CCG_PRETOOLUSE_REGEX 管。
+         */
+        [[nodiscard]]
+        auto pretooluse_regex_partial_enabled() -> bool
+        {
+            static const bool ENABLED = env_switch_enabled(
+                "CCG_PRETOOLUSE_REGEX_PARTIAL",
+                PTU_REGEX_PARTIAL_DEFAULT_ENABLED);
+            return ENABLED;
         }
 
         /**
@@ -9047,13 +9049,8 @@ export namespace cg::cli
             }
             if (over_injection_budget(text))
             {
-                // 4) 字节硬截（不切断多字节序列）加截断标记。
-                constexpr std::size_t tail_room = 20;
-                const std::size_t cap = PTU_INJECTION_BUDGET > tail_room
-                                            ? PTU_INJECTION_BUDGET - tail_room
-                                            : 0;
-                text =
-                    std::string{utf8_trunc_bytes(text, cap)} + " …[ccg 截断]";
+                // 4) 字节硬截加截断标记。
+                text = fuse_to_budget(std::move(text), PTU_INJECTION_BUDGET);
             }
             return text;
         }
@@ -9156,22 +9153,6 @@ export namespace cg::cli
                 text = build_candidate_list_text(f, shown);
             }
             return text;
-        }
-
-        /**
-         * @brief 显示截断：超预算时截到上限内（UTF-8 安全）并加省略号后缀。
-         *
-         * @internal cap 按"截后内容 + 3 字节省略号 ≤ cap"执行（U+2026 为
-         *           3 字节 UTF-8 序列），保证显示串自身恒有界。
-         */
-        [[nodiscard]]
-        auto display_clip(std::string_view text, std::size_t cap) -> std::string
-        {
-            if (text.size() <= cap)
-            {
-                return std::string{text};
-            }
-            return std::string{utf8_trunc_bytes(text, cap - 3)} + "…";
         }
 
         /** @brief 多词清单的一个符号条目（term 序 + 现行清单条目域）。 */
@@ -9315,41 +9296,32 @@ export namespace cg::cli
             }
             if (text.size() > PTU_INJECTION_BUDGET)
             {
-                // 硬截档（保险丝）：与 render_injection_v71 第 4 级同款——
-                // 预算内做 UTF-8 序列安全截断并以截断标记收尾。条目域显示
-                // 截断后正常路径走不到这里；机械可证的预算硬顶不依赖该
-                // 经验断言。
-                constexpr std::size_t tail_room = 20;
-                const std::size_t cap = PTU_INJECTION_BUDGET > tail_room
-                                            ? PTU_INJECTION_BUDGET - tail_room
-                                            : 0;
-                text =
-                    std::string{utf8_trunc_bytes(text, cap)} + " …[ccg 截断]";
+                // 硬截档（保险丝）：与 render_injection_v71 第 4 级同款。
+                // 条目域显示截断后正常路径走不到这里；机械可证的预算
+                // 硬顶不依赖该经验断言。
+                text = fuse_to_budget(std::move(text), PTU_INJECTION_BUDGET);
             }
             return text;
         }
 
         /**
-         * @brief 超限计数披露行（合计命中超过 PTU_LOOKUP_HITS_MAX 时替代
-         *        清包清单的单行出口）。
+         * @brief 超限计数披露行（交替与多 pattern 并查的合计命中超过
+         *        PTU_LOOKUP_HITS_MAX 时替代清单的单行出口；计数口径是
+         *        符号数）。
          *
          * @param display_pattern 模式显示串（内部 64B 截断，同多词清单首行）。
-         * @param count           合计命中数（交替/多 pattern 路径为符号数，
-         *                        正则路径装载前为命中名数）。
-         * @param unit            计数单位措辞（"symbols" / "names"）。
+         * @param count           合计命中符号数。
          */
         [[nodiscard]]
         auto render_overmatch_disclosure(
             std::string_view display_pattern,
-            std::size_t      count,
-            std::string_view unit = "symbols") -> std::string
+            std::size_t      count) -> std::string
         {
             return std::format(
-                "[ccg] \"{}\" matched {} {} — too many to list; narrow the "
-                "pattern",
+                "[ccg] \"{}\" matched {} symbols — too many to list; narrow "
+                "the pattern",
                 display_clip(display_pattern, 64),
-                count,
-                unit);
+                count);
         }
 
         /** @brief 同名集合里一个符号的轻量行（一条 SQL 拿齐渲染与排序要的域）。
@@ -9823,27 +9795,13 @@ export namespace cg::cli
             return branches;
         }
 
-        /** @brief 正则量词的起始字符（* + ? {）。 */
-        [[nodiscard]]
-        auto is_quantifier_start(char c) -> bool
-        {
-            return c == '*' || c == '+' || c == '?' || c == '{';
-        }
-
         /**
-         * @brief 受限正则路径的形态护栏：长度、纯装饰与病态量词形态的机械
-         *        判定。
+         * @brief 受限正则路径的形态护栏：长度与纯装饰的机械判定。
          *
          * 只放行长度不超过 PTU_REGEX_PATTERN_MAX、含实质内容（剥锚点与空
-         * 白后非空）、且不含病态量词形态的模式。量词起始字符集为 * + ? {
-         * （转义形态按保守口径一并计入——误拒的方向是静默，与现行行为相
-         * 同，零损失）；机械检测两道：任意两个量词起始字符直接相邻（挡掉
-         * 占有/惰性量词与平铺重复量词）、右括号后紧跟量词起始字符的一切
-         * 组合（挡掉 `(a*)*` 嵌套量词与 `(a|aa)+` 这类构造合法但回溯指数
-         * 级的形态——后者分组内无量词、量词不相邻，唯有本道不可绕过；代
-         * 价是 `(ab)+` 无害形态同拒，其现行本就静默，零行为损失）。构造
-         * 期抛出的 std::regex_error 由调用点 try/catch 兜底（双保险，任何
-         * 异常形态整体静默）。
+         * 白后非空）的模式。量词形态不在这里拒绝：引擎按步数上限保护，
+         * 带量词的分组、惰性与占有量词都交给引擎判定。方言外的形态由
+         * 引擎编译失败兜住（调用点按不命中处理，任何异常形态整体静默）。
          */
         [[nodiscard]]
         auto regex_pattern_allowed(std::string_view pattern) -> bool
@@ -9870,31 +9828,7 @@ export namespace cg::cli
                 }
                 has_content = true;
             }
-            if (!has_content)
-            {
-                return false;
-            }
-            for (std::size_t i = 0; i < pattern.size(); ++i)
-            {
-                const char c = pattern[i];
-                if (is_quantifier_start(c))
-                {
-                    // 第一道：相邻量词（a**、a*+、a+?、a?{2} …）。
-                    if (i + 1 < pattern.size()
-                        && is_quantifier_start(pattern[i + 1]))
-                    {
-                        return false;
-                    }
-                }
-                // 第二道（含"量词修饰含量词分组"细分口径的全集）：`)` 后
-                // 紧跟量词起始字符的一切组合。
-                if (c == ')' && i + 1 < pattern.size()
-                    && is_quantifier_start(pattern[i + 1]))
-                {
-                    return false;
-                }
-            }
-            return true;
+            return has_content;
         }
 
         /** @brief 汇合层判定树的分支分类结果。 */
@@ -10554,7 +10488,9 @@ export namespace cg::cli
          * @internal 自查询接口层抽出的纯搬移：限定链（A::b 形态）先按
          *           unique_key 父链段精确过滤，筛空退回裸名全集（链猜错
          *           时的宁漏整集兜底）；多词并查与正则路径复用同一装载口
-         *           径，保证四臂同名集合逐字节同源。
+         *           径，保证四臂同名集合逐字节同源。链的分隔位置取尖括号
+         *           之外最后一个双冒号：正则路径装进来的是符号名表里的裸
+         *           名，模板实例名的双冒号在模板实参里，整个名字才是裸名。
          */
         /** @brief 按裸名拉同名候选的轻量投影（七字段、不做限定名）。 */
         [[nodiscard]]
@@ -10587,7 +10523,7 @@ export namespace cg::cli
             cg::db::GraphStore& store,
             const std::string&  ident) -> std::vector<PreToolUseBrief>
         {
-            const std::size_t sep = ident.rfind("::");
+            const std::size_t sep = chain_separator_of(ident);
             const std::string name =
                 sep == std::string::npos ? ident : ident.substr(sep + 2);
             const std::string chain =
@@ -10722,20 +10658,24 @@ export namespace cg::cli
          * 单有效分支（其余分支零命中或噪声丢弃）退化为现行单链出口——
          * 信封与该分支单独查询逐字节相同；多有效分支走多词候选清单；合
          * 计命中超上限只给计数披露行。注入出口保持纯注入（不捎带
-         * digest），一切静默出口照常捎带。
+         * digest），一切静默出口照常捎带。正则路径带来的未判定名字数不
+         * 为零时，每个注入出口的末尾追加步数上限披露行。
          *
          * @param inv             处理器调用现场（库定位用）。
          * @param terms           有效分支 ident / 正则命中名（保序）。
          * @param display_pattern 首行披露用模式串（已 64B 显示截断）。
          * @param path_filter     路径过滤串（可空，锚定匹配口径同单链）。
          * @param term_unit       首行词口径措辞（"terms" / "names"）。
+         * @param undetermined    正则路径因步数上限未判定的名字数；其余
+         *                        路径为零，不追加披露行。
          */
         auto run_pretooluse_multi_lookup(
             const Invocation&               inv,
             const std::vector<std::string>& terms,
             const std::string&              display_pattern,
             const std::string&              path_filter,
-            std::string_view                term_unit = "terms") -> int
+            std::string_view                term_unit = "terms",
+            std::size_t                     undetermined = 0) -> int
         {
             const auto choice = hook_resolved_db(inv);
             if (!choice.has_value())
@@ -10747,6 +10687,7 @@ export namespace cg::cli
                 return pretooluse_opportunistic_flush(*choice);
             }
             cg::db::GraphStore store{choice->db, 300};
+            const std::string  note = render_undetermined_note(undetermined);
             // 逐 term 装载 + 预筛 + SymId 去重（保 term 顺序、同 term 内
             // 保装载序，重复命中归首个 term）；每 term 装载后查一次截止
             // 探针（超时整体静默捎带）。
@@ -10803,10 +10744,13 @@ export namespace cg::cli
                     }
                     emit_hook_context(
                         "PreToolUse",
-                        render_injection_v71(*facts));
+                        append_note_within_budget(
+                            render_injection_v71(*facts),
+                            note,
+                            PTU_INJECTION_BUDGET));
                     return 0;
                 }
-                const std::size_t tail_sep = terms[t].rfind("::");
+                const std::size_t tail_sep = chain_separator_of(terms[t]);
                 const std::string bare_name =
                     tail_sep == std::string::npos
                         ? terms[t]
@@ -10816,7 +10760,12 @@ export namespace cg::cli
                 {
                     return pretooluse_opportunistic_flush(*choice);
                 }
-                emit_hook_context("PreToolUse", render_candidate_list(*list));
+                emit_hook_context(
+                    "PreToolUse",
+                    append_note_within_budget(
+                        render_candidate_list(*list),
+                        note,
+                        PTU_INJECTION_BUDGET));
                 return 0;
             }
             // 合计超上限：不列清单，只报计数披露行（有输出即注入出口，
@@ -10825,7 +10774,10 @@ export namespace cg::cli
             {
                 emit_hook_context(
                     "PreToolUse",
-                    render_overmatch_disclosure(display_pattern, total));
+                    append_note_within_budget(
+                        render_overmatch_disclosure(display_pattern, total),
+                        note,
+                        PTU_INJECTION_BUDGET));
                 return 0;
             }
             // 多有效 term 且合计 ≤ 上限：多词候选清单。
@@ -10849,23 +10801,33 @@ export namespace cg::cli
                 std::format("{} {}", effective.size(), term_unit);
             emit_hook_context(
                 "PreToolUse",
-                render_multi_lookup_list(display_pattern, terms_note, entries));
+                append_note_within_budget(
+                    render_multi_lookup_list(
+                        display_pattern,
+                        terms_note,
+                        entries),
+                    note,
+                    PTU_INJECTION_BUDGET));
             return 0;
         }
 
         /**
-         * @brief 受限正则路径：一次全表符号名扫描（std::regex 全匹配）+
-         *        既有出口注入。
+         * @brief 受限正则路径：符号名表的两层匹配（先全匹配，零命中再
+         *        部分匹配）+ 既有出口注入。
          *
-         * 只在零存活分支、非纯噪声、开关开启且形态过护栏时被调用。截止
-         * 探针先于一切扫描（含名字物化 SQL）生效；物化按段拉取（段间探
-         * 针可弃置后续段），扫描循环内每 256 名再查一次活探针（内存
-         * vector 上的探针不受"SQL 结果循环跑到 DONE"不变式约束——单次
-         * regex_match 若因护栏漏网形态挂死，只靠段间探针永远执行不到）；
-         * 超过名字长度上限的名字直接跳过（防超长模板实例名把回溯推成
-         * 栈溢出）。命中名走既有查询/渲染出口：唯一名 → 现行唯一/清单
-         * 分流；多名（≤上限）→ 多词清单；超限 → 计数披露行。全部出口
-         * 与交替路径共用（四臂同语义由此保证）。
+         * 只在零存活分支、非纯噪声、开关开启且形态过护栏时被调用。引擎
+         * 构造失败（方言外的形态）即静默。两层匹配与截止探针都在符号名
+         * 表扫描单元里：截止探针先于一切扫描（含名字物化查询）生效，
+         * 物化按段拉取（段间探针可放弃后续段），扫描循环内每 256 名再查
+         * 一次活探针；第二层只在第一层零命中、分开关开启且模式不能匹配
+         * 空串时重扫一遍，超过名字长度上限的名字直接跳过。匹配调用近
+         * 端有一道异常兜底，与入口处的顶层兜底成两道：任何异常都静默
+         * 退出。命中名走既有查询/渲染出口：唯一名 → 现行唯一/清单分流；
+         * 多名（≤上限）→ 多词清单（符号数合计超上限时仍是一行计数披
+         * 露；两者与交替路径共用，四臂同语义由此保证）；超限 → 分级信
+         * 封（命中总数、能原样重查的名字里字典序最小的前几名与一行收
+         * 窄建议）。步数触限的名字按不命中处理，它们的数目不为零时，
+         * 每个注入出口都如实披露；两层都零命中时照旧静默。
          */
         auto run_pretooluse_regex_lookup(
             const Invocation&  inv,
@@ -10882,76 +10844,38 @@ export namespace cg::cli
                 return pretooluse_opportunistic_flush(*choice);
             }
             cg::db::GraphStore store{choice->db, 300};
-            std::regex         re;
+            auto engine = cg::util::regex::Pattern::compile(pattern);
+            if (!engine.has_value())
+            {
+                // 构造失败即静默：方言外的形态。
+                return pretooluse_opportunistic_flush(*choice);
+            }
+            // 两层匹配：第一层全匹配是现行语义；零命中且不能匹配空串才
+            // 按部分匹配重扫一遍。匹配调用近端兜底：引擎一侧抛出的任何
+            // 异常都静默退出。
+            std::optional<NameScan> found;
             try
             {
-                re = std::regex{
-                    pattern,
-                    std::regex::ECMAScript}; // 双保险：护栏漏网的异常形态
-            } // 构造抛错即静默
-            catch (const std::regex_error&)
+                found = match_symbol_names(
+                    store,
+                    *engine,
+                    pretooluse_regex_partial_enabled(),
+                    [&] { return hook_deadline_reached(PTU_QUERY_MARGIN); });
+            }
+            catch (const std::exception&)
             {
                 return pretooluse_opportunistic_flush(*choice);
             }
-            // 分段物化 + 全名扫描（regex_match 全匹配语义，不用
-            // regex_search：性能快一个量级、回溯浅，且与"整条就是一个
-            // 标识符"的准入口径同构）。命中名按 str.id 升序天然去重有序。
-            std::vector<std::string> matched;
-            cg::db::StrId            cursor = 0;
-            cg::db::StrId            prev_id = -1;
-            std::size_t              probed = 0;
-            while (true)
-            {
-                // 段间截止探针：先于每一段物化 SQL，触发即放弃整个正则
-                // 查询（宁漏勿拖）。
-                if (hook_deadline_reached(PTU_QUERY_MARGIN))
-                {
-                    return pretooluse_opportunistic_flush(*choice);
-                }
-                const std::vector<std::pair<cg::db::StrId, std::string>> span =
-                    cg::db::symbol_names_span(
-                        store,
-                        cursor,
-                        PTU_REGEX_SPAN_ROWS);
-                if (span.empty())
-                {
-                    break;
-                }
-                bool advanced = false;
-                for (const auto& [id, name] : span)
-                {
-                    cursor = id;
-                    advanced = true;
-                    if (id == prev_id)
-                    {
-                        continue; // 同名符号共享 str 行：连接产出的相邻重复
-                    }
-                    prev_id = id;
-                    if (name.size() <= PTU_REGEX_NAME_MAX
-                        && std::regex_match(name, re))
-                    {
-                        matched.push_back(name);
-                    }
-                    // 扫描循环内活探针（每 256 名）：护栏漏网的挂死形态
-                    // 也要在探针余量内被放弃。
-                    if (++probed >= 256)
-                    {
-                        probed = 0;
-                        if (hook_deadline_reached(PTU_QUERY_MARGIN))
-                        {
-                            return pretooluse_opportunistic_flush(*choice);
-                        }
-                    }
-                }
-                if (!advanced)
-                {
-                    break;
-                }
-            }
-            if (matched.empty())
+            // 空值：截止探针触发。命中名为空：两层都零命中，或被空串闸
+            // 拦下——即使有名字因步数上限未判定也不注入（宁漏勿拖）。
+            if (!found.has_value() || found->matched.empty())
             {
                 return pretooluse_opportunistic_flush(*choice);
             }
+            const std::string note =
+                render_undetermined_note(found->undetermined);
+            // 命中名按字符串表行号升序天然去重有序。
+            std::vector<std::string> matched = std::move(found->matched);
             if (matched.size() == 1)
             {
                 // 唯一命中名：现行单链出口的同款装载与分流（正则命中的
@@ -10975,7 +10899,10 @@ export namespace cg::cli
                     }
                     emit_hook_context(
                         "PreToolUse",
-                        render_injection_v71(*facts));
+                        append_note_within_budget(
+                            render_injection_v71(*facts),
+                            note,
+                            PTU_INJECTION_BUDGET));
                     return 0;
                 }
                 const auto list =
@@ -10984,17 +10911,36 @@ export namespace cg::cli
                 {
                     return pretooluse_opportunistic_flush(*choice);
                 }
-                emit_hook_context("PreToolUse", render_candidate_list(*list));
+                emit_hook_context(
+                    "PreToolUse",
+                    append_note_within_budget(
+                        render_candidate_list(*list),
+                        note,
+                        PTU_INJECTION_BUDGET));
                 return 0;
             }
             if (matched.size() > PTU_LOOKUP_HITS_MAX)
             {
+                // 能原样重查的命中名：形态过关，且不是噪声词（噪声词当
+                // 模式会被入口丢弃）。
+                std::vector<std::string_view> requeryable;
+                for (const std::string& name : matched)
+                {
+                    if (requeryable_name_shape(name, PTU_REGEX_PATTERN_MAX)
+                        && !is_noise_token(name))
+                    {
+                        requeryable.push_back(name);
+                    }
+                }
                 emit_hook_context(
                     "PreToolUse",
-                    render_overmatch_disclosure(
+                    render_overmatch_envelope(
                         pattern,
                         matched.size(),
-                        "names"));
+                        requeryable,
+                        PTU_LOOKUP_HITS_MAX,
+                        found->undetermined,
+                        PTU_INJECTION_BUDGET));
                 return 0;
             }
             return run_pretooluse_multi_lookup(
@@ -11002,7 +10948,8 @@ export namespace cg::cli
                 matched,
                 pattern,
                 path_filter,
-                "names");
+                "names",
+                found->undetermined);
         }
 
         /**

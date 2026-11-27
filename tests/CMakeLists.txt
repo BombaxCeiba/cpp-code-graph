@@ -26,6 +26,22 @@ if(WIN32 AND TARGET cg_cshost_shims)
             VERBATIM)
     endif()
 endif()
+# 正则匹配层（钩子受限正则路径的引擎）：编译成败与方言边界、全匹配
+# 与部分匹配两种语义、空串试探、与标准库正则的命中集合等价性、步数
+# 上限与移动语义。名字池现场构造，不依赖任何库。
+ccg_add_test(cg_test_regex regex.test.ixx)
+# 符号名表两层扫描（钩子受限正则路径的扫描单元）：两遍各自的命中
+# 集合、空串闸与分开关、步数触限名字的计数、段间与段内截止探针的
+# 干净放弃。名字池现场写进内存库，截止判定注入，不依赖时钟。
+ccg_add_test(cg_test_scan scan.test.ixx)
+# 注入文本的显示截断原语（钩子受限正则路径的超限出口）：分级信封的
+# 首行、名额、字典序前几名、建议行、未判定名字的披露、最坏字节构造
+# 与预算保险丝。名字池现场构造，不碰库。
+ccg_add_test(cg_test_disclose disclose.test.ixx)
+# 符号名形态判定与按名装载（钩子查找路径）：限定链分隔位置（模板
+# 实参里的双冒号不是分隔符）、名字能否原样重查、模板实例名整名装载。
+# 判定是纯字符串函数；装载用内存库里现场写入的符号。
+ccg_add_test(cg_test_lookup lookup.test.ixx)
 # 崩溃守卫单元测试故意制造非法写入（NULL store）并期望
 # 平台守卫捕获它；ASAN 运行会先拦截 SEGV
 # （默认 handle_segv=1）并在守卫介入前就终止，所以唯独
@@ -38,12 +54,13 @@ ccg_add_test(cg_test_clang clang.test.ixx)
 ccg_add_test(cg_test_extract extract.test.ixx)
 ccg_add_test(cg_test_graph graph.test.ixx)
 ccg_add_test(cg_test_cli cli.test.ixx)
-# PreToolUse 正则开关的"回落默认"断言要求进程环境里 CCG_PRETOOLUSE_REGEX
-# 处于未设置或空值态：ctest 显式置空值压过宿主残留——Windows 环境名查找
+# PreToolUse 两个正则开关的"回落默认"断言要求进程环境里
+# CCG_PRETOOLUSE_REGEX 与 CCG_PRETOOLUSE_REGEX_PARTIAL 处于未设置或
+# 空值态：ctest 显式置空值压过宿主残留——Windows 环境名查找
 # 大小写不敏感，宿主 export 过的大小写变体（含小写）一并被覆盖，单测
 # 才不会被先前评测实验留下的环境取值翻转成假红/假绿。
 set_tests_properties(cg_test_cli PROPERTIES ENVIRONMENT
-    "CCG_PRETOOLUSE_REGEX=")
+    "CCG_PRETOOLUSE_REGEX=;CCG_PRETOOLUSE_REGEX_PARTIAL=")
 ccg_add_test(cg_test_incr incr.test.ixx)
 # 动态派发分析（schema v8）：三档传播用例（类型线索/函数内
 # 传播/全局不动点）+ 三个具名 demo + 不动点确定性。

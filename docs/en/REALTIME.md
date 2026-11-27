@@ -328,15 +328,28 @@ design rules:
   unset or any other value falls back to the built-in default, which
   is on — the switch gates only this path, never the
   alternation split) and the re-joined non-noise branches pass the
-  guardrails (length ≤ 64 bytes, no pathological quantifier forms —
-  adjacent quantifiers and any `)` followed by a quantifier such as
-  `(a*)*` or `(a|aa)+` are rejected, and a failing `std::regex`
-  construction is caught), the hook runs one full-table scan of the
-  symbol-name table with full-match semantics (`regex_match`, not
-  `regex_search`), skipping names longer than 128 bytes. A unique
-  matched name takes the five-line/candidate-list exits; 2-5 matched
-  names render the multi-term list; more than 5 disclose the count
-  only.
+  guardrails (length ≤ 64 bytes and not pure decoration; a pattern the
+  PCRE2 engine cannot compile stays silent), the hook matches the
+  symbol-name table in two layers, skipping names longer than 128
+  bytes. The first layer is the long-standing full-match semantics
+  (the name must be covered from its start to its end; not a search).
+  When it finds nothing, the hook probes the pattern against the
+  empty string: a pattern that can match the empty string holds for
+  every name and carries no information, so the query stays silent.
+  Only otherwise, and while `CCG_PRETOOLUSE_REGEX_PARTIAL` allows it,
+  a second scan re-materializes the table and matches with partial
+  semantics (the pattern covers a fragment of the name). Both scans
+  carry the deadline probes. The engine runs in its
+  interpreter tier with an explicit step limit per match: quantifier
+  forms such as `(a*)*` or `(a|aa)+` are admitted, and a name whose
+  match hits the limit counts as a non-match (for an unanchored match
+  the engine restarts the count at every start position); whenever
+  there are such names, every injection exit discloses how many. A
+  unique matched name takes the five-line/candidate-list exits; 2-5
+  matched names render the multi-term list; more than 5 answer with a
+  graded envelope — the hit total, the five lexicographically smallest
+  names that can be re-queried verbatim, and one narrowing hint,
+  inside the same 1400-byte budget.
 - **Selector semantics (2026-10-24).** The stripped pattern runs as a
   selector over the symbol table; only what it selects **uniquely**
   pins the five-line format. Several hits mean the query itself does
@@ -383,15 +396,17 @@ design rules:
   regex path materializes the name table in segments (20 000 rows per
   segment; a probe between segments can abandon the rest) after a
   probe that precedes any scan SQL, and the in-memory scan loop probes
-  again every 256 names — one logical full-table scan per event, never
-  more. No
+  again every 256 names — at most two logical full-table scans per
+  event, the second only when the first finds nothing, never more. No
   dedup across events is needed because one search maps to at most one
   injection; within a render, duplicate same-name/caller entries are
   impossible by construction (they are keyed by symbol).
 - **Silent exits piggyback the digest (Opportunistic).** Every silent
   exit — zero hits, an extraction gate declining, a deadline probe, a
   malformed payload, the regex switch off or its guardrails declining,
-  any tool outside the four search arms, and every
+  a pattern that matches the empty string held back by the empty-string
+  probe, a first layer that found nothing while the second-layer switch
+  is off, any tool outside the four search arms, and every
   Read/Glob call (delivery-only carriers: no intent extraction, no
   symbol query, the delivery check runs before anything the search
   arms pay) — attempts one `hook_digest_flush(Opportunistic)` with the
@@ -401,10 +416,10 @@ design rules:
   an unconverged queue, or an empty backlog all return at zero cost,
   and the drain child process is Poll-mode-only behavior that never
   happens here. Any exit that produces an injection envelope — the
-  five-line block, the candidate list, the multi-term list, or the
-  over-match count line — does not piggyback: the
-  1400-byte injection envelope stays unmixed and the backlog waits for
-  the next silent exit. Successful deliveries leave a
+  five-line block, the candidate list, the multi-term list, the
+  over-match count line, or the graded over-match envelope — does not
+  piggyback: the 1400-byte injection envelope stays unmixed and the
+  backlog waits for the next silent exit. Successful deliveries leave a
   `flushed-pretooluse-*` marker (24 h aging) whose count surfaces as
   `digest.preToolUseFlushes` in `ccg hook status --json`; the only
   relaxation of read-onlyness is claiming/deleting journal files on
@@ -485,6 +500,13 @@ posttooluse` handler therefore never lets the refresh block the session:
   differently-cased variant (for example an all-lowercase spelling)
   takes effect as well — set exactly one spelling and do not export
   case variants.
+- `CCG_PRETOOLUSE_REGEX_PARTIAL` gates the second layer of the
+  restricted regex path (§3.2): `1` enables it, `0` disables it (the
+  path then stops after the full-match scan, the behaviour of a
+  single-layer build), and an unset or any other value falls back to
+  the built-in default (enabled). It is read and cached exactly like
+  `CCG_PRETOOLUSE_REGEX`, and it has no effect while that switch is
+  off.
 - On POSIX, `execv` failure in the spawned child is reported back
   through a close-on-exec sentinel pipe (and, absent the pipe, a
   conservative `exit 127 + empty output` check). The handler then takes

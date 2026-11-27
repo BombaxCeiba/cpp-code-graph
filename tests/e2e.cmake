@@ -994,7 +994,10 @@ execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=0"
 expect_rc(0 "pretooluse alternation ignores the regex switch")
 expect_out("matched 3 symbols across 2 terms" "pretooluse alternation ignores the regex switch")
 
-# n8 全名命中超限：\w+ 命中名 >5 → 计数披露行（names 口径），无清单条目。
+# n8 全名命中超限：\w+ 命中名 >5 → 分级信封——恰好五个名字条目在场、
+# 不带计数行。信封文案是中文，CMake 的 OUTPUT_VARIABLE 按
+# 控制台代码页解码，中文可能被整体弄乱，故只断言 ASCII 片段；
+# 逐字节锁定归注入字节锁闸门（tests/fixtures/injection）。
 file(WRITE "${work}/hook-prtu-ml-wide.json"
      "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"\\\\w+\"}}")
 execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1"
@@ -1002,12 +1005,30 @@ execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1"
     INPUT_FILE "${work}/hook-prtu-ml-wide.json"
     RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
     OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
-expect_rc(0 "pretooluse regex overmatch discloses count")
-expect_out("too many to list" "pretooluse regex overmatch discloses count")
-string(FIND "${out}" "names" _ml_names_pos)
-string(FIND "${out}" "[ccg] - " _ml_entry_pos)
-if(_ml_names_pos EQUAL -1 OR NOT _ml_entry_pos EQUAL -1)
-    message(FATAL_ERROR "e2e [pretooluse regex overmatch discloses count]: expected a names count line without list entries, saw:\n${out}")
+expect_rc(0 "pretooluse regex overmatch answers with the graded envelope")
+string(REGEX MATCHALL "\\[ccg\\] - " _ml_entries "${out}")
+list(LENGTH _ml_entries _ml_entry_count)
+string(FIND "${out}" "too many to list" _ml_count_pos)
+if(NOT _ml_entry_count EQUAL 5 OR NOT _ml_count_pos EQUAL -1)
+    message(FATAL_ERROR "e2e [pretooluse regex overmatch answers with the graded envelope]: expected five name entries and no count line, saw:\n${out}")
+endif()
+
+# n8b 多词路径的超限出口不动：area|scale|describe 三个标识符分支的
+# 合计命中符号数超过列名上限，仍以一行计数披露作答（符号数口径），
+# 没有名字条目。
+file(WRITE "${work}/hook-prtu-ml-overwide.json"
+     "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"area|scale|describe\"}}")
+execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1"
+    "${exe}" hook pretooluse -o "${work}" --config rtml
+    INPUT_FILE "${work}/hook-prtu-ml-overwide.json"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+expect_rc(0 "pretooluse multi-term overmatch keeps the count line")
+expect_out("matched 6 symbols " "pretooluse multi-term overmatch keeps the count line")
+expect_out("too many to list; narrow the pattern" "pretooluse multi-term overmatch keeps the count line")
+string(FIND "${out}" "[ccg] - " _ml_over_entry_pos)
+if(NOT _ml_over_entry_pos EQUAL -1)
+    message(FATAL_ERROR "e2e [pretooluse multi-term overmatch keeps the count line]: expected a count line without list entries, saw:\n${out}")
 endif()
 
 # n9 fixed 字面含竖线：字面语义绝不拆交替。
@@ -1034,20 +1055,23 @@ if(NOT out STREQUAL "")
     message(FATAL_ERROR "e2e [pretooluse powershell fixed pipe stays silent]: expected zero output, saw:\n${out}")
 endif()
 
-# n11 真病态形态（嵌套量词，第三道机械护栏的靶）：黑盒下"护栏拒"与
-# "零命中静默"同观感，用例价值=真病态载荷走全管线不崩不挂；形态鉴
-# 别由单测承担。
-file(WRITE "${work}/hook-prtu-ml-patho.json"
-     "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"(a*)*\"}}")
-execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1"
-    "${exe}" hook pretooluse -o "${work}" --config rtml
-    INPUT_FILE "${work}/hook-prtu-ml-patho.json"
-    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
-    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
-expect_rc(0 "pretooluse pathological regex stays silent")
-if(NOT out STREQUAL "")
-    message(FATAL_ERROR "e2e [pretooluse pathological regex stays silent]: expected zero output, saw:\n${out}")
-endif()
+# n11 病态形态（嵌套量词）：护栏放行量词形态，载荷一路走到引擎，
+# 由步数上限兜底。用例价值=真病态载荷走全管线不崩不挂、静默退出；
+# 每次调用设 30 秒上限，挂死在闸门内以超时暴露，不拖垮整套测试。
+foreach(_patho IN ITEMS "(a*)*" "(a+)+[bc]" "(a|aa)+[bc]")
+    file(WRITE "${work}/hook-prtu-ml-patho.json"
+         "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"${_patho}\"}}")
+    execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1"
+        "${exe}" hook pretooluse -o "${work}" --config rtml
+        INPUT_FILE "${work}/hook-prtu-ml-patho.json"
+        RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE
+        TIMEOUT 30)
+    expect_rc(0 "pretooluse pathological regex stays silent (${_patho})")
+    if(NOT out STREQUAL "")
+        message(FATAL_ERROR "e2e [pretooluse pathological regex stays silent]: expected zero output for ${_patho}, saw:\n${out}")
+    endif()
+endforeach()
 
 # n12 长度护栏：65 字节正则零输出。
 file(WRITE "${work}/hook-prtu-ml-long.json"
@@ -1088,6 +1112,251 @@ execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1"
     OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
 expect_rc(0 "pretooluse bash regex injects")
 expect_out("[ccg] shape::Circle::radius(" "pretooluse bash regex injects")
+
+# n15 量词形态放行：带量词的分组、带量词的可选分组、惰性量词与内联
+# 不区分大小写标记都走到引擎；符号名表存的是裸名，全匹配下四条都唯一
+# 命中 radius，注入与 n4 同款五行。
+foreach(_shape IN ITEMS
+        "(radius)+"
+        "rad(ius)?"
+        "rad.*?us"
+        "(?i)RADIUS")
+    file(WRITE "${work}/hook-prtu-ml-shape.json"
+         "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"${_shape}\"}}")
+    execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1"
+        "${exe}" hook pretooluse -o "${work}" --config rtml
+        INPUT_FILE "${work}/hook-prtu-ml-shape.json"
+        RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE
+        TIMEOUT 30)
+    expect_rc(0 "pretooluse quantifier shape injects (${_shape})")
+    expect_out("[ccg] shape::Circle::radius(" "pretooluse quantifier shape injects (${_shape})")
+endforeach()
+
+# n16 方言外的形态仍静默：编译失败与零命中的观感相同，走完全管线。
+file(WRITE "${work}/hook-prtu-ml-dialect.json"
+     "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"\\\\qradius\"}}")
+execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1"
+    "${exe}" hook pretooluse -o "${work}" --config rtml
+    INPUT_FILE "${work}/hook-prtu-ml-dialect.json"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE
+    TIMEOUT 30)
+expect_rc(0 "pretooluse out-of-dialect regex stays silent")
+if(NOT out STREQUAL "")
+    message(FATAL_ERROR "e2e [pretooluse out-of-dialect regex stays silent]: expected zero output, saw:\n${out}")
+endif()
+
+# n17 第二层（部分匹配）救活到单链出口：unused_hel[p] 全匹配零命中，
+# 部分匹配唯一命中 unused_helper，注入与 n4 同款五行。
+file(WRITE "${work}/hook-prtu-ml-partial1.json"
+     "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"unused_hel[p]\"}}")
+execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1"
+    "${exe}" hook pretooluse -o "${work}" --config rtml
+    INPUT_FILE "${work}/hook-prtu-ml-partial1.json"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+expect_rc(0 "pretooluse partial layer rescues a unique name into the five-line block")
+expect_out("[ccg] shape::unused_helper(" "pretooluse partial layer rescues a unique name into the five-line block")
+
+# n18a 第二层救活到列名清单：_al.$ 命中 area_all、render_all 两名，
+# 多词清单（names 口径，与 n4b 同一张渲染出口）。
+file(WRITE "${work}/hook-prtu-ml-partial2.json"
+     "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"_al.$\"}}")
+execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1"
+    "${exe}" hook pretooluse -o "${work}" --config rtml
+    INPUT_FILE "${work}/hook-prtu-ml-partial2.json"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+expect_rc(0 "pretooluse partial layer answers with the multi-name list")
+expect_out("matched 2 symbols across 2 names" "pretooluse partial layer answers with the multi-name list")
+expect_out("[ccg] - app::area_all" "pretooluse partial layer answers with the multi-name list")
+expect_out("[ccg] - app::render_all" "pretooluse partial layer answers with the multi-name list")
+
+# n18b 第二层救活到分级信封：[aeiou] 命中名超过列名上限，恰好五个名字
+# 条目、旧英文计数行不在场（口径同 n8）。
+file(WRITE "${work}/hook-prtu-ml-partial3.json"
+     "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"[aeiou]\"}}")
+execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1"
+    "${exe}" hook pretooluse -o "${work}" --config rtml
+    INPUT_FILE "${work}/hook-prtu-ml-partial3.json"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+expect_rc(0 "pretooluse partial layer answers with the graded envelope")
+string(REGEX MATCHALL "\\[ccg\\] - " _pl_entries "${out}")
+list(LENGTH _pl_entries _pl_entry_count)
+string(FIND "${out}" "too many to list" _pl_count_pos)
+if(NOT _pl_entry_count EQUAL 5 OR NOT _pl_count_pos EQUAL -1)
+    message(FATAL_ERROR "e2e [pretooluse partial layer answers with the graded envelope]: expected five name entries and no count line, saw:\n${out}")
+endif()
+
+# n19 能匹配空串的模式保持静默：空串试探闸在前，第二层不扫。十一条
+# 覆盖行过滤写法（行尾数字串、行首数字串、行首可选引号）与各类可空
+# 构造（数字类星号、可选字符、空白类星号、补类星号、含空分支的交替、
+# 可选分组、带星号的分组）；它们在本夹具上第一层零命中。
+# CMake 串里的反斜杠转义两层（CMake 一层、JSON 一层：\\\\d 写出 JSON 的
+# \\d），引号各转义一层（\\\" 写出 JSON 的 \"）。断言标签只带序号：模式
+# 原文含引号与反斜杠，进宏参数会被当成转义序列重解释。
+set(_empty_index 0)
+foreach(_empty IN ITEMS "[0-9.]*$" "^[0-9]*" "^\\\"?" "\\\\d*" "\\\\d?" "7?" "\\\\s*" "\\\\W*" "(zzqq|)?" "(foo)?" "(?:zzqq)*")
+    math(EXPR _empty_index "${_empty_index}+1")
+    file(WRITE "${work}/hook-prtu-ml-empty.json"
+         "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"${_empty}\"}}")
+    execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1"
+        "${exe}" hook pretooluse -o "${work}" --config rtml
+        INPUT_FILE "${work}/hook-prtu-ml-empty.json"
+        RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE
+        TIMEOUT 30)
+    expect_rc(0 "pretooluse empty-matching regex stays silent (pattern ${_empty_index} of 11)")
+    if(NOT out STREQUAL "")
+        message(FATAL_ERROR "e2e [pretooluse empty-matching regex stays silent]: expected zero output for pattern ${_empty} (number ${_empty_index}), saw:\n${out}")
+    endif()
+endforeach()
+
+# n20 第二层分开关关闭即回到单层：第二层载荷零输出；第一层不受影响
+# （n4 的载荷照常注入）。
+execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1" "CCG_PRETOOLUSE_REGEX_PARTIAL=0"
+    "${exe}" hook pretooluse -o "${work}" --config rtml
+    INPUT_FILE "${work}/hook-prtu-ml-partial1.json"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+expect_rc(0 "pretooluse partial switch off keeps the second layer silent")
+if(NOT out STREQUAL "")
+    message(FATAL_ERROR "e2e [pretooluse partial switch off keeps the second layer silent]: expected zero output, saw:\n${out}")
+endif()
+execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1" "CCG_PRETOOLUSE_REGEX_PARTIAL=0"
+    "${exe}" hook pretooluse -o "${work}" --config rtml
+    INPUT_FILE "${work}/hook-prtu-ml-regex.json"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+expect_rc(0 "pretooluse partial switch off leaves the first layer intact")
+expect_out("[ccg] shape::Circle::radius(" "pretooluse partial switch off leaves the first layer intact")
+
+# n21 总开关优先于第二层开关；第二层开关取垃圾值时回落默认（开启）。
+execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=0" "CCG_PRETOOLUSE_REGEX_PARTIAL=1"
+    "${exe}" hook pretooluse -o "${work}" --config rtml
+    INPUT_FILE "${work}/hook-prtu-ml-partial1.json"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+expect_rc(0 "pretooluse master switch off overrides the partial switch")
+if(NOT out STREQUAL "")
+    message(FATAL_ERROR "e2e [pretooluse master switch off overrides the partial switch]: expected zero output, saw:\n${out}")
+endif()
+execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1" "CCG_PRETOOLUSE_REGEX_PARTIAL=yes"
+    "${exe}" hook pretooluse -o "${work}" --config rtml
+    INPUT_FILE "${work}/hook-prtu-ml-partial1.json"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+expect_rc(0 "pretooluse partial switch garbage value falls back to enabled default")
+expect_out("[ccg] shape::unused_helper(" "pretooluse partial switch garbage value falls back to enabled default")
+
+# n22 截止探针触发即干净放弃：总预算压到 1 毫秒，探针在扫描之前必然
+# 触发，第二层载荷零输出、退出 0。扫描中途的两个探针点（段间、每
+# 256 名）由扫描单元的单元测试按探针调用序号钉住。
+execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1" "CCG_HOOK_TOTAL_BUDGET_MS=1"
+    "${exe}" hook pretooluse -o "${work}" --config rtml
+    INPUT_FILE "${work}/hook-prtu-ml-partial1.json"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+expect_rc(0 "pretooluse deadline probe abandons the two-layer match silently")
+if(NOT out STREQUAL "")
+    message(FATAL_ERROR "e2e [pretooluse deadline probe abandons the two-layer match silently]: expected zero output, saw:\n${out}")
+endif()
+
+# ---------------- 名字形态与步数上限披露（注入字节锁的语料库副本）---------
+# 注入字节锁的语料库另索引一份：delta 目录里有模板实例名
+# Box<delta::Item>、一组重载运算符、一个步数上限之内判不完的长名字。
+# 这里只断言 ASCII 片段（信封与披露行的中文文案逐字节锁定归注入字节
+# 锁闸门）。
+file(COPY "${CMAKE_CURRENT_LIST_DIR}/fixtures/injection/corpus/" DESTINATION "${work}/rdl")
+ccg_run(index "${work}/rdl" -o "${work}" --config rdl)
+expect_rc(0 "index the injection corpus for the name shape cases")
+
+# n23 信封名额只给能原样重查的名字：模式命中七个普通名字与 operator()
+# （名字带圆括号，原样重查匹配不到自身），条目里只有普通名字、恰好五个。
+file(WRITE "${work}/hook-prtu-rdl-mixed.json"
+     "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"(.+)(.+)(zzq[0-9]|or\\\\()\"}}")
+execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1"
+    "${exe}" hook pretooluse -o "${work}" --config rdl
+    INPUT_FILE "${work}/hook-prtu-rdl-mixed.json"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+expect_rc(0 "pretooluse envelope head skips names that cannot be re-queried")
+expect_out("[ccg] - dv_zzq0tail" "pretooluse envelope head skips names that cannot be re-queried")
+string(REGEX MATCHALL "\\[ccg\\] - " _rdl_entries "${out}")
+list(LENGTH _rdl_entries _rdl_entry_count)
+string(FIND "${out}" "operator" _rdl_operator_pos)
+string(FIND "${out}" "dv_zzq5tail" _rdl_sixth_pos)
+if(NOT _rdl_entry_count EQUAL 5 OR NOT _rdl_operator_pos EQUAL -1 OR NOT _rdl_sixth_pos EQUAL -1)
+    message(FATAL_ERROR "e2e [pretooluse envelope head skips names that cannot be re-queried]: expected five plain names and no operator name, saw:\n${out}")
+endif()
+
+# n24 一个能原样重查的名字都没有（命中的六个运算符名都带正则特殊字符：
+# 加号、星号、圆括号、方括号、竖线、脱字符）：信封只有首行与建议行，
+# 没有名字条目。
+file(WRITE "${work}/hook-prtu-rdl-nodirect.json"
+     "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"(?<=oper)ator[+*()\\\\[\\\\]|^]\"}}")
+execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1"
+    "${exe}" hook pretooluse -o "${work}" --config rdl
+    INPUT_FILE "${work}/hook-prtu-rdl-nodirect.json"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+expect_rc(0 "pretooluse envelope without a re-queryable name lists nothing")
+string(REGEX MATCHALL "\\[ccg\\] " _rdl_lines "${out}")
+list(LENGTH _rdl_lines _rdl_line_count)
+string(FIND "${out}" "[ccg] - " _rdl_entry_pos)
+if(NOT _rdl_line_count EQUAL 2 OR NOT _rdl_entry_pos EQUAL -1)
+    message(FATAL_ERROR "e2e [pretooluse envelope without a re-queryable name lists nothing]: expected two lines and no name entry, saw:\n${out}")
+endif()
+
+# n25 模板实例名整名装载：尖括号里的双冒号不是限定链分隔符。模式原样
+# 是这个名字（第一层全匹配）与名字片段（第二层）都注入它的身份行。
+foreach(_template IN ITEMS "Box<delta::Item>" "Box<delta::Item")
+    file(WRITE "${work}/hook-prtu-rdl-template.json"
+         "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"${_template}\"}}")
+    execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1"
+        "${exe}" hook pretooluse -o "${work}" --config rdl
+        INPUT_FILE "${work}/hook-prtu-rdl-template.json"
+        RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+    expect_rc(0 "pretooluse template instance name loads as a whole (${_template})")
+    expect_out("[ccg] delta::Box<delta::Item>" "pretooluse template instance name loads as a whole (${_template})")
+endforeach()
+
+# n26 步数上限披露：同一模式另有名字判不完时，唯一名出口在五行块之后、
+# 多名出口在清单之后各多一行披露（中文，只数行）。(.+)(.+)solo_ 命中
+# x_solo_tail 一个名字，(.+)(.+)tri_ 命中三个名字，两者都判不完长名字
+# azqsolo_…；判不完的名字在 (.+)(.+)tri_ 下同样触限。
+file(WRITE "${work}/hook-prtu-rdl-solo.json"
+     "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"(.+)(.+)solo_\"}}")
+execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1"
+    "${exe}" hook pretooluse -o "${work}" --config rdl
+    INPUT_FILE "${work}/hook-prtu-rdl-solo.json"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+expect_rc(0 "pretooluse single-name exit discloses undetermined names")
+expect_out("[ccg] delta::x_solo_tail(" "pretooluse single-name exit discloses undetermined names")
+string(REGEX MATCHALL "\\[ccg\\] " _rdl_solo_lines "${out}")
+list(LENGTH _rdl_solo_lines _rdl_solo_line_count)
+if(NOT _rdl_solo_line_count EQUAL 5)
+    message(FATAL_ERROR "e2e [pretooluse single-name exit discloses undetermined names]: expected the four fact lines plus one disclosure line, saw:\n${out}")
+endif()
+file(WRITE "${work}/hook-prtu-rdl-tri.json"
+     "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"(.+)(.+)tri_\"}}")
+execute_process(COMMAND ${CMAKE_COMMAND} -E env "CCG_PRETOOLUSE_REGEX=1"
+    "${exe}" hook pretooluse -o "${work}" --config rdl
+    INPUT_FILE "${work}/hook-prtu-rdl-tri.json"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+expect_rc(0 "pretooluse multi-name exit discloses undetermined names")
+expect_out("matched 3 symbols across 3 names" "pretooluse multi-name exit discloses undetermined names")
+expect_out("[ccg] - delta::dv_tri_1" "pretooluse multi-name exit discloses undetermined names")
+string(REGEX MATCHALL "\\[ccg\\] " _rdl_tri_lines "${out}")
+list(LENGTH _rdl_tri_lines _rdl_tri_line_count)
+if(NOT _rdl_tri_line_count EQUAL 6)
+    message(FATAL_ERROR "e2e [pretooluse multi-name exit discloses undetermined names]: expected five list lines plus one disclosure line, saw:\n${out}")
+endif()
 
 # 超时路径：1 毫秒内部预算强制走分离分支。
 # 更新子进程继续在后台跑（不会被杀）；

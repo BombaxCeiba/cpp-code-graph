@@ -19,6 +19,78 @@
       "pattern": "lookup",
       "path": "beta",
       "expect": "[ccg] Beta::lookup(int) — function of Beta\n[ccg] def: beta/lookup.cpp:6:5\n[ccg] same-name(1): Alpha::lookup @alpha/lookup.cpp:6 — hits at those coords belong to other symbols, not this one\n[ccg] callers(top3): 0 edges in call graph for this exact symbol; answer with no callers for it. Grep call-shape rows like x->lookup(...) or y.lookup(...) invoke the 1 other same-name symbols' impls (see same-name line), not this one\n[ccg] dispatch: none (direct calls only)"
+    },
+    {
+      "id": "regex-unique",
+      "mode": "regex",
+      "pattern": "note_cr\\w+",
+      "expect": "[ccg] Gamma::note_create(void) — function of Gamma\n[ccg] def: gamma/notes.cpp:6:9\n[ccg] callers(top3): 0 edges in call graph for this exact symbol; answer with no callers for it. Grep hits are only this symbol's own definition/declaration lines — a header declaration is not a call site\n[ccg] dispatch: none (direct calls only)"
+    },
+    {
+      "id": "regex-overmatch",
+      "mode": "envelope",
+      "pattern": "note_\\w+",
+      "expect": "[ccg] \"note_\\w+\" 匹配 8 个符号名，数量过多不逐条列出；能原样重查的名字里字典序最小的 5 个：\n[ccg] - note_create\n[ccg] - note_edit\n[ccg] - note_erase\n[ccg] - note_find\n[ccg] - note_list\n[ccg] 收窄建议：给 \"note_\\w+\" 加一段更长的字面片段（例如把 \\w+ 写成 run_\\w+）后重查，或从上面挑一个名字原样重查"
+    },
+    {
+      "id": "regex-partial-unique",
+      "mode": "regex-partial",
+      "pattern": "no.e_c",
+      "expect": "[ccg] Gamma::note_create(void) — function of Gamma\n[ccg] def: gamma/notes.cpp:6:9\n[ccg] callers(top3): 0 edges in call graph for this exact symbol; answer with no callers for it. Grep hits are only this symbol's own definition/declaration lines — a header declaration is not a call site\n[ccg] dispatch: none (direct calls only)"
+    },
+    {
+      "id": "regex-partial-list",
+      "mode": "regex-partial-list",
+      "pattern": "note_[ef]",
+      "expect": "[ccg] \"note_[ef]\" matched 3 symbols across 3 names — candidates by references:\n[ccg] - Gamma::note_edit — function, 0 refs @gamma/notes.cpp:8\n[ccg] - Gamma::note_erase — function, 0 refs @gamma/notes.cpp:10\n[ccg] - Gamma::note_find — function, 0 refs @gamma/notes.cpp:12\n[ccg] re-grep with one term to pin its facts"
+    },
+    {
+      "id": "regex-partial-envelope",
+      "mode": "regex-partial-envelope",
+      "pattern": "note_\\w",
+      "expect": "[ccg] \"note_\\w\" 匹配 8 个符号名，数量过多不逐条列出；能原样重查的名字里字典序最小的 5 个：\n[ccg] - note_create\n[ccg] - note_edit\n[ccg] - note_erase\n[ccg] - note_find\n[ccg] - note_list\n[ccg] 收窄建议：给 \"note_\\w\" 加一段更长的字面片段（例如把 \\w+ 写成 run_\\w+）后重查，或从上面挑一个名字原样重查"
+    },
+    {
+      "id": "regex-envelope-direct",
+      "mode": "envelope",
+      "pattern": "operato[r]",
+      "expect": "[ccg] \"operato[r]\" 匹配 12 个符号名，数量过多不逐条列出；能原样重查的名字里字典序最小的 5 个：\n[ccg] - operator!=\n[ccg] - operator-=\n[ccg] - operator<\n[ccg] - operator<<\n[ccg] - operator==\n[ccg] 收窄建议：给 \"operato[r]\" 加一段更长的字面片段（例如把 \\w+ 写成 run_\\w+）后重查，或从上面挑一个名字原样重查"
+    },
+    {
+      "id": "regex-envelope-no-direct",
+      "mode": "envelope",
+      "pattern": "(?<=oper)ator[+*()\\[\\]|^]",
+      "expect": "[ccg] \"(?<=oper)ator[+*()\\[\\]|^]\" 匹配 7 个符号名，数量过多不逐条列出；没有能原样重查的名字。\n[ccg] 收窄建议：给 \"(?<=oper)ator[+*()\\[\\]|^]\" 加一段更长的字面片段（例如把 \\w+ 写成 run_\\w+）后重查"
+    },
+    {
+      "id": "regex-unique-template",
+      "mode": "regex",
+      "pattern": "Box<delta::Item>",
+      "expect": "[ccg] delta::Box<delta::Item>(void) — record of delta\n[ccg] def: delta/delta.cpp:6:21\n[ccg] callers(top3): 0 edges in call graph for this exact symbol; answer with no callers for it. Grep hits are only this symbol's own definition/declaration lines — a header declaration is not a call site\n[ccg] dispatch: none (direct calls only)"
+    },
+    {
+      "id": "regex-partial-unique-template",
+      "mode": "regex-partial",
+      "pattern": "Box<delta::Item",
+      "expect": "[ccg] delta::Box<delta::Item>(void) — record of delta\n[ccg] def: delta/delta.cpp:6:21\n[ccg] callers(top3): 0 edges in call graph for this exact symbol; answer with no callers for it. Grep hits are only this symbol's own definition/declaration lines — a header declaration is not a call site\n[ccg] dispatch: none (direct calls only)"
+    },
+    {
+      "id": "regex-partial-envelope-undetermined",
+      "mode": "regex-partial-envelope",
+      "pattern": "(.+)(.+)(zzq[0-9]|or\\()",
+      "expect": "[ccg] \"(.+)(.+)(zzq[0-9]|or\\()\" 匹配 8 个符号名（另有 1 个名字因步数上限未判定），数量过多不逐条列出；能原样重查的名字里字典序最小的 5 个：\n[ccg] - dv_zzq0tail\n[ccg] - dv_zzq1tail\n[ccg] - dv_zzq2tail\n[ccg] - dv_zzq3tail\n[ccg] - dv_zzq4tail\n[ccg] 收窄建议：给 \"(.+)(.+)(zzq[0-9]|or\\()\" 加一段更长的字面片段（例如把 \\w+ 写成 run_\\w+）后重查，或从上面挑一个名字原样重查"
+    },
+    {
+      "id": "regex-partial-unique-undetermined",
+      "mode": "regex-partial",
+      "pattern": "(.+)(.+)solo_",
+      "expect": "[ccg] delta::x_solo_tail(void) — function of delta\n[ccg] def: delta/delta.cpp:24:9\n[ccg] callers(top3): 0 edges in call graph for this exact symbol; answer with no callers for it. Grep hits are only this symbol's own definition/declaration lines — a header declaration is not a call site\n[ccg] dispatch: none (direct calls only)\n[ccg] 另有 1 个名字因步数上限未判定，没有计入"
+    },
+    {
+      "id": "regex-partial-list-undetermined",
+      "mode": "regex-partial-list",
+      "pattern": "(.+)(.+)tri_",
+      "expect": "[ccg] \"(.+)(.+)tri_\" matched 3 symbols across 3 names — candidates by references:\n[ccg] - delta::dv_tri_1 — function, 0 refs @delta/delta.cpp:26\n[ccg] - delta::dv_tri_2 — function, 0 refs @delta/delta.cpp:28\n[ccg] - delta::dv_tri_3 — function, 0 refs @delta/delta.cpp:30\n[ccg] re-grep with one term to pin its facts\n[ccg] 另有 1 个名字因步数上限未判定，没有计入"
     }
   ]
 }

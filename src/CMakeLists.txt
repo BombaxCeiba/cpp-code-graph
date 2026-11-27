@@ -57,6 +57,8 @@ ccg_add_modules(cg_core "${CMAKE_CURRENT_SOURCE_DIR}"
     util/util.treesit.ixx
     util/util.cshost.ixx
     util/util.shellscan.ixx
+    util/util.pcre2.ixx
+    util/util.regex.ixx
     db/db.tables.core.ixx
     db/db.tables.graph.ixx
     db/db.tables.sites.ixx
@@ -161,6 +163,9 @@ ccg_add_modules(cg_core "${CMAKE_CURRENT_SOURCE_DIR}"
     cli/cli.render.stats.ixx
     cli/cli.render.changes.ixx
     cli/cli.render.ixx
+    cli/cli.lookup.name.ixx
+    cli/cli.render.disclose.ixx
+    cli/cli.scan.names.ixx
     cli/cli.layout.ixx
     cli/cli.commands.matchers.ixx
     cli/cli.commands.runs.ixx
@@ -186,6 +191,9 @@ target_link_libraries(cg_core PUBLIC
     # 的 bash_language 链接期解析语法库符号 tree_sitter_bash）。
     cg::treesitter
     cg::treesitter_bash
+    # 钩子受限正则路径的匹配引擎：再导出单元在全局模块片段包含
+    # 引擎头文件，头文件路径与静态链接宏经目标公开。
+    cg::pcre2
     sqlpp23::sqlite3_module
     cpp_yyjson::cpp_yyjson)
 if(MSVC)
