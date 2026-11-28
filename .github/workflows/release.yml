@@ -212,12 +212,25 @@ jobs:
           $lines | Out-File dist/SHA256SUMS.txt -Encoding ascii
           $lines | Out-Host
 
-      - name: Upload artifacts
+      # Two independent artifacts: a downloader wanting only the installer
+      # or only the portable build no longer has to fetch both out of one
+      # combined archive. SHA256SUMS.txt covers both files, so a copy rides
+      # with each artifact (verify with --ignore-missing for the file at
+      # hand).
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ccg-release
+          name: ccg-setup
           path: |
             dist/ccg-setup-*.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccg-portable
+          path: |
             dist/ccg-portable-*.zip
             dist/SHA256SUMS.txt
           if-no-files-found: error
